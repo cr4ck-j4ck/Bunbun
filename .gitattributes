@@ -1,2 +1,25 @@
-# Auto detect text files and perform LF normalization
+# Normalise text to LF in the repo; check out with the platform default.
 * text=auto
+
+# Shell scripts must keep LF or Git Bash / CI runners fail on them.
+*.sh    text eol=lf
+*.py    text eol=lf
+# Windows-only files keep CRLF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+*.rc    text eol=crlf
+*.manifest text eol=crlf
+
+# Binary assets
+*.ico   binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.webp  binary
+*.dll   binary
+*.exe   binary
+
+# Generated files: collapse in diffs.
+src/island/default_settings.inc linguist-generated=true
+settings-ui/src/schema.json     linguist-generated=true

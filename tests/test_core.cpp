@@ -1,0 +1,172 @@
+// Bunbun — unit tests for the JSON library, the Claude Code hook installer and
+// Bun's assistant parser.
+// Build + run: ./tests/run.sh   (uses a throwaway CLAUDE_CONFIG_DIR)
+#include <windows.h>
+
+#include <cstdio>
+#include <string>
+
+#include "../src/agents/hook_installer.h"
+#include "../src/assistant/assistant.h"
+#include "../src/common/json.h"
+
+using bb::json::Value;
+
+static int g_failed = 0;
+#define CHECK(cond)                                                     \
+    do {                                                                \
+        if (!(cond)) {                                                  \
+            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
+            ++g_failed;                                                 \
+        }                                                               \
+    } while (0)
+
+static std::string ReadAll(const std::wstring& path) {
+    std::string s;
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return s;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
+    fclose(f);
+    return s;
+}
+
+static void WriteAll(const std::wstring& path, const std::string& s) {
+    FILE* f = _wfopen(path.c_str(), L"wb");
+    fwrite(s.data(), 1, s.size(), f);
+    fclose(f);
+}
+
+static void TestJson() {
+    Value v;
+    CHECK(bb::json::Parse(R"J({"a":1,"b":[true,false,null],"c":"x\"y\u00e9\n","d":{"e":-1.5e3}})J", &v));
+    CHECK(v.getNumber("a") == 1);
+    CHECK(v.find("b")->arr.size() == 3);
+    CHECK(v.getString("c") == "x\"y\xC3\xA9\n");
+    CHECK(v.find("d")->getNumber("e") == -1500);
+    // Round trip keeps key order and number text.
+    CHECK(bb::json::Serialize(v) == R"J({"a":1,"b":[true,false,null],"c":"x\"y)J" "\xC3\xA9" R"J(\n","d":{"e":-1.5e3}})J");
+    // Surrogate pair.
+    CHECK(bb::json::Parse("\"\\ud83d\\udc30\"", &v) && v.str == "\xF0\x9F\x90\xB0");
+    // Strictness: these must all be rejected.
+    for (const char* bad : {"{", "{\"a\":}", "[1,]", "{'a':1}", "01", "1.", "\"\x01\"", "{\"a\":1} x", "nul"}) {
+        CHECK(!bb::json::Parse(bad, &v));
+    }
+    // BOM is tolerated.
+    CHECK(bb::json::Parse("\xEF\xBB\xBF{}", &v) && v.isObject());
+}
+
+static void TestInstaller(const std::wstring& dir) {
+    const std::wstring path = dir + L"\\settings.json";
+    SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", dir.c_str());
+    CHECK(bb::hooks::ClaudeSettingsPath() == path);
+
+    // Existing user config with an unrelated hook and other keys.
+    WriteAll(path, R"J({
+  "model": "opus",
+  "permissions": {"allow": ["Bash(ls)"]},
+  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "my-linter"}]}]}
+})J");
+    std::wstring report;
+    CHECK(!bb::hooks::ClaudeHooksInstalled());
+    CHECK(bb::hooks::InstallClaudeHooks(&report));
+    CHECK(bb::hooks::ClaudeHooksInstalled());
+
+    Value root;
+    CHECK(bb::json::Parse(ReadAll(path), &root));
+    CHECK(root.getString("model") == "opus");
+    CHECK(root.find("permissions") != nullptr);
+    const Value* pre = root.find("hooks")->find("PreToolUse");
+    CHECK(pre && pre->arr.size() == 2);  // user's hook kept, ours appended
+    CHECK(pre->arr[0].find("hooks")->arr[0].getString("command") == "my-linter");
+    const std::string cmd = pre->arr[1].find("hooks")->arr[0].getString("command");
+    CHECK(cmd.find("bunbun-hook.exe\" PreToolUse") != std::string::npos);
+    CHECK(cmd.find('\\') == std::string::npos);  // forward slashes for Git Bash
+    CHECK(root.find("hooks")->find("PermissionRequest")->arr[0].find("hooks")->arr[0].getNumber("timeout") == 120);
+
+    // Idempotent: installing twice does not duplicate entries.
+    CHECK(bb::hooks::InstallClaudeHooks(&report));
+    CHECK(bb::json::Parse(ReadAll(path), &root));
+    CHECK(root.find("hooks")->find("PreToolUse")->arr.size() == 2);
+
+    // Uninstall restores the user's hooks only.
+    CHECK(bb::hooks::UninstallClaudeHooks(&report));
+    CHECK(!bb::hooks::ClaudeHooksInstalled());
+    CHECK(bb::json::Parse(ReadAll(path), &root));
+    CHECK(root.find("hooks")->find("PreToolUse")->arr.size() == 1);
+    CHECK(root.find("hooks")->find("Stop") == nullptr);
+
+    // Invalid JSON is never overwritten.
+    WriteAll(path, "{ \"model\": \"opus\", }");
+    CHECK(!bb::hooks::InstallClaudeHooks(&report));
+    CHECK(ReadAll(path) == "{ \"model\": \"opus\", }");
+
+    // A hooks value of the wrong type is refused, not replaced.
+    WriteAll(path, R"J({"hooks": []})J");
+    CHECK(!bb::hooks::InstallClaudeHooks(&report));
+    CHECK(ReadAll(path) == R"J({"hooks": []})J");
+
+    // Missing file: created from scratch.
+    DeleteFileW(path.c_str());
+    CHECK(bb::hooks::InstallClaudeHooks(&report));
+    CHECK(bb::json::Parse(ReadAll(path), &root) && root.find("hooks")->obj.size() == 12);
+}
+
+
+static void TestAssistant() {
+    namespace as = bb::assistant;
+    auto parse = [](const wchar_t* t) { return as::Parse(t, L"google"); };
+    double v = 0;
+    CHECK(as::Evaluate(L"2+3*4", &v) && v == 14);
+    CHECK(as::Evaluate(L"(1+2)^2 / 3", &v) && v == 3);
+    CHECK(as::Evaluate(L"-4 + 10", &v) && v == 6);
+    CHECK(!as::Evaluate(L"1/0", &v));
+    CHECK(!as::Evaluate(L"open notepad", &v));
+    CHECK(!as::Evaluate(L"2+", &v));
+
+    as::Intent in = parse(L"what is 12*7?");
+    CHECK(in.action == as::Action::Reply && in.reply.find(L"84") != std::wstring::npos);
+    in = parse(L"Open Notepad");
+    CHECK(in.action == as::Action::Open && in.target == L"notepad.exe");
+    in = parse(L"wifi settings");
+    CHECK(in.action == as::Action::Open && in.target == L"ms-settings:network-wifi");
+    in = parse(L"launch some unknown app");
+    CHECK(in.action == as::Action::Open && in.target.empty() && in.label == L"some unknown app");
+    in = parse(L"hey bun volume 35");
+    CHECK(in.action == as::Action::VolumeSet && in.number == 35);
+    CHECK(parse(L"turn the volume up").action == as::Action::VolumeUp);
+    CHECK(parse(L"mute").action == as::Action::Mute);
+    CHECK(parse(L"dnd on").action == as::Action::MascotDndOn);
+    CHECK(parse(L"snack time").action == as::Action::MascotDndOn);
+    CHECK(parse(L"dnd off").action == as::Action::MascotDndOff);
+    CHECK(parse(L"next song").action == as::Action::MediaNext);
+    CHECK(parse(L"pause").action == as::Action::MediaToggle);
+    in = parse(L"set a timer for 10 minutes");
+    CHECK(in.action == as::Action::TimerStart && in.number == 10);
+    CHECK(parse(L"timer 1 hour").number == 60);
+    CHECK(parse(L"timer 5min").number == 5);
+    CHECK(parse(L"pomodoro timer").number == 25);
+    CHECK(parse(L"stop the timer").action == as::Action::TimerStop);
+    in = parse(L"search cute bunnies");
+    CHECK(in.action == as::Action::WebSearch && in.target == L"https://www.google.com/search?q=cute+bunnies");
+    CHECK(as::Parse(L"search a&b", L"duckduckgo").target == L"https://duckduckgo.com/?q=a%26b");
+    CHECK(parse(L"what time is it").info == as::Info::Time);
+    CHECK(parse(L"battery").info == as::Info::Battery);
+    CHECK(parse(L"battery settings").action == as::Action::Open);
+    CHECK(parse(L"what's playing").info == as::Info::NowPlaying);
+    CHECK(parse(L"lock").action == as::Action::Lock);
+    CHECK(parse(L"gibberish words").action == as::Action::None);
+}
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc < 2) {
+        std::printf("usage: test_core <scratch dir>\n");
+        return 2;
+    }
+    TestJson();
+    TestInstaller(argv[1]);
+    TestAssistant();
+    std::printf(g_failed ? "%d check(s) failed\n" : "all checks passed\n", g_failed);
+    return g_failed ? 1 : 0;
+}

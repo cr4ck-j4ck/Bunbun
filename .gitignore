@@ -1,0 +1,72 @@
+# Build & binary outputs
+build/
+bin/
+dist/
+out/
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.a
+*.coff
+
+# Toolchain & SDK dependencies (downloaded/extracted locally)
+.toolchain/
+winrt-include/
+
+# Node & Frontend dependencies
+node_modules/
+settings-ui/node_modules/
+settings-ui/dist/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime / AppData local state & test output
+*.log
+*.tmp
+state.ini
+settings.ini
+*.bak
+*.backup
+
+# IDE, OS, and Editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Antigravity workspace config (machine-specific paths; Bunbun connects Antigravity globally)
+.agents/
+
+# scripts/dev.sh moves running exes aside as *.old-<timestamp>
+*.old
+*.old-*
+
+# Local secrets and per-user tool settings
+.env
+.env.*
+.claude/settings.local.json
+
+# Packaging output and scratch
+*.zip
+coverage/
+scratch/
+
+# Internal working notes: project memory, AI-assistant instructions and research.
+# Public docs live in README.md, CONTRIBUTING.md and docs/.
+MEMORIES.md
+CLAUDE.md
+docs/reverse-engineering.md
