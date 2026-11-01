@@ -1,0 +1,59 @@
+# Builds, tests and packages every push and pull request; the zip is attached
+# to the run as an artifact so anyone can try a branch without building it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: settings-ui/package-lock.json
+
+      - name: Cache toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            .toolchain/llvm-mingw-*
+            .toolchain/cppwinrt
+            .toolchain/webview2
+          key: toolchain-${{ hashFiles('scripts/setup.sh') }}
+
+      - name: Set up toolchains
+        run: ./scripts/setup.sh
+
+      - name: Build
+        env:
+          BUNBUN_HOMEPAGE: https://github.com/${{ github.repository }}
+        run: ./build.sh
+
+      - name: Test
+        run: ./tests/run.sh
+
+      - name: Type-check settings UI
+        run: cd settings-ui && npx tsc --noEmit
+
+      - name: Package
+        run: ./scripts/package.sh --no-build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bunbun-win-x64
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt

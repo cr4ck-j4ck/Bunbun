@@ -30,6 +30,10 @@ First public version.
 - A local Windows assistant on Ctrl+Alt+B: open apps and settings, media and volume, timers,
   searches, quick answers, mascot do-not-disturb.
 
+### Releases
+- A portable zip (`Bunbun-<version>-win-x64.zip`) with SHA256 checksums; `scripts/setup.sh`
+  fetches the pinned toolchains; CI builds every push and tags publish releases.
+
 ### Settings app
 - WebView2 settings window with a live preview of the real island on your wallpaper, themes,
   animations with real spring previews, and search across every setting.

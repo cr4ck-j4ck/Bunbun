@@ -3,6 +3,16 @@
 Bunbun builds on Windows 10/11 (x64) with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) from
 Git Bash. No Visual Studio needed.
 
+## Quick setup
+
+```bash
+./scripts/setup.sh
+```
+
+Downloads the pinned llvm-mingw, C++/WinRT and WebView2 SDK into `.toolchain/`, generates the
+WinRT headers, and installs the settings UI's packages. Re-running it keeps what's already there.
+You need Git Bash, Node.js 18+ and Python 3. The details below are only for doing it by hand.
+
 ## Requirements
 
 | What | Where it goes | Notes |
@@ -59,6 +69,29 @@ python tests/test_dialects.py
 
 ```bash
 python tests/simulate_agent.py demo
+```
+
+## Package a release
+
+```bash
+./scripts/package.sh
+```
+
+Builds, then writes `dist/Bunbun-<version>-win-x64.zip` and `dist/SHA256SUMS.txt`. Pass `--no-build`
+to package what's already in `build/` (for example while the island is running). The zip is
+portable: the three exes, `WebView2Loader.dll`, `settings-ui/`, the licence and notices, and a
+`START HERE.txt`. Everything is linked statically, so it runs on a clean Windows 10/11 x64.
+
+Releases are automated: CI builds and packages every push (the zip is attached to the run), and
+pushing a tag that matches `VERSION` publishes a GitHub Release with the zip, checksums and the
+CHANGELOG section as notes:
+
+```bash
+git tag v0.1.0
+```
+
+```bash
+git push origin v0.1.0
 ```
 
 ## Working while the island runs

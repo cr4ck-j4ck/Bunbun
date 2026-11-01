@@ -4,7 +4,7 @@ Thanks for helping! Bug reports, fixes, new island modules and new original masc
 
 ## Getting started
 
-1. Set up the toolchain and build: [docs/building.md](docs/building.md).
+1. Set up the toolchain with `./scripts/setup.sh`, then build: [docs/building.md](docs/building.md).
 2. Run the tests before and after your change: `./tests/run.sh`.
 3. While the island runs, use `./scripts/dev.sh` to push your build live in about a second.
 

@@ -78,16 +78,34 @@ Every option has a home, and changes apply to the island the moment you make the
   </tr>
 </table>
 
+## Download
+
+Grab **`Bunbun-<version>-win-x64.zip`** from the [latest release](../../releases/latest). There's
+no installer:
+
+1. Unzip it somewhere permanent, for example `%LOCALAPPDATA%\Programs\Bunbun`. Connected coding
+   agents call `bunbun-hook.exe` from that folder, so moving it later means connecting them again.
+2. Run **`bunbun.exe`**.
+
+It runs on Windows 10 and 11 (x64) with nothing else to install. The settings window uses WebView2,
+which Windows 11 includes and Windows 10 gets with Microsoft Edge. The app isn't code-signed yet, so
+SmartScreen may warn the first time: choose **More info → Run anyway**. Check the download against
+`SHA256SUMS.txt` on the release page if you like.
+
 ## Get started
 
-1. **Build it.** You'll need llvm-mingw, Node.js and Python; see [docs/building.md](docs/building.md).
+1. **Run it.** Start `bunbun.exe` from the release zip, or build it yourself (see
+   [docs/building.md](docs/building.md)):
+
+   ```bash
+   ./scripts/setup.sh
+   ```
 
    ```bash
    ./build.sh
    ```
 
-2. **Run it.** Start `build/bunbun.exe`. Bun appears in the tray and the island at the top of your
-   screen.
+2. **Find Bun.** Bun appears in the tray and the island at the top of your screen.
 3. **Connect your agent** in **Settings → Assistant & agents**, or from the command line:
 
    ```bash

@@ -1,0 +1,70 @@
+# Publishes a GitHub Release when a version tag is pushed:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag must match the VERSION file. The release gets the portable zip and
+# SHA256SUMS.txt, with notes taken from that version's CHANGELOG section.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches VERSION
+        run: |
+          version="$(tr -d ' \r\n' < VERSION)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match VERSION ($version)." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: settings-ui/package-lock.json
+
+      - name: Set up toolchains
+        run: ./scripts/setup.sh
+
+      - name: Build
+        env:
+          BUNBUN_HOMEPAGE: https://github.com/${{ github.repository }}
+        run: ./build.sh
+
+      - name: Test
+        run: ./tests/run.sh
+
+      - name: Package
+        run: ./scripts/package.sh --no-build
+
+      - name: Release notes from CHANGELOG
+        run: |
+          version="$(tr -d ' \r\n' < VERSION)"
+          awk -v v="[$version]" '
+            index($0, "## " v) == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > dist/NOTES.md
+          [ -s dist/NOTES.md ] || echo "Bunbun $version" > dist/NOTES.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(tr -d ' \r\n' < VERSION)"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/Bunbun-$version-win-x64.zip" dist/SHA256SUMS.txt \
+            --title "Bunbun $version" --notes-file dist/NOTES.md
