@@ -2,9 +2,10 @@
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# The tag must match the VERSION file. The release gets the installer, the
-# portable zip and SHA256SUMS.txt, with notes taken from that version's
-# CHANGELOG section. Both include the local AI helper (never a model).
+# The tag must match the VERSION file. The release gets one download, the
+# installer (with the local AI helper, never a model), and its SHA256SUMS.txt,
+# with notes taken from that version's CHANGELOG section. The portable zip is
+# still built and kept as a run artifact, not published.
 name: Release
 
 on:
@@ -21,7 +22,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check the tag matches VERSION
         run: |
@@ -31,7 +32,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -49,7 +50,17 @@ jobs:
         run: ./tests/run.sh
 
       - name: Package
-        run: ./scripts/package.sh --no-build
+        run: |
+          ./scripts/package.sh --no-build
+          version="$(tr -d ' \r\n' < VERSION)"
+          # A release without its installer would leave people with nothing to run.
+          [ -f "dist/Bunbun-$version-setup.exe" ] || { echo "The installer wasn't built." >&2; exit 1; }
+          (cd dist && sha256sum "Bunbun-$version-setup.exe" > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bunbun-portable
+          path: dist/Bunbun-*-win-x64.zip
 
       - name: Release notes from CHANGELOG
         run: |
@@ -58,8 +69,14 @@ jobs:
             index($0, "## " v) == 1 { on = 1; next }
             on && /^## \[/ { exit }
             on { print }
-          ' CHANGELOG.md > dist/NOTES.md
-          [ -s dist/NOTES.md ] || echo "Bunbun $version" > dist/NOTES.md
+          ' CHANGELOG.md > dist/CHANGES.md
+          {
+            echo "**Install:** download \`Bunbun-$version-setup.exe\` below and run it. It installs for your"
+            echo "account (no admin prompt) and replaces an older version in place. Windows may show a"
+            echo "SmartScreen warning because the app isn't code-signed yet: choose **More info → Run anyway**."
+            echo
+            cat dist/CHANGES.md
+          } > dist/NOTES.md
 
       - name: Publish
         env:
@@ -67,5 +84,5 @@ jobs:
         run: |
           version="$(tr -d ' \r\n' < VERSION)"
           gh release create "$GITHUB_REF_NAME" \
-            "dist/Bunbun-$version-setup.exe" "dist/Bunbun-$version-win-x64.zip" dist/SHA256SUMS.txt \
+            "dist/Bunbun-$version-setup.exe" dist/SHA256SUMS.txt \
             --title "Bunbun $version" --notes-file dist/NOTES.md

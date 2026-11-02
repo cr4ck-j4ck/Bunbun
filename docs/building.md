@@ -101,8 +101,8 @@ this copy (`--disconnect <agent> --quiet --if-ours`), so none is left calling a 
 hooks pointing at another copy (a portable or development build) stay.
 
 Releases are automated: CI builds and packages every push (the zip is attached to the run), and
-pushing a tag that matches `VERSION` publishes a GitHub Release with the installer, the zip,
-checksums and the CHANGELOG section as notes. Release builds include the local AI helper
+pushing a tag that matches `VERSION` publishes a GitHub Release with one download, the installer,
+plus its checksum and the CHANGELOG section as notes (the portable zip stays a run artifact). Release builds include the local AI helper
 (`setup.sh --local-ai --installer`):
 
 ```bash

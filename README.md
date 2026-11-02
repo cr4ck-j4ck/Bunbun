@@ -85,8 +85,8 @@ Every option has a home, and changes apply to the island the moment you make the
 
 ## Download
 
-Grab **`Bunbun-<version>-setup.exe`** from the [latest release](../../releases/latest) and run it.
-It installs for your account only (no admin prompt) into `%LOCALAPPDATA%\Programs\Bunbun`, adds
+Grab **`Bunbun-<version>-setup.exe`** from the [latest release](../../releases/latest) and run it;
+that one file is all you need. It installs for your account only (no admin prompt) into `%LOCALAPPDATA%\Programs\Bunbun`, adds
 Bunbun to the Start menu, and can:
 
 - start Bunbun when you sign in;
@@ -98,10 +98,6 @@ Bunbun to the Start menu, and can:
 
 Uninstall from **Settings → Apps**. It quits Bunbun and disconnects the coding agents connected to
 it first; your settings, skin packs and models stay in your AppData folders.
-
-Prefer no installer? **`Bunbun-<version>-win-x64.zip`** is the same app, portable: unzip it
-somewhere permanent and run `bunbun.exe` (connected agents call `bunbun-hook.exe` from that folder,
-so moving it later means connecting them again).
 
 It runs on Windows 10 and 11 (x64). The app isn't code-signed yet, so SmartScreen may warn the
 first time: choose **More info → Run anyway**. Check the download against `SHA256SUMS.txt` on the
@@ -162,8 +158,8 @@ over a local pipe that only your user account can open.
 Bunbun checks GitHub once a day and shows a notification when a new version is out; click it, or
 **Update available** in the tray menu, to open the release page. You can also check any time from
 the tray (**Check for updates…**) or **Settings → General → Updates**. Nothing is downloaded or
-installed for you: run the new setup, which replaces the old version in place, or unzip the new
-release over the old folder (quit Bunbun first). Your settings and connected agents carry over.
+installed for you: run the new setup, which replaces the old version in place. Your settings and
+connected agents carry over.
 
 ## Credits & license
 

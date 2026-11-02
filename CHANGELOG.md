@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Fixed
 - Asking Bun for the weather in another city answered with your own city's weather.
 - The island no longer redraws at the monitor's full refresh rate while nothing moves. A spring
@@ -27,8 +29,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 - **An installer.** `Bunbun-<version>-setup.exe` installs for your account (no admin prompt), adds
   Start menu shortcuts and an uninstaller, can start Bunbun at sign-in, installs the WebView2
   Runtime if it's missing, and can download a Local AI model and turn Local AI on. Uninstalling
-  disconnects the coding agents connected to that copy first. The portable zip is still there. Releases now include the
-  local AI helper.
+  disconnects the coding agents connected to that copy first. Releases now offer just this one
+  file (with the local AI helper) instead of a zip.
 - `bunbun.exe --enable-local-ai` turns Local AI on in `settings.ini`; `--disconnect <agent> --if-ours`
   only disconnects an agent whose hooks call that copy of Bunbun.
 - **Your own character from a character sheet.** Mascot studio → Custom skins → Pick a character
