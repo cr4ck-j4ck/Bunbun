@@ -86,9 +86,9 @@ if [ -f "$LLAMA/include/llama.h" ] && [ -x "$CMAKE" ]; then
     if [ ! -f "$LLAMA_BUILD/src/libllama.a" ]; then
         echo "  LLAMA $LLAMA_BUILD (first time, a minute or two)"
         # Portable CPU code (AVX2: any PC from about 2013), not tuned to this one.
-        "$CMAKE" -S "$LLAMA" -B "$LLAMA_BUILD" -G Ninja -DCMAKE_MAKE_PROGRAM="$(cygpath -m .toolchain/ninja/ninja.exe)" \
-            -DCMAKE_C_COMPILER="$(cygpath -m "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang.exe")" \
-            -DCMAKE_CXX_COMPILER="$(cygpath -m "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++.exe")" \
+        "$CMAKE" -S "$LLAMA" -B "$LLAMA_BUILD" -G Ninja -DCMAKE_MAKE_PROGRAM="$(cygpath -am .toolchain/ninja/ninja.exe)" \
+            -DCMAKE_C_COMPILER="$(cygpath -am "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang.exe")" \
+            -DCMAKE_CXX_COMPILER="$(cygpath -am "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++.exe")" \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF -DGGML_AVX2=ON \
             -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_OPENMP=OFF -DGGML_BACKEND_DL=OFF >/dev/null
