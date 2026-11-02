@@ -47,6 +47,7 @@ compile src/island/wh_shim.cpp     build/obj/wh_shim.o & pids+=($!)
 compile src/agents/agent_bridge.cpp build/obj/agent_bridge.o & pids+=($!)
 compile src/agents/hook_installer.cpp build/obj/hook_installer.o & pids+=($!)
 compile src/mascot/mascot.cpp      build/obj/mascot.o & pids+=($!)
+compile src/mascot/pack_sheet.cpp  build/obj/pack_sheet.o & pids+=($!)
 compile src/assistant/assistant.cpp build/obj/assistant.o & pids+=($!)
 compile src/main.cpp               build/obj/main.o & pids+=($!)
 compile src/hook/bunbun_hook.cpp   build/obj/bunbun_hook.o & pids+=($!)
@@ -63,7 +64,7 @@ LIBS=(-lole32 -loleaut32 -luuid -lshcore -lshlwapi -ld2d1 -ldwrite -ldwmapi -lgd
 echo "  LD  build/bunbun.exe"
 "$CXX" "${LDOPT[@]}" -municode -mwindows -static -o build/bunbun.exe \
     build/obj/main.o build/obj/island_core.o build/obj/wh_shim.o build/obj/agent_bridge.o \
-    build/obj/hook_installer.o build/obj/mascot.o build/obj/assistant.o build/obj/bunbun_res.o "${LIBS[@]}"
+    build/obj/hook_installer.o build/obj/mascot.o build/obj/pack_sheet.o build/obj/assistant.o build/obj/bunbun_res.o "${LIBS[@]}"
 echo "  LD  build/bunbun-hook.exe"
 # Agents run the hook before every tool call, so it must never be missing, not
 # even while this links. Link to a temp file, then swap it in with two renames
@@ -72,8 +73,37 @@ echo "  LD  build/bunbun-hook.exe"
 [ -f build/bunbun-hook.exe ] && mv -f build/bunbun-hook.exe "build/bunbun-hook.exe.old-$(date +%s%N)"
 mv -f build/bunbun-hook.exe.new build/bunbun-hook.exe
 echo "  LD  build/bunbun-settings.exe"
-"$CXX" "${LDOPT[@]}" -municode -mwindows -static -o build/bunbun-settings.exe     build/obj/settings_host.o build/obj/wh_shim.o build/obj/mascot.o build/obj/hook_installer.o build/obj/bunbun_res.o     -lole32 -loleaut32 -luuid -lshlwapi -lshell32 -ld2d1 -lwindowscodecs -ldwmapi -luser32 -ladvapi32 -lgdi32
+"$CXX" "${LDOPT[@]}" -municode -mwindows -static -o build/bunbun-settings.exe     build/obj/settings_host.o build/obj/wh_shim.o build/obj/mascot.o build/obj/pack_sheet.o build/obj/hook_installer.o build/obj/bunbun_res.o     -lole32 -loleaut32 -luuid -lshlwapi -lshell32 -ld2d1 -lwindowscodecs -ldwmapi -luser32 -ladvapi32 -lgdi32 -lwinhttp
 cp -f "$WEBVIEW2/x64/WebView2Loader.dll" build/
+
+# Optional: bunbun-brain.exe, the local AI helper (docs/local-ai.md). Built only
+# when llama.cpp has been fetched (scripts/setup.sh --local-ai), whose libraries
+# are built once into .toolchain/llama-build. A normal build needs none of this.
+LLAMA="${LLAMA:-.toolchain/llama.cpp}"
+LLAMA_BUILD="${LLAMA_BUILD:-.toolchain/llama-build}"
+CMAKE="${CMAKE:-.toolchain/cmake/bin/cmake.exe}"
+if [ -f "$LLAMA/include/llama.h" ] && [ -x "$CMAKE" ]; then
+    if [ ! -f "$LLAMA_BUILD/src/libllama.a" ]; then
+        echo "  LLAMA $LLAMA_BUILD (first time, a minute or two)"
+        # Portable CPU code (AVX2: any PC from about 2013), not tuned to this one.
+        "$CMAKE" -S "$LLAMA" -B "$LLAMA_BUILD" -G Ninja -DCMAKE_MAKE_PROGRAM="$(cygpath -m .toolchain/ninja/ninja.exe)" \
+            -DCMAKE_C_COMPILER="$(cygpath -m "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang.exe")" \
+            -DCMAKE_CXX_COMPILER="$(cygpath -m "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++.exe")" \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF -DGGML_AVX2=ON \
+            -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_OPENMP=OFF -DGGML_BACKEND_DL=OFF >/dev/null
+        "$CMAKE" --build "$LLAMA_BUILD" --target llama ggml >/dev/null
+    fi
+    if [ ! -f build/bunbun-brain.exe ] || [ src/brain/bunbun_brain.cpp -nt build/bunbun-brain.exe ] || [ src/common/json.h -nt build/bunbun-brain.exe ]; then
+        echo "  LD  build/bunbun-brain.exe"
+        # Like the hook: link aside, then swap in (the island may be running the old one).
+        "$CXX" -std=c++20 "${OPT[@]}" "${LDOPT[@]}" -I"$LLAMA/include" -I"$LLAMA/ggml/include" src/brain/bunbun_brain.cpp \
+            "$LLAMA_BUILD/src/libllama.a" "$LLAMA_BUILD/ggml/src/ggml.a" "$LLAMA_BUILD/ggml/src/ggml-cpu.a" \
+            "$LLAMA_BUILD/ggml/src/ggml-base.a" -static -o build/bunbun-brain.exe.new
+        [ -f build/bunbun-brain.exe ] && mv -f build/bunbun-brain.exe "build/bunbun-brain.exe.old-$(date +%s%N)"
+        mv -f build/bunbun-brain.exe.new build/bunbun-brain.exe
+    fi
+fi
 
 # Settings UI (React + Vite): built when its sources are newer than the output.
 if [ -d settings-ui ] && command -v npm >/dev/null; then

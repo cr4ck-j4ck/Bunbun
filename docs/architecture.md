@@ -15,7 +15,7 @@ bunbun-settings.exe (WebView2) ──JSON bridge──▶ settings.ini ──fil
 | Path | What |
 |---|---|
 | `src/island/island_core.cpp` | The island: Direct2D renderer, springs, and the system modules (media, calendar, weather, hardware, connectivity, notifications, clipboard, file shelf, timers) |
-| `src/island/modules/*.inc` | Pieces split out of the core (weather, lyrics, Ask Bun panel), included inside the core's namespace |
+| `src/island/modules/*.inc` | Pieces split out of the core, included inside the core's namespace: weather, lyrics, Ask Bun panel, connectivity (data + `connectivity_draw.inc`), privacy dots, to-dos (+ `todos_draw.inc`), Focus mode, Ask Bun actions (undo, brightness), calendar link, downloads, the meeting / download pills (`bunbun_pills_draw.inc`) and shared types (`bunbun_types.inc`). New modules go here, not into `island_core.cpp`; `*_draw.inc` files are included inside the `Renderer` class |
 | `src/island/settings_schema.yaml` | Every setting with its default, options and description |
 | `src/island/wh_shim.*` | Settings and state on top of INI files |
 | `src/agents/agent_bridge.cpp` | Pipe server and agent session state machine |
@@ -23,6 +23,7 @@ bunbun-settings.exe (WebView2) ──JSON bridge──▶ settings.ini ──fil
 | `src/hook/bunbun_hook.cpp` | The relay agents run; translates each agent's hook format |
 | `src/mascot/` | The mascots, their moods, and custom skin packs, drawn with Direct2D |
 | `src/assistant/` | Ask Bun's command parser (pure, unit-tested) |
+| `src/brain/` | `bunbun-brain.exe`, the optional local AI helper (llama.cpp). The island starts it on demand and talks JSON lines over its stdin/stdout (`modules/brain_module.inc`); see [Local AI](local-ai.md) |
 | `src/settings/settings_host.cpp` | The settings window: WebView2 host and JSON bridge |
 | `settings-ui/` | The settings UI: React, Vite, Framer Motion |
 | `src/main.cpp` | Tray icon, single instance, settings watcher, command-line flags |
@@ -66,4 +67,7 @@ new versions still apply. Runtime state lives in `%LOCALAPPDATA%\Bunbun\state.in
 - The island only answers the exact request it shows; requests are withdrawn when the agent's turn
   ends or you answer in the terminal.
 - No telemetry and no AI service. Network use is limited to the weather, lyrics and dictionary
-  modules, and to web searches you ask Bun for.
+  modules, to the calendar link the user adds (HTTPS, every 5 minutes), to web searches you ask Bun for, and to the update check (one request a day to
+  `api.github.com/repos/<repo>/releases/latest`, off with `Bunbun.UpdateCheck`). The update check
+  only reads; nothing is downloaded or run, and only a `https://github.com/` page is ever opened
+  from its reply.

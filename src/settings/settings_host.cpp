@@ -28,8 +28,14 @@
 #include "../agents/hook_installer.h"
 #include "../common/json.h"
 #include "../common/pipe.h"
+#include "../common/todos.h"
+#include "../common/update.h"
+
+#include <memory>
+#include <thread>
 #include "../island/wh_shim.h"
 #include "../mascot/mascot.h"
+#include "../mascot/pack_sheet.h"
 #include "WebView2.h"
 
 // MinGW's __uuidof needs these; the GUIDs are the MIDL_INTERFACE ids in WebView2.h.
@@ -49,6 +55,9 @@ constexpr wchar_t kWindowClass[] = L"BunbunSettings";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 HWND g_hwnd = nullptr;
+// A reply finished on a worker thread (lParam: new std::wstring of JSON), posted
+// back so it reaches WebView2 from the UI thread like every other reply.
+constexpr UINT WM_APP_ASYNC_REPLY = WM_APP + 0x30;
 std::wstring g_startPage;  // from --page
 ComPtr<ICoreWebView2Controller> g_controller;
 ComPtr<ICoreWebView2> g_webview;
@@ -257,6 +266,9 @@ bb::mascot::Mood MoodFromName(const std::string& m) {
     if (m == "sleepy") return Mood::Sleepy;
     if (m == "music") return Mood::Music;
     if (m == "snack") return Mood::Snack;
+    if (m == "listening") return Mood::Listening;
+    if (m == "talking") return Mood::Talking;
+    if (m == "confused") return Mood::Confused;
     return Mood::Idle;
 }
 
@@ -269,8 +281,11 @@ std::string RenderMascotPng(const Value& a) {
     if (!wic || !d2d) return {};
 
     const int px = std::clamp(static_cast<int>(a.getNumber("size", 160)), 32, 512);
+    // The preview's colour is this character's own ("spiderman=#17161C"), which
+    // is also the only form Spidey's Venom suit accepts.
+    const std::string character = a.getString("character", "bunny"), color = a.getString("color");
     const bb::mascot::Style style = bb::mascot::StyleFromSettings(
-        Wide(a.getString("character", "bunny")), Wide(a.getString("color")),
+        Wide(character), Wide(color.empty() || color.find('=') != std::string::npos ? color : character + "=" + color),
         static_cast<int>(a.getNumber("motion", 100)), static_cast<int>(a.getNumber("hop", 100)),
         static_cast<int>(a.getNumber("blink", 4) * 10), a.getBool("eyesFollow", true), a.getBool("celebrate", true));
 
@@ -522,7 +537,192 @@ Value CapturePreview(const Value& args) {
     return out;
 }
 
+// ── To-dos (the island's list, in todos.tsv next to settings.ini) ──────────────
+// Each change reads the file, applies one edit and writes it back, so it can't
+// undo something the island changed meanwhile (a reminder firing). The island
+// watches the file and reloads.
+std::wstring TodosPath() {
+    std::wstring dir = bb::SettingsPath();
+    dir.erase(dir.find_last_of(L"\\/"));
+    return dir + L"\\todos.tsv";
+}
+
+Value TodoToJson(const bb::todos::Item& t) {
+    Value o = Value::Object();
+    o["id"] = Value::Number(t.id);
+    o["text"] = Str(t.text);
+    o["due"] = Value::Number(t.due);
+    o["done"] = Value::Bool(t.done);
+    o["repeat"] = Str(t.repeat);
+    return o;
+}
+
+Value TodoCommand(const std::string& cmd, const Value& args, std::string* err) {
+    namespace td = bb::todos;
+    std::vector<td::Item> items = td::Load(TodosPath());
+    if (cmd == "listTodos") {
+        Value list = Value::Array();
+        for (const td::Item& t : items) list.push(TodoToJson(t));
+        return list;
+    }
+    if (cmd == "saveTodo") {  // id 0 adds a new one
+        const int id = static_cast<int>(args.getNumber("id"));
+        const std::wstring text = Wide(args.getString("text"));
+        if (text.empty()) { *err = "text is empty"; return {}; }
+        td::Item* item = nullptr;
+        for (td::Item& t : items) if (t.id == id) item = &t;
+        if (!item) {
+            td::Item fresh;
+            fresh.id = td::NextId(items);
+            items.push_back(fresh);
+            item = &items.back();
+        }
+        const double due = args.getNumber("due");
+        const std::wstring repeat = due > 0 ? Wide(args.getString("repeat")) : std::wstring();
+        if (due != item->due || repeat != item->repeat) item->notified = false;  // rescheduled: ring again
+        item->text = text;
+        item->due = due;
+        item->repeat = repeat;
+        item->done = args.getBool("done");
+        if (item->done && !item->repeat.empty()) {
+            // A repeating reminder never finishes: ticking it skips its next occurrence.
+            item->done = false;
+            item->due = td::NextOccurrence(item->repeat, item->due, std::max(td::Now(), item->due));
+            item->notified = false;
+        }
+        if (!td::Save(TodosPath(), items)) { *err = "couldn't write todos.tsv"; return {}; }
+        return TodoToJson(*item);
+    }
+    if (cmd == "deleteTodo") {
+        const int id = static_cast<int>(args.getNumber("id"));
+        items.erase(std::remove_if(items.begin(), items.end(), [&](const td::Item& t) { return t.id == id; }), items.end());
+        if (!td::Save(TodosPath(), items)) { *err = "couldn't write todos.tsv"; return {}; }
+        return Value::Bool(true);
+    }
+    if (cmd == "clearDoneTodos") {
+        items.erase(std::remove_if(items.begin(), items.end(), [](const td::Item& t) { return t.done; }), items.end());
+        if (!td::Save(TodosPath(), items)) { *err = "couldn't write todos.tsv"; return {}; }
+        return Value::Bool(true);
+    }
+    *err = "unknown to-do command";
+    return {};
+}
+
+// The optional local AI: is the helper built, and which models are in the
+// models folder (%LOCALAPPDATA%\Bunbun\models; the island picks the first).
+std::wstring ModelsFolder() {
+    PWSTR local = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) dir = std::wstring(local) + L"\\Bunbun\\models";
+    CoTaskMemFree(local);
+    return dir;
+}
+
+// ── Skin packs from a character sheet ───────────────────────────────────────
+// sliceSheet: the page sends the picked image; we find its rows and frames and
+// send back previews. savePack: the rows the user mapped to moods are written
+// into a pack folder. The sliced frames wait here in between.
+std::vector<bb::mascot::SheetRow> g_sheetRows;
+
+Value SheetCommand(const std::string& cmd, const Value& args, std::string* err) {
+    namespace bm = bb::mascot;
+    if (cmd == "sliceSheet") {
+        std::string data = args.getString("data");
+        if (const size_t comma = data.find(','); data.rfind("data:", 0) == 0 && comma != std::string::npos) data.erase(0, comma + 1);
+        const std::string bytes = Base64Decode(data);
+        bm::Image sheet;
+        if (!bm::DecodeImage(bytes.data(), bytes.size(), &sheet)) { *err = "couldn't read that image"; return {}; }
+        g_sheetRows = bm::SliceSheet(sheet);
+        if (g_sheetRows.empty()) { *err = "no frames found: the sheet needs rows of characters on a plain or transparent background"; return {}; }
+        Value rows = Value::Array();
+        for (const bm::SheetRow& r : g_sheetRows) {
+            Value frames = Value::Array();
+            for (const bm::Image& f : r.frames) {
+                std::string png;
+                if (bm::EncodePngBytes(f, &png))
+                    frames.push(Value::String("data:image/png;base64," + Base64(reinterpret_cast<const BYTE*>(png.data()), png.size())));
+            }
+            Value row = Value::Object();
+            row["frames"] = std::move(frames);
+            rows.push(std::move(row));
+        }
+        return rows;
+    }
+    // savePack {name, rows: [{row, mood}]}; mood is a mood's file name, or "look"
+    // for a row of look directions (left, up, centre, down, right, as on the sheet).
+    std::wstring name = Wide(args.getString("name"));
+    name.erase(0, name.find_first_not_of(L' '));
+    name.erase(name.find_last_not_of(L' ') + 1);
+    if (name.empty() || name.size() > 40 || name.find_first_of(L"\\/:*?\"<>|.") != std::wstring::npos) {
+        *err = "pick a name without \\ / : * ? \" < > | or dots";
+        return {};
+    }
+    const Value* rows = args.find("rows");
+    if (!rows || !rows->isArray() || g_sheetRows.empty()) { *err = "slice a sheet first"; return {}; }
+    const std::wstring dir = bm::PacksFolder() + L"\\" + name;
+    static const char* kMoods[] = {"idle", "working", "thinking", "alert", "happy", "sad", "sleepy", "music", "snack",
+                                   "listening", "talking", "confused"};
+    for (const Value& r : rows->arr) {
+        const int index = static_cast<int>(r.getNumber("row", -1));
+        const std::string mood = r.getString("mood");
+        if (index < 0 || index >= static_cast<int>(g_sheetRows.size()) || mood.empty()) continue;
+        const auto& frames = g_sheetRows[static_cast<size_t>(index)].frames;
+        std::wstring werr;
+        if (mood == "look") {
+            static const wchar_t* kLook[] = {L"look_left", L"look_up", L"look_center", L"look_down", L"look_right"};
+            SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+            for (size_t i = 0; i < frames.size() && i < 5; ++i)
+                if (!bm::EncodePng(frames[i], dir + L"\\" + kLook[i] + L".png")) { *err = "couldn't write the look frames"; return {}; }
+            continue;
+        }
+        if (std::find_if(std::begin(kMoods), std::end(kMoods), [&](const char* m) { return mood == m; }) == std::end(kMoods)) continue;
+        if (!bm::WriteMoodFrames(dir, Wide(mood), frames, &werr)) { *err = Utf8(werr); return {}; }
+    }
+    // A pack made from a sheet needs its idle frames; the rest falls back to idle.
+    if (GetFileAttributesW((dir + L"\\idle_1.png").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        *err = "map one row to Idle: every pack needs it";
+        return {};
+    }
+    const std::wstring ini = dir + L"\\pack.ini";
+    if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
+        WritePrivateProfileStringW(L"Pack", L"FrameSeconds", L"0.4", ini.c_str());
+    return Str(name);
+}
+
+Value LocalAiCommand(const std::string& cmd) {
+    const std::wstring dir = ModelsFolder();
+    if (cmd == "openModelsFolder") {
+        SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+        ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return Value::Bool(true);
+    }
+    Value o = Value::Object();
+    o["helper"] = Value::Bool(GetFileAttributesW((ExeDir() + L"\\bunbun-brain.exe").c_str()) != INVALID_FILE_ATTRIBUTES);
+    o["modelsFolder"] = Str(dir);
+    std::vector<std::pair<std::wstring, double>> found;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*.gguf").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            found.emplace_back(fd.cFileName, static_cast<double>((static_cast<uint64_t>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow));
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    std::sort(found.begin(), found.end());
+    Value models = Value::Array();
+    for (const auto& [name, size] : found) {
+        Value m = Value::Object();
+        m["name"] = Str(name);
+        m["path"] = Str(dir + L"\\" + name);
+        m["size"] = Value::Number(size);
+        models.push(std::move(m));
+    }
+    o["models"] = std::move(models);
+    return o;
+}
+
 Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
+    if (cmd == "listTodos" || cmd == "saveTodo" || cmd == "deleteTodo" || cmd == "clearDoneTodos") return TodoCommand(cmd, args, err);
     if (cmd == "capturePreview") return CapturePreview(args);
     if (cmd == "getSettings") return GetSettings();
     if (cmd == "setSettings") {
@@ -556,6 +756,8 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return Value::Bool(true);
     }
+    if (cmd == "localAiStatus" || cmd == "openModelsFolder") return LocalAiCommand(cmd);
+    if (cmd == "sliceSheet" || cmd == "savePack") return SheetCommand(cmd, args, err);
     if (cmd == "openSettingsFile") {
         ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + std::wstring(bb::SettingsPath()) + L"\"").c_str(),
                       nullptr, SW_SHOWNORMAL);
@@ -651,6 +853,33 @@ void OnWebMessage(const std::wstring& jsonText) {
     std::string err;
     static const Value kEmpty = Value::Object();
     const Value* args = msg.find("args");
+    // "Check for updates" talks to GitHub, which can take seconds; it runs on a
+    // worker so the window stays responsive, and replies when it's done.
+    if (msg.getString("cmd") == "checkUpdate") {
+        Value id = reply["id"];
+        std::thread([id] {
+            const bb::update::Release r = bb::update::FetchLatest(BUNBUN_USER_AGENT);
+            const std::string current = Utf8(WH_MOD_VERSION);
+            Value o = Value::Object();
+            o["current"] = Value::String(current);
+            o["checked"] = Value::Bool(r.ok);
+            if (r.ok) {
+                o["latest"] = Value::String(r.version);
+                o["newer"] = Value::Bool(bb::update::CompareVersions(r.version, current) > 0);
+                o["url"] = Value::String(r.url);
+                o["name"] = Value::String(r.name);
+            } else {
+                o["error"] = Value::String(r.error);
+            }
+            Value out = Value::Object();
+            out["id"] = id;
+            out["ok"] = Value::Bool(true);
+            out["result"] = std::move(o);
+            auto* text = new std::wstring(Wide(bb::json::Serialize(out)));
+            if (!g_hwnd || !PostMessageW(g_hwnd, WM_APP_ASYNC_REPLY, 0, reinterpret_cast<LPARAM>(text))) delete text;
+        }).detach();
+        return;
+    }
     Value result = Dispatch(msg.getString("cmd"), args && args->isObject() ? *args : kEmpty, &err);
     reply["ok"] = Value::Bool(err.empty());
     if (err.empty()) reply["result"] = std::move(result);
@@ -757,6 +986,11 @@ bool StartWebView() {
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_APP_ASYNC_REPLY: {
+            std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lp));
+            if (g_webview) g_webview->PostWebMessageAsJson(text->c_str());
+            return 0;
+        }
         case WM_SIZE:
             ResizeWebView();
             return 0;

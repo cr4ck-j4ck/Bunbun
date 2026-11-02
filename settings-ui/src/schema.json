@@ -349,6 +349,25 @@
    }
   ]
  },
+ "Animations.PowerSaver": {
+  "default": "auto",
+  "name": "Battery saver",
+  "description": "Fewer wakeups and lower animation frame rates so the island sips power. Auto turns it on while the PC runs on battery or Windows battery saver is on.",
+  "options": [
+   {
+    "value": "auto",
+    "label": "Auto (on battery)"
+   },
+   {
+    "value": "always",
+    "label": "Always"
+   },
+   {
+    "value": "never",
+    "label": "Off"
+   }
+  ]
+ },
  "Animations.AnimationSpeed": {
   "default": "normal",
   "name": "Animation speed",
@@ -627,6 +646,18 @@
   "description": "Custom hex color for camera privacy indicator.",
   "options": []
  },
+ "Indicators.PrivacyDotsScreen": {
+  "default": "true",
+  "name": "Show screen-recording indicator (Blue dot)",
+  "description": "Show a blue dot while an app records or shares your screen through Windows' capture API (Snipping Tool, browsers, Teams). Recorders that read the screen another way, such as OBS display capture, can't be detected.",
+  "options": []
+ },
+ "Indicators.PrivacyDotsScreenHex": {
+  "default": "#4F8CFF",
+  "name": "Screen-recording dot color",
+  "description": "Custom hex color for the screen-recording indicator.",
+  "options": []
+ },
  "Modules.Media": {
   "default": "true",
   "name": "Media module",
@@ -732,7 +763,43 @@
  "Modules.ConnectivityModule": {
   "default": "true",
   "name": "Include Connectivity in scroll loop",
-  "description": "Add a Wi-Fi, Bluetooth and Do Not Disturb status card to the mouse-wheel scroll loop. Click a card to open its Windows settings.",
+  "description": "Add a Wi-Fi, Bluetooth, Do Not Disturb (and, on laptops, Battery) tab to the mouse-wheel scroll loop. Click Wi-Fi or Bluetooth to turn it on or off, hold it to pick a network or device, right-click any card for its Windows settings.",
+  "options": []
+ },
+ "Modules.TodoModule": {
+  "default": "true",
+  "name": "To-do tab and reminders",
+  "description": "A To-do tab in the scroll loop (click a row to tick it off) and reminder pills with Snooze and Done. Ask Bun adds them: \"add buy milk\", \"remind me at 3pm to call Sam\", \"remind me in 20 min to stretch\", \"my list\", \"done buy milk\". Saved on this PC only (todos.tsv next to settings.ini).",
+  "options": []
+ },
+ "Modules.ReminderSound": {
+  "default": "true",
+  "name": "Reminder sound",
+  "description": "Play Windows' reminder sound when a reminder is due. Change the sound itself in Windows' Sound settings → More sound settings → Sounds → Calendar Reminder.",
+  "options": []
+ },
+ "Modules.QuietReminders": {
+  "default": "true",
+  "name": "Quiet reminders",
+  "description": "While a full-screen app runs, you're presenting, a meeting from your calendar is on, or Focus mode is on, reminders don't play a sound and show as a small pill. Tap it to see Snooze and Done.",
+  "options": []
+ },
+ "Modules.CalendarIcsUrl": {
+  "default": "",
+  "name": "Calendar link",
+  "description": "Your calendar's private iCal link (Google Calendar → Settings → your calendar → \"Secret address in iCal format\"; Outlook.com → Settings → Shared calendars → Publish → ICS). Several links can go in, separated by spaces. Bunbun fetches it every 5 minutes to show your next meeting with a Join button. Keep it private; anyone with the link can read the calendar.",
+  "options": []
+ },
+ "Modules.MeetingAlertMinutes": {
+  "default": "10",
+  "name": "Meeting alert (minutes before)",
+  "description": "How long before a meeting the island shows it with a countdown and Join button. 0 turns the alert off (the calendar tab still shows what's next).",
+  "options": []
+ },
+ "Modules.Downloads": {
+  "default": "true",
+  "name": "Download progress",
+  "description": "Shows browser downloads in your Downloads folder as they come in (name, size, speed), then \"Downloaded\". Click the finished pill to show the file.",
   "options": []
  },
  "Modules.GameOverlay": {
@@ -1125,6 +1192,42 @@
   "description": "Show the mascot beside the clock and the music pill. With music playing it puts on headphones and vibes.",
   "options": []
  },
+ "Bunbun.UpdateCheck": {
+  "default": "true",
+  "name": "Check for updates automatically",
+  "description": "Once a day, ask GitHub whether a newer Bunbun has been released, and show a notification if so. Nothing is downloaded or installed for you; the notification opens the release page.",
+  "options": []
+ },
+ "Bunbun.BatteryMoods": {
+  "default": "true",
+  "name": "Battery moods",
+  "description": "On laptops, the mascot holds a little plug while charging, gets drowsy below 15% and cheers when the battery is full.",
+  "options": []
+ },
+ "Bunbun.ChargingReminderMinutes": {
+  "default": "15",
+  "name": "Charging update every (minutes)",
+  "description": "While the battery charges, show its level (and time to full) this often. 0 turns it off.",
+  "options": []
+ },
+ "Bunbun.LocalAi": {
+  "default": "false",
+  "name": "Local AI",
+  "description": "When Bun doesn't understand a question, a small language model running offline on this PC answers it or turns it into a Bun command. Needs bunbun-brain.exe and a model file; see the Local AI guide. Nothing leaves your PC.",
+  "options": []
+ },
+ "Bunbun.LocalAiModel": {
+  "default": "",
+  "name": "Local AI model file",
+  "description": "Full path to a .gguf model. Leave empty to use the first .gguf in %LOCALAPPDATA%\\Bunbun\\models.",
+  "options": []
+ },
+ "Bunbun.LocalAiIdleMinutes": {
+  "default": "5",
+  "name": "Free the model's memory after (minutes)",
+  "description": "The model (about 1-2 GB of memory) is unloaded after this long without a question, and loads again in a second or two when needed.",
+  "options": []
+ },
  "Bunbun.MascotDnd": {
   "default": "false",
   "name": "Mascot do not disturb",
@@ -1134,13 +1237,13 @@
  "Bunbun.Character": {
   "default": "bunny",
   "name": "Mascot character",
-  "description": "bunny, cat, dog, fox, panda, robot, spiderman, doom, or custom:<folder> for a skin pack in %APPDATA%\\Bunbun\\mascots",
+  "description": "bunny, cat, dog, fox, panda, robot, spiderman, luffy, dazai, or custom:<folder> for a skin pack in %APPDATA%\\Bunbun\\mascots",
   "options": []
  },
  "Bunbun.MascotColor": {
   "default": "",
   "name": "Mascot colour",
-  "description": "Per-mascot colours, e.g. bunny=#F4B6C8;cat=#5B5868. A mascot without an entry keeps its own colour. Spidey, Doom and skin packs can't be recoloured.",
+  "description": "Per-mascot colours, e.g. bunny=#F4B6C8;cat=#5B5868. A mascot without an entry keeps its own colour. Spidey, Luffy, Dazai and skin packs can't be recoloured.",
   "options": []
  },
  "Bunbun.MascotMotion": {

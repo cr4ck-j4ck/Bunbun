@@ -28,6 +28,8 @@ rm -rf "$STAGE" "dist/$NAME.zip"
 mkdir -p "$STAGE"
 cp build/bunbun.exe build/bunbun-hook.exe build/bunbun-settings.exe build/WebView2Loader.dll "$STAGE/"
 cp -r build/settings-ui "$STAGE/settings-ui"
+# Optional: the local AI helper, when this build has it. Never a model file.
+[ -f build/bunbun-brain.exe ] && cp build/bunbun-brain.exe "$STAGE/"
 cp README.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md "$STAGE/"
 cat > "$STAGE/START HERE.txt" <<EOF
 Bunbun $VERSION

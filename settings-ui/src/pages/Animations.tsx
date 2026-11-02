@@ -111,6 +111,7 @@ export function Animations() {
       </section>
       <Section title="Speed & smoothness">
         <Setting k="Animations.AnimationSpeed" />
+        <Setting k="Animations.PowerSaver" />
         <Setting k="Animations.TargetFPS" />
         <Setting k="Bunbun.AmbientFps" label="Ambient frame rate" />
       </Section>

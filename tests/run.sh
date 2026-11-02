@@ -8,7 +8,7 @@ LLVM_MINGW="${LLVM_MINGW:-$(ls -d .toolchain/llvm-mingw-*-ucrt-x86_64 2>/dev/nul
 CXX="$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++"
 [ -x "$CXX" ] || CXX="${CXX}.exe"
 "$CXX" -std=c++20 -DUNICODE -D_UNICODE -municode -O1 -static \
-    tests/test_core.cpp src/agents/hook_installer.cpp src/assistant/assistant.cpp -o build/test_core.exe -lole32 -lshell32 -luuid
+    tests/test_core.cpp src/agents/hook_installer.cpp src/assistant/assistant.cpp -o build/test_core.exe -lole32 -lshell32 -luuid -lwinhttp
 if command -v cygpath >/dev/null 2>&1; then
     scratch="$(mktemp -d)"
     trap 'rm -rf "$scratch"' EXIT

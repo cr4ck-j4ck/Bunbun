@@ -1,4 +1,4 @@
-import { BatteryMedium, CalendarClock, Cpu, FolderDown, Gamepad2, Mic, Music2, Shield } from "lucide-react";
+import { BatteryMedium, CalendarClock, CalendarDays, Cpu, FolderDown, Gamepad2, Mic, Music2, Shield } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { useStore } from "../store";
 import { PageHead, Setting, Toggle } from "../ui/controls";
@@ -12,17 +12,21 @@ const GROUPS: Group[] = [
       "Modules.LyricsOffsetMs", "Modules.LyricsOffsetBluetoothMs", "Modules.MediaExpandBlocklist"] },
   { id: "system", title: "System flyouts", desc: "Volume, brightness, battery, Bluetooth, Caps Lock, Do Not Disturb.", icon: <BatteryMedium size={18} />,
     keys: ["Modules.Volume", "Modules.Brightness", "Modules.Battery", "Modules.BluetoothIndicator", "Modules.BluetoothShowBattery",
-      "Modules.CapsLock", "Modules.DoNotDisturbIndicator", "Modules.Progress", "Modules.StatusCountdownProgress"] },
+      "Modules.CapsLock", "Modules.DoNotDisturbIndicator", "Modules.Progress", "Modules.StatusCountdownProgress",
+      "Bunbun.BatteryMoods", "Bunbun.ChargingReminderMinutes"] },
   { id: "notify", title: "Notifications & clipboard", desc: "Toasts from your apps and a peek at what you copy.", icon: <CalendarClock size={18} />,
     keys: ["Modules.Clipboard", "Modules.NotificationRespectDnD", "Modules.TimerModule"] },
+  { id: "calendar", title: "To-dos, meetings & downloads", desc: "Reminders and a to-do list, your next meeting with a Join button, and browser downloads as they arrive.", icon: <CalendarDays size={18} />,
+    keys: ["Modules.TodoModule", "Modules.ReminderSound", "Modules.QuietReminders", "Modules.CalendarIcsUrl", "Modules.MeetingAlertMinutes", "Modules.Downloads"] },
   { id: "dash", title: "Dashboards", desc: "Weather and the hardware monitor when you hover the island.", icon: <Cpu size={18} />,
     keys: ["Modules.Weather", "Modules.WeatherCity", "Modules.WeatherFahrenheit", "Modules.HardwareMonitorModule", "Modules.ConnectivityModule", "Modules.ShowMetricText"] },
   { id: "game", title: "Game overlay", desc: "A compact metrics strip for fullscreen play.", icon: <Gamepad2 size={18} />, main: "Modules.GameOverlay",
     keys: ["Modules.GameOverlayCompact", "Modules.GameOverlayShowFps", "Modules.GameOverlayShowCpu", "Modules.GameOverlayShowGpu", "Modules.GameOverlayShowRam", "Modules.GameOverlayShowDisk"] },
   { id: "files", title: "File shelf", desc: "Drop files on the island, drag them out later.", icon: <FolderDown size={18} />, main: "Modules.FileTrayModule",
     keys: ["Modules.FileTrayMaxItems", "Modules.FileTrayPersist"] },
-  { id: "privacy", title: "Privacy dots", desc: "Orange when the microphone is in use, green for the camera.", icon: <Mic size={18} />, main: "Indicators.PrivacyDots",
-    keys: ["Indicators.PrivacyDotsMic", "Indicators.PrivacyDotsMicHex", "Indicators.PrivacyDotsCam", "Indicators.PrivacyDotsCamHex"] },
+  { id: "privacy", title: "Privacy dots", desc: "Orange when the microphone is in use, green for the camera, blue while the screen is recorded.", icon: <Mic size={18} />, main: "Indicators.PrivacyDots",
+    keys: ["Indicators.PrivacyDotsMic", "Indicators.PrivacyDotsMicHex", "Indicators.PrivacyDotsCam", "Indicators.PrivacyDotsCamHex",
+      "Indicators.PrivacyDotsScreen", "Indicators.PrivacyDotsScreenHex"] },
   { id: "lookup", title: "Quick Lookup & Ask Bun", desc: "The Ctrl+Alt+B box: Bun's commands, plus dictionary and Wikipedia.", icon: <Shield size={18} />, main: "Modules.QuickLookup",
     keys: ["Bunbun.Assistant", "Bunbun.SearchEngine"] },
 ];

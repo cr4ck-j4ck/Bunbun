@@ -1,8 +1,54 @@
-import { ExternalLink, FileText, RotateCcw } from "lucide-react";
+import { Download, ExternalLink, FileText, RefreshCw, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { call } from "../bridge";
 import { schema, useStore } from "../store";
 import { PageHead, Row, Section, Setting, Toggle } from "../ui/controls";
+
+type UpdateInfo = {
+  current: string;
+  checked: boolean;
+  latest?: string;
+  newer?: boolean;
+  url?: string;
+  error?: string;
+};
+
+// "Check for updates": asks GitHub for the latest release (the host does the
+// request on a worker thread). Nothing is downloaded; Download opens the page.
+function Updates() {
+  const [busy, setBusy] = useState(false);
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [failed, setFailed] = useState("");
+  const check = () => {
+    setBusy(true);
+    setFailed("");
+    call<UpdateInfo>("checkUpdate")
+      .then(setInfo)
+      .catch((e) => setFailed(String(e?.message ?? e)))
+      .finally(() => setBusy(false));
+  };
+  let status = "Bunbun looks for new releases on GitHub.";
+  if (failed) status = `Couldn't check: ${failed}`;
+  else if (info && !info.checked) status = `Couldn't check: ${info.error ?? "unknown error"}`;
+  else if (info?.newer) status = `Bunbun ${info.latest} is available. You have ${info.current}.`;
+  else if (info) status = `You're up to date (${info.current}).`;
+  return (
+    <>
+      <Row label="Check for updates" description={status}>
+        {info?.newer && info.url && (
+          <button className="btn small primary" onClick={() => call("openUrl", { url: info.url })}>
+            <Download size={14} /> Download {info.latest}
+          </button>
+        )}
+        <button className="btn small" onClick={check} disabled={busy}>
+          <RefreshCw size={14} className={busy ? "spin" : ""} /> {busy ? "Checking…" : "Check now"}
+        </button>
+      </Row>
+      <Setting k="Bunbun.UpdateCheck" label="Check automatically"
+        description="Once a day, with a notification when there's a new version. Nothing is downloaded or installed for you." />
+    </>
+  );
+}
 
 export function General() {
   const s = useStore();
@@ -50,6 +96,9 @@ export function General() {
             <RotateCcw size={14} /> Reset all
           </button>
         </Row>
+      </Section>
+      <Section title="Updates">
+        <Updates />
       </Section>
       <Section title="About">
         <Row label="Bunbun" description="A native Dynamic Island for Windows with coding agent companions and mascot vibes.">

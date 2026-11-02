@@ -50,6 +50,9 @@ Outputs, all in `build/`:
 - `bunbun-hook.exe`: the relay that coding agents run on each hook event
 - `bunbun-settings.exe` and `WebView2Loader.dll`: the settings window
 - `settings-ui/`: the settings UI, built with Vite
+- `bunbun-brain.exe` (optional): the local AI helper, only after `./scripts/setup.sh --local-ai`
+  fetched llama.cpp. The first build compiles llama.cpp once into `.toolchain/llama-build`. See
+  [Local AI](local-ai.md); model files are never part of the build or the repository.
 
 `./build.sh debug` builds without optimisation and with symbols; debug with
 `.toolchain/llvm-mingw-*/bin/lldb.exe`. The version comes from the `VERSION` file.
@@ -143,5 +146,5 @@ window, start `build/bunbun-settings.exe` with `BUNBUN_UI_DEV=http://localhost:5
 
 | Variable | Effect |
 |---|---|
-| `BUNBUN_LOG=1` | Writes `%LOCALAPPDATA%\Bunbun\bunbun.log` |
+| `BUNBUN_LOG=1` | Writes `%LOCALAPPDATA%\Bunbun\bunbun.log`, including one line a second with frames drawn, why, and time per frame |
 | `BUNBUN_HOOK_DEBUG=1` | The hook explains on stderr why an event didn't arrive |

@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Bot, Brush, Gauge, Home, LayoutGrid, Monitor, Search, Settings2, Smile } from "lucide-react";
+import { Bot, Brush, Gauge, Home, LayoutGrid, ListChecks, Monitor, Search, Settings2, Smile } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { StoreContext, useSettingsStore } from "./store";
 import { useAppTheme } from "./theme";
@@ -11,6 +11,7 @@ import { Mascot } from "./pages/Mascot";
 import { Animations } from "./pages/Animations";
 import { Features } from "./pages/Features";
 import { Assistant } from "./pages/Assistant";
+import { Todos } from "./pages/Todos";
 import { General, SearchResults } from "./pages/General";
 
 const PAGES: { id: string; label: string; icon: ReactNode }[] = [
@@ -20,6 +21,7 @@ const PAGES: { id: string; label: string; icon: ReactNode }[] = [
   { id: "mascot", label: "Mascot studio", icon: <Smile size={17} /> },
   { id: "animations", label: "Animations", icon: <Gauge size={17} /> },
   { id: "features", label: "Features", icon: <LayoutGrid size={17} /> },
+  { id: "todos", label: "To-dos", icon: <ListChecks size={17} /> },
   { id: "assistant", label: "Assistant & agents", icon: <Bot size={17} /> },
   { id: "general", label: "General", icon: <Settings2 size={17} /> },
 ];
@@ -51,6 +53,7 @@ export default function App() {
   else if (page === "mascot") content = <Mascot />;
   else if (page === "animations") content = <Animations />;
   else if (page === "features") content = <Features />;
+  else if (page === "todos") content = <Todos />;
   else if (page === "assistant") content = <Assistant />;
   else if (page === "general") content = <General />;
   else content = <Overview go={setPage} />;

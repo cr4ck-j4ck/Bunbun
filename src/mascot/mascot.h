@@ -27,9 +27,12 @@ enum class Mood {
     Sleepy,    // eyes closed, ears down
     Music,     // headphones on, bobbing to the beat
     Snack,     // munching a drumstick: do not disturb is on
+    Listening, // ears up, leaning in: you're typing to Bun
+    Talking,   // mouth moving, speech bubble: Bun is answering
+    Confused,  // head tilt, uneven eyes, a swirl: Bun didn't understand
 };
 
-enum class Character { Bunny, Cat, Dog, Fox, Panda, Robot, Spiderman, Doom, Custom };
+enum class Character { Bunny, Cat, Dog, Fox, Panda, Robot, Spiderman, Luffy, Dazai, Custom };
 
 struct Style {
     Character character = Character::Bunny;
@@ -70,6 +73,12 @@ void Draw(ID2D1RenderTarget* rt, D2D1_POINT_2F center, float size, Mood mood, do
 // fit sized for Bun's ears leaves short-eared characters with a gap above them.
 void FitToBox(D2D1_RECT_F box, D2D1_POINT_2F* center, float* size);
 
+// How far the current character's art reaches left and right of its centre, in
+// units of its size (0.5 = the edge of its square). A skin pack's effects (a
+// question mark, sparks, a raised hand) can reach past the head; layouts leave
+// room for them so the island's edge or the text beside it doesn't cut them.
+void HorizontalReach(float* left, float* right);
+
 // Same, with an explicit style (the settings app previews unsaved styles).
 void DrawStyled(ID2D1RenderTarget* rt, const Style& style, D2D1_POINT_2F center, float size, Mood mood, double t,
                 double moodSince, D2D1_POINT_2F look);
@@ -87,5 +96,8 @@ void ReleaseThreadResources();
 // Music mood: how hard the beat is (0..1, e.g. the audio level). Defaults to a
 // steady groove when nothing better is known. Thread-safe.
 void SetMusicEnergy(float energy);
+
+// Battery: while charging, the built-in characters hold a little plug. Thread-safe.
+void SetCharging(bool charging);
 
 }  // namespace bb::mascot

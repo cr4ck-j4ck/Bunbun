@@ -1,4 +1,4 @@
-import { Bot, Check, Info, Keyboard, Link2, Unlink2 } from "lucide-react";
+import { BookOpen, Bot, Check, FolderOpen, Info, Keyboard, Link2, Unlink2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { call } from "../bridge";
 import { useStore } from "../store";
@@ -11,6 +11,17 @@ const COMMANDS = [
 ];
 
 type AgentStatus = Record<string, string | boolean>;
+type AiStatus = { helper: boolean; modelsFolder: string; models: { name: string; path: string; size: number }[] };
+
+const GUIDE = "https://github.com/iaryasharma/Bunbun/blob/main/docs/local-ai.md";
+
+function aiSummary(ai: AiStatus) {
+  const gb = (n: number) => `${(n / 1e9).toFixed(1)} GB`;
+  const model = ai.models.length === 0
+    ? `No model yet: put a .gguf file in ${ai.modelsFolder}.`
+    : `${ai.models.length === 1 ? `Model: ${ai.models[0].name} (${gb(ai.models[0].size)}).` : `${ai.models.length} models found.`}`;
+  return `${ai.helper ? "Helper installed." : "bunbun-brain.exe isn't built yet (see the guide)."} ${model} Runs offline; nothing leaves this PC.`;
+}
 
 // Every agent connects the same way and gets the same island experience:
 // session, live steps, diffs, approval cards, and a hop when it finishes.
@@ -50,6 +61,14 @@ export function Assistant() {
     .then((r) => { setStatus(r); setStatusError(false); })
     .catch(() => setStatusError(true));
   useEffect(() => { refresh(); }, []);
+  const [ai, setAi] = useState<AiStatus | null>(null);
+  const refreshAi = () => call<AiStatus>("localAiStatus").then(setAi).catch(() => setAi(null));
+  useEffect(() => {
+    refreshAi();
+    // Pick up a model dropped into the folder while this page is open.
+    const t = setInterval(refreshAi, 5000);
+    return () => clearInterval(t);
+  }, []);
 
   const toggle = async (a: (typeof AGENTS)[number]) => {
     if (!status) return;
@@ -97,6 +116,24 @@ Your other settings stay as they are, and a backup is made first.`);
           <HotkeyKey value={s.get("Shortcuts.LookupKey")} onChange={(v) => s.set("Shortcuts.LookupKey", v)} />
         </Row>
         <Setting k="Bunbun.SearchEngine" />
+      </Section>
+      <Section title="Local AI">
+        <Setting k="Bunbun.LocalAi" />
+        <Row label="Status" description={ai ? aiSummary(ai) : "Checking…"}>
+          {ai?.helper && ai.models.length > 0 && <span className="badge green"><Check size={12} /> Ready</span>}
+          <button className="btn small" onClick={() => call("openModelsFolder").then(refreshAi)}><FolderOpen size={14} /> Models folder</button>
+          <button className="btn small" onClick={() => call("openUrl", { url: GUIDE })}><BookOpen size={14} /> Guide</button>
+        </Row>
+        {ai && ai.models.length > 1 && (
+          <Row label="Model" description="Which downloaded model Bun uses." settingKeys={["Bunbun.LocalAiModel"]}>
+            <select className="field" style={{ minWidth: 220 }} value={s.get("Bunbun.LocalAiModel")}
+              onChange={(e) => s.set("Bunbun.LocalAiModel", e.target.value)}>
+              <option value="">First in the folder</option>
+              {ai.models.map((m) => <option key={m.path} value={m.path}>{m.name}</option>)}
+            </select>
+          </Row>
+        )}
+        <Setting k="Bunbun.LocalAiIdleMinutes" />
       </Section>
       <section className="section">
         <h3>Things you can say</h3>

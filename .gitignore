@@ -48,6 +48,10 @@ settings.ini
 Thumbs.db
 desktop.ini
 
+# Local AI model files: downloaded by each user, never committed (docs/local-ai.md)
+*.gguf
+models/
+
 # Antigravity workspace config (machine-specific paths; Bunbun connects Antigravity globally)
 .agents/
 

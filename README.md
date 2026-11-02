@@ -57,11 +57,16 @@ settles in with a snack when you turn on mascot do-not-disturb. You can also loa
 | | |
 |---|---|
 | **Music** | Album art, controls, waveform, synced lyrics, and the song title on the collapsed pill |
-| **Dashboards** | Hover to expand, scroll to switch: calendar, weather, hardware monitor (CPU, RAM, GPU, disk, network speed), connectivity (Wi-Fi, Bluetooth, Do Not Disturb), file shelf |
+| **Dashboards** | Hover to expand, scroll to switch: calendar, weather, hardware monitor (CPU, RAM, GPU, disk, network speed), connectivity (tap Wi-Fi or Bluetooth to toggle, hold it to pick a network or device; battery on laptops), file shelf |
 | **System flyouts** | Volume, brightness, battery, Bluetooth devices, Caps Lock |
+| **To-dos & reminders** | Ask Bun `add buy milk`, `remind me at 3pm to call Sam` or `remind me every weekday at 9 to stand up`; a To-do tab, a reminder pill with Snooze and Done (quiet in full screen, presentations and meetings), and a To-dos page in Settings to edit and reschedule. Stored on your PC only |
+| **Focus mode** | `focus 50`: a timer, the mascot on do-not-disturb, notifications held back, and a summary of what you ticked off |
+| **Meetings** | Paste your calendar's private iCal link (Google or Outlook) and the island counts down to your next meeting with a **Join** button |
+| **Downloads** | Browser downloads show as they arrive (name, size, speed), then "Downloaded" |
 | **Notifications & clipboard** | App toasts and a peek at what you copy |
-| **Privacy dots** | Orange while the microphone is in use, green for the camera |
-| **Ask Bun** | Press **Ctrl+Alt+B** and type `open notepad`, `volume 40`, `next song`, `timer 25 min`, `weather`, `12*7`, `dnd on`… A local assistant: nothing is sent to any AI service |
+| **Local AI (optional)** | Turn on a small language model that runs offline on your PC. Bun then answers free-form questions and works like an agent: "get me ready for a meeting" turns on DND, lowers the volume and opens Teams; "is it warmer in Delhi or Mumbai?" looks both up and compares. No account, no keys; you download the model yourself ([guide](docs/local-ai.md)) |
+| **Privacy dots** | Orange while the microphone is in use, green for the camera, blue while the screen is recorded, and a short note naming the app ("Discord is using your microphone") |
+| **Ask Bun** | Press **Ctrl+Alt+B** and type `open notepad`, `volume 40`, `next song`, `timer 25 min`, `weather`, `12*7`, `dnd on`, `wifi off`, `brightness 60`, `add buy milk`, `remind me in 20 min to stretch`, `undo`… Up arrow recalls earlier commands; Ctrl+Z undoes the last one A local assistant: nothing is sent to any AI service |
 
 ## The settings app
 
@@ -129,6 +134,7 @@ for quick options. Settings live in `%APPDATA%\Bunbun\settings.ini`.
 | [Building](docs/building.md) | Toolchain, building, tests, the live dev loop |
 | [Coding agents](docs/agents.md) | Connecting agents, how approvals work, troubleshooting |
 | [Mascots](docs/mascots.md) | Characters, moods, custom skin packs |
+| [Local AI](docs/local-ai.md) | Optional offline AI for Ask Bun: what to download, setup, how it works |
 | [Architecture](docs/architecture.md) | How the pieces fit, source layout, security model |
 | [Contributing](CONTRIBUTING.md) | Code style, where to add things, project rules |
 | [Security](SECURITY.md) | Reporting vulnerabilities |
@@ -136,9 +142,18 @@ for quick options. Settings live in `%APPDATA%\Bunbun\settings.ini`.
 
 ## Privacy
 
-No telemetry and no AI service. The network is used only by the weather, lyrics and dictionary
-modules, and by web searches you ask Bun for. Agent hooks talk to the island over a local pipe that
-only your user account can open.
+No telemetry and no AI service. The optional local AI runs entirely on your PC. The network is used only by the weather, lyrics and dictionary
+modules (and weather for a city you ask about), by the calendar link you add (fetched every 5 minutes), by web searches you ask Bun for, and by a once-a-day update check that asks GitHub for the
+latest release (turn it off in **Settings → General → Updates**). Agent hooks talk to the island
+over a local pipe that only your user account can open.
+
+## Updates
+
+Bunbun checks GitHub once a day and shows a notification when a new version is out; click it, or
+**Update available** in the tray menu, to open the release page. You can also check any time from
+the tray (**Check for updates…**) or **Settings → General → Updates**. Nothing is downloaded or
+installed for you: unzip the new release over the old folder (quit Bunbun first) and your settings
+and connected agents carry over.
 
 ## Credits & license
 

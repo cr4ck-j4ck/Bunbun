@@ -1,6 +1,7 @@
 import { Check, FolderOpen, Info, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { call } from "../bridge";
+import { SheetImport } from "../ui/SheetImport";
 import { useStore } from "../store";
 import { ColorField, PageHead, Row, Section, Setting, Toggle } from "../ui/controls";
 import { colorFor, LiveMascot, MascotImage, MascotStyle, useMascotStyle, withColor } from "../ui/mascot";
@@ -13,16 +14,18 @@ const CHARACTERS = [
   ["panda", "Bao", "Sleepy panda, black eye patches."],
   ["robot", "Bolt", "LED eyes and an antenna that blinks."],
   ["spiderman", "Spidey", "Masked web-slinger with expressive lenses."],
-  ["doom", "Doom", "Steel mask, green hood, a glowing aura when he needs you."],
+  ["luffy", "Luffy", "Straw hat, big grin, and Gear 5 when there's work to do."],
+  ["dazai", "Dazai", "Bandaged, bored-looking detective who reads while you work."],
 ] as const;
 
 const MOODS = [
   ["idle", "Idle"], ["working", "Working"], ["thinking", "Thinking"], ["alert", "Needs you"],
   ["happy", "Celebrate"], ["music", "Music"], ["snack", "Do not disturb"], ["sad", "Error"], ["sleepy", "Sleepy"],
+  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"],
 ] as const;
 
-// Preset colours per character; "" is the character's own colour. Spidey, Doom
-// and skin packs keep their own look and get no colour row.
+// Preset colours per character; "" is the character's own colour. Luffy, Dazai and
+// skin packs keep their own look and get no colour row; Spidey's colours are Venom suits.
 const PALETTES: Record<string, string[]> = {
   bunny: ["", "#F4B6C8", "#CFC6BD", "#DDAE74", "#B9A7F2", "#9CC3F5", "#5B5868"],
   cat: ["", "#F08A3C", "#2D2B33", "#F7F1E8", "#9AA6B2", "#DDAE74", "#B9A7F2"],
@@ -30,7 +33,10 @@ const PALETTES: Record<string, string[]> = {
   fox: ["", "#E86A33", "#F7F1E8", "#B5532E", "#9AA6B2", "#F4B6C8", "#5B5868"],
   panda: ["", "#F4D9C6", "#F4B6C8", "#9AD7C2", "#CFC6BD", "#B9A7F2", "#9CC3F5"],
   robot: ["", "#9AD7C2", "#F4B6C8", "#F2C48D", "#B9A7F2", "#5B5868", "#E8E8EC"],
+  // Any colour turns Spidey's suit into a Venom suit in that shade, with grey webbing.
+  spiderman: ["", "#17161C", "#22263A", "#2B1B33"],
 };
+const SWATCH_NAMES: Record<string, string> = { "#17161C": "Venom", "#22263A": "Venom (midnight)", "#2B1B33": "Venom (plum)" };
 
 export function Mascot() {
   const s = useStore();
@@ -99,7 +105,7 @@ export function Mascot() {
           <Row label={`${current}'s colour`} description="Each mascot remembers its own colour. The first swatch is the original." settingKeys={["Bunbun.MascotColor"]}>
             <div className="swatches">
               {palette.map((c) => (
-                <button key={c || "auto"} title={c || "Original colour"} aria-label={c || "Original colour"} aria-pressed={style.color.toUpperCase() === c}
+                <button key={c || "auto"} title={SWATCH_NAMES[c] ?? (c || "Original colour")} aria-label={SWATCH_NAMES[c] ?? (c || "Original colour")} aria-pressed={style.color.toUpperCase() === c}
                   className={style.color.toUpperCase() === c ? "on" : ""}
                   style={{ background: c || "conic-gradient(#f7f1e8, #f08a3c, #b9a7f2, #9ad7c2, #f7f1e8)" }}
                   onClick={() => setColor(c)} />
@@ -126,7 +132,17 @@ export function Mascot() {
       </Section>
 
       <Section title="Custom skins">
-        <Row label="Skin packs" description={<>Make a folder in <code>{folder || "%APPDATA%\\Bunbun\\mascots"}</code> with <code>idle.png</code> and, optionally, <code>working</code>, <code>thinking</code>, <code>alert</code>, <code>happy</code>, <code>sad</code>, <code>sleepy</code>, <code>music</code> and <code>snack</code> PNGs. Square, transparent, 256 px or more.</>}>
+        <div className="row" style={{ display: "block" }}>
+          <div className="label" style={{ marginBottom: 10 }}>
+            <b>Make a pack from a character sheet</b>
+            <span>One row per mood, a few frames per row: they play as an animation. A row of look directions makes your character look at the cursor.</span>
+          </div>
+          <SheetImport onSaved={(pack) => {
+            call<string[]>("listPacks").then(setPacks);
+            s.set("Bunbun.Character", `custom:${pack}`);
+          }} />
+        </div>
+        <Row label="Skin packs" description={<>Or make a folder in <code>{folder || "%APPDATA%\\Bunbun\\mascots"}</code> with <code>idle.png</code> and, optionally, <code>working</code>, <code>thinking</code>, <code>alert</code>, <code>happy</code>, <code>sad</code>, <code>sleepy</code>, <code>music</code>, <code>snack</code>, <code>listening</code>, <code>talking</code> and <code>confused</code> PNGs. Square, transparent, 256 px or more.</>}>
           <button className="btn small" onClick={() => call("openPacksFolder")}><FolderOpen size={15} /> Open folder</button>
           <button className="btn small" onClick={() => call<string[]>("listPacks").then(setPacks)}><RotateCcw size={14} /> Refresh</button>
         </Row>

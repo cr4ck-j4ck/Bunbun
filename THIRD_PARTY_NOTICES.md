@@ -12,6 +12,7 @@ Bunbun incorporates ideas and components under open-source software licenses.
 | Framer Motion | Settings UI animations | MIT |
 | Lucide React | Settings UI icons | ISC |
 | Vite & TypeScript | Settings UI build tooling | MIT / Apache-2.0 |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | Optional local AI helper (`bunbun-brain.exe`); built only when fetched with `scripts/setup.sh --local-ai`. Model files are not part of Bunbun: each carries its own licence | MIT |
 | [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) | Statically linked C++ toolchain & runtime (libc++, mingw-w64 CRT) | Apache-2.0 with LLVM Exception |
 
 ### Exclusions & Proprietary Assets

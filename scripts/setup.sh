@@ -13,9 +13,15 @@ cd "$(dirname "$0")/.."
 LLVM_MINGW_VER=20261020
 CPPWINRT_VER=3.0.260818.1
 WEBVIEW2_VER=1.0.4314.35
+# Optional local AI (bunbun-brain.exe). Only fetched with --local-ai; see docs/local-ai.md.
+LLAMA_CPP_TAG=b11721
+CMAKE_VER=4.4.4
+NINJA_VER=1.13.2
 
 TOOLCHAIN="${TOOLCHAIN:-.toolchain}"
 mkdir -p "$TOOLCHAIN"
+LOCAL_AI=0
+[ "${1:-}" = "--local-ai" ] && LOCAL_AI=1
 
 # Extracts a zip (or .nupkg, which is a zip) with PowerShell; Git Bash has no unzip.
 extract() {
@@ -60,6 +66,30 @@ fi
 if [ ! -d settings-ui/node_modules ]; then
     echo "Settings UI packages"
     (cd settings-ui && npm ci)
+fi
+
+# ── Optional: what bunbun-brain.exe (the local AI helper) is built from ───────
+# llama.cpp (MIT) runs the model; CMake and Ninja build it. Portable copies,
+# nothing is installed system-wide. The model itself is never downloaded here:
+# the user picks one (docs/local-ai.md).
+if [ "$LOCAL_AI" = 1 ]; then
+    if [ ! -x "$TOOLCHAIN/cmake/bin/cmake.exe" ]; then
+        echo "CMake $CMAKE_VER"
+        fetch "https://github.com/Kitware/CMake/releases/download/v$CMAKE_VER/cmake-$CMAKE_VER-windows-x86_64.zip" "$TOOLCHAIN/cmake.zip"
+        extract "$TOOLCHAIN/cmake.zip" "$TOOLCHAIN"
+        mv "$TOOLCHAIN/cmake-$CMAKE_VER-windows-x86_64" "$TOOLCHAIN/cmake"
+        rm -f "$TOOLCHAIN/cmake.zip"
+    fi
+    if [ ! -x "$TOOLCHAIN/ninja/ninja.exe" ]; then
+        echo "Ninja $NINJA_VER"
+        fetch "https://github.com/ninja-build/ninja/releases/download/v$NINJA_VER/ninja-win.zip" "$TOOLCHAIN/ninja.zip"
+        extract "$TOOLCHAIN/ninja.zip" "$TOOLCHAIN/ninja"
+        rm -f "$TOOLCHAIN/ninja.zip"
+    fi
+    if [ ! -f "$TOOLCHAIN/llama.cpp/include/llama.h" ]; then
+        echo "llama.cpp $LLAMA_CPP_TAG"
+        git clone --quiet --depth 1 --branch "$LLAMA_CPP_TAG" https://github.com/ggml-org/llama.cpp "$TOOLCHAIN/llama.cpp"
+    fi
 fi
 
 echo "Toolchains ready in $TOOLCHAIN. Next: ./build.sh"

@@ -165,6 +165,77 @@ std::wstring PercentEncodeUtf8(const std::wstring& text) {
     return out;
 }
 
+// Bunbun: Ask Bun "weather in Mumbai" / "rain tomorrow". A one-off wttr.in request
+// for any place ("" = the Weather city setting, else wttr.in's guess from the IP)
+// and day (0 today, 1 tomorrow). Blocking: call it from a worker thread.
+bool FetchWeatherReport(const std::wstring& place, int days, std::wstring* title, std::wstring* subtitle, std::wstring* body) {
+    const Settings settings = GetSettingsCopy();
+    const bool f = settings.weatherFahrenheit;
+    const std::wstring where = place.empty() ? settings.weatherCity : place;
+    const std::wstring encoded = PercentEncodeUtf8(where);
+    const std::wstring path = (encoded.empty() ? std::wstring(L"/") : L"/" + encoded) + L"?format=j1";
+    const std::string res = HttpGet(L"wttr.in", path.c_str(), true);
+    bb::json::Value v;
+    if (res.empty() || !bb::json::Parse(res, &v) || !v.isObject()) return false;
+    auto first = [](const bb::json::Value* a) -> const bb::json::Value* {
+        return a && a->isArray() && !a->arr.empty() ? &a->arr.front() : nullptr;
+    };
+    auto text = [](const bb::json::Value* o, const char* key) -> std::wstring {  // [{"value": "..."}]
+        const bb::json::Value* a = o ? o->find(key) : nullptr;
+        if (!a || !a->isArray() || a->arr.empty()) return {};
+        return bb::todos::FromUtf8(a->arr.front().getString("value"));
+    };
+    const bb::json::Value* now = first(v.find("current_condition"));
+    const bb::json::Value* forecast = v.find("weather");
+    if (!now || !forecast || !forecast->isArray() || forecast->arr.size() <= static_cast<size_t>(days)) return false;
+    const bb::json::Value& day = forecast->arr[static_cast<size_t>(days)];
+
+    // "Mumbai, India": the place as asked (wttr.in's nearest area is often a
+    // neighbourhood, "Ballard Estate"), with wttr.in's country so a misheard place shows.
+    const bb::json::Value* area = first(v.find("nearest_area"));
+    std::wstring name;
+    if (place.empty()) {
+        name = text(area, "areaName");
+    } else {
+        name = place;
+        for (size_t i = 0; i < name.size(); ++i)
+            if (i == 0 || name[i - 1] == L' ') name[i] = towupper(name[i]);
+    }
+    const std::wstring country = text(area, "country");
+    if (name.empty()) name = where.empty() ? std::wstring(L"Here") : where;
+    if (!country.empty() && country != name) name += L", " + country;
+    *title = name;
+
+    const wchar_t* unit = f ? L"F" : L"C";
+    const std::wstring hi = bb::todos::FromUtf8(day.getString(f ? "maxtempF" : "maxtempC"));
+    const std::wstring lo = bb::todos::FromUtf8(day.getString(f ? "mintempF" : "mintempC"));
+    wchar_t buf[512];
+    if (days == 0) {
+        *subtitle = L"Weather now · wttr.in";
+        std::wstring desc = text(now, "weatherDesc");
+        while (!desc.empty() && desc.back() == L' ') desc.pop_back();
+        swprintf(buf, 512, L"%ls°%ls and %ls. Feels like %ls°, humidity %ls%%. Today %ls° / %ls°.",
+                 bb::todos::FromUtf8(now->getString(f ? "temp_F" : "temp_C")).c_str(), unit, desc.c_str(),
+                 bb::todos::FromUtf8(now->getString(f ? "FeelsLikeF" : "FeelsLikeC")).c_str(),
+                 bb::todos::FromUtf8(now->getString("humidity")).c_str(), hi.c_str(), lo.c_str());
+    } else {
+        *subtitle = L"Tomorrow · wttr.in";
+        // Midday (the 12:00 slot of the 3-hourly list) describes the day best.
+        std::wstring desc;
+        int rain = 0;
+        if (const bb::json::Value* hourly = day.find("hourly"); hourly && hourly->isArray() && !hourly->arr.empty()) {
+            const bb::json::Value& noon = hourly->arr[std::min<size_t>(4, hourly->arr.size() - 1)];
+            desc = text(&noon, "weatherDesc");
+            for (const bb::json::Value& h : hourly->arr) rain = std::max(rain, atoi(h.getString("chanceofrain").c_str()));
+        }
+        while (!desc.empty() && desc.back() == L' ') desc.pop_back();
+        swprintf(buf, 512, L"%ls° / %ls°%ls, %ls. Chance of rain up to %d%%.", hi.c_str(), lo.c_str(), unit,
+                 desc.empty() ? L"no description" : desc.c_str(), rain);
+    }
+    *body = buf;
+    return !hi.empty();
+}
+
 DWORD WINAPI WeatherThreadProc(void*) {
     // Initial delay to avoid slowing down startup
     WaitForSingleObject(g_stopEvent, 3000);

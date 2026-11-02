@@ -123,7 +123,8 @@ select.field option { background: #1d1a26; }
 .choice.on { border-color: var(--accent-line); background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
 .choice b { display: block; font-weight: 600; margin-top: 10px; }
 .choice small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.4; }
-.choice .check { position: absolute; top: 10px; right: 10px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent-grad); display: grid; place-items: center; color: var(--on-accent, #1a1222); }
+/* z-index: card previews are positioned and come later in the markup, so without it they cover the check. */
+.choice .check { position: absolute; top: 10px; right: 10px; z-index: 2; width: 20px; height: 20px; border-radius: 50%; background: var(--accent-grad); display: grid; place-items: center; color: var(--on-accent, #1a1222); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45); }
 
 /* ── Hero & previews ───────────────────────────────────────────────────── */
 .hero { position: relative; display: grid; grid-template-columns: 1fr 1.25fr; gap: 26px; align-items: center; padding: 26px; border-radius: var(--r-lg); border: 1px solid var(--line); background:
@@ -233,3 +234,40 @@ code, .selectable { user-select: text; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* Refresh icon while checking for updates */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.9s linear infinite; }
+
+/* ── To-dos page ───────────────────────────────────────────────────────────── */
+.todo-add { display: flex; gap: 10px; align-items: center; }
+.todo-add .field:first-child { flex: 1; }
+.todo-add .field[type="datetime-local"] { min-width: 0; width: 210px; }
+.todo-row { display: flex; align-items: flex-start; gap: 14px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.todo-row:first-child { border-top: 0; }
+.todo-check { flex: none; width: 20px; height: 20px; margin-top: 1px; border-radius: 50%; border: 1.5px solid var(--line-strong); background: none; display: grid; place-items: center; cursor: pointer; color: var(--on-accent, #1a1222); transition: background .15s, border-color .15s; }
+.todo-check.on { background: var(--accent-grad); border-color: transparent; }
+.todo-main { flex: 1; min-width: 0; }
+.todo-main > b { display: block; font-weight: 550; cursor: text; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.todo-main > .field { width: 100%; }
+.todo-row.done .todo-main > b { color: var(--faint); text-decoration: line-through; }
+.todo-when { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+.todo-edit { display: none; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.todo-row:hover .todo-edit, .todo-row:focus-within .todo-edit { display: flex; }
+.todo-edit .field[type="datetime-local"] { min-width: 0; width: 210px; }
+.todo-repeat { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.todo-repeat select.field { min-width: 170px; }
+.todo-days { display: flex; gap: 4px; }
+.todo-day { width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line); background: none; color: var(--muted); cursor: pointer; font-size: 12px; }
+.todo-day.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--text); }
+.todo-empty { padding: 18px; color: var(--muted); }
+.todo-row .btn.small { flex: none; opacity: 0; transition: opacity .15s; }
+.todo-row:hover .btn.small, .todo-row:focus-within .btn.small { opacity: 1; }
+
+/* Character sheet import (Mascot studio) */
+.sheet-rows { display: grid; gap: 6px; margin-top: 12px; max-height: 420px; overflow-y: auto; padding-right: 4px; }
+.sheet-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 10px; opacity: .6; transition: opacity .15s, border-color .15s; }
+.sheet-row.on { opacity: 1; border-color: var(--accent); }
+.sheet-row select { flex: none; width: 190px; }
+.sheet-frames { display: flex; gap: 4px; overflow-x: auto; min-width: 0; max-width: 100%; }
+.sheet-frames img { height: 52px; width: auto; border-radius: 6px; background: repeating-conic-gradient(var(--panel) 0 25%, transparent 0 50%) 50% / 12px 12px; }

@@ -19,9 +19,12 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <ctime>
 #include <string>
+#include <thread>
 
 #include "agents/agent_view.h"
+#include "common/update.h"
 #include "agents/hook_installer.h"
 #include "island/island.h"
 #include "island/wh_shim.h"
@@ -33,6 +36,7 @@ namespace {
 
 constexpr UINT WM_TRAY = WM_APP + 0x500;
 constexpr UINT WM_BUNBUN_QUIT = WM_APP + 0x501;  // sent by `bunbun.exe --quit`
+constexpr UINT WM_BUNBUN_UPDATE = WM_APP + 0x502;  // lParam: UpdateNews*, wParam: 1 = asked by the user
 constexpr wchar_t kTrayClass[] = L"BunbunTray";
 constexpr UINT kTrayId = 1;
 enum MenuId : UINT {
@@ -41,6 +45,7 @@ enum MenuId : UINT {
     kMenuSettings,
     kMenuFolder,
     kMenuAutostart,
+    kMenuUpdate,
     kMenuQuit,
 };
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -49,6 +54,71 @@ constexpr wchar_t kAppName[] = L"Bunbun";
 HWND g_trayWnd = nullptr;
 HICON g_icon = nullptr;
 UINT g_taskbarCreated = 0;
+
+// ── Update check ────────────────────────────────────────────────────────────
+// A worker asks GitHub for the latest release (90 s after start, then daily
+// while Bunbun.UpdateCheck is on) and posts the answer here; the tray thread
+// owns everything below. Nothing is downloaded: the user gets a notification
+// and the release page.
+void Balloon(const wchar_t* title, const wchar_t* text);  // below
+
+struct UpdateNews {
+    bb::update::Release release;
+};
+std::wstring g_updateUrl;      // release page of a newer version, empty when up to date
+std::wstring g_updateVersion;  // "0.2.0"
+bool g_balloonIsUpdate = false;
+HANDLE g_updateStop = nullptr;
+std::thread g_updateThread;
+
+void PostUpdateCheck(bool manual) {
+    std::thread([manual] {
+        auto* news = new UpdateNews{bb::update::FetchLatest(BUNBUN_USER_AGENT)};
+        if (!g_trayWnd || !PostMessageW(g_trayWnd, WM_BUNBUN_UPDATE, manual ? 1 : 0, reinterpret_cast<LPARAM>(news)))
+            delete news;
+    }).detach();
+}
+
+void UpdateLoop() {
+    // Not at startup: give the island its first minute, and don't hit the network
+    // at sign-in when Wi-Fi may not be up yet.
+    DWORD wait = 90 * 1000;
+    while (WaitForSingleObject(g_updateStop, wait) == WAIT_TIMEOUT) {
+        wait = 60 * 60 * 1000;  // then look once an hour whether a day has passed
+        if (Wh_GetIntSetting(L"Bunbun.UpdateCheck") == 0) continue;
+        const int nowMin = static_cast<int>(std::time(nullptr) / 60);
+        if (nowMin - Wh_GetIntValue(L"UpdateLastCheck", 0) < 24 * 60) continue;
+        Wh_SetIntValue(L"UpdateLastCheck", nowMin);
+        PostUpdateCheck(false);
+    }
+}
+
+void OnUpdateNews(UpdateNews* news, bool manual) {
+    const bb::update::Release& r = news->release;
+    const std::string current = bb::update::Narrow(WH_MOD_VERSION);
+    if (r.ok && bb::update::CompareVersions(r.version, current) > 0) {
+        g_updateUrl = bb::update::Widen(r.url);
+        g_updateVersion = bb::update::Widen(r.version);
+        // Automatic checks announce each new version once; asking always answers.
+        const int packed = bb::update::PackVersion(r.version);
+        if (manual || Wh_GetIntValue(L"UpdateNotified", 0) != packed) {
+            Wh_SetIntValue(L"UpdateNotified", packed);
+            g_balloonIsUpdate = true;
+            Balloon((L"Bunbun " + g_updateVersion + L" is available").c_str(),
+                    (L"You have " + std::wstring(WH_MOD_VERSION) + L". Click to open the download page.").c_str());
+        }
+    } else if (r.ok) {
+        g_updateUrl.clear();
+        g_updateVersion.clear();
+        if (manual) {
+            g_balloonIsUpdate = false;
+            Balloon(L"You're up to date", (L"Bunbun " + std::wstring(WH_MOD_VERSION) + L" is the latest version.").c_str());
+        }
+    } else if (manual) {
+        g_balloonIsUpdate = false;
+        Balloon(L"Couldn't check for updates", bb::update::Widen(r.error).c_str());
+    }
+}
 
 // Renders Bun into a 32x32 icon, so the tray matches the island exactly.
 HICON MakeBunIcon(int px) {
@@ -177,6 +247,8 @@ void ShowMenu(HWND hwnd) {
     AppendMenuW(menu, MF_STRING, kMenuSettings, L"Settings…");
     AppendMenuW(menu, MF_STRING, kMenuFolder, L"Open data folder");
     AppendMenuW(menu, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), kMenuAutostart, L"Start with Windows");
+    AppendMenuW(menu, MF_STRING, kMenuUpdate,
+                g_updateUrl.empty() ? L"Check for updates…" : (L"Update available: Bunbun " + g_updateVersion + L"…").c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuQuit, L"Quit Bunbun");
 
@@ -209,6 +281,10 @@ void ShowMenu(HWND hwnd) {
             break;
         }
         case kMenuAutostart: SetAutostart(!AutostartEnabled()); break;
+        case kMenuUpdate:
+            if (!g_updateUrl.empty()) ShellExecuteW(nullptr, L"open", g_updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            else PostUpdateCheck(true);
+            break;
         case kMenuQuit: PostQuitMessage(0); break;
     }
 }
@@ -218,6 +294,14 @@ LRESULT CALLBACK TrayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         const UINT event = LOWORD(lp);
         if (event == WM_CONTEXTMENU || event == WM_RBUTTONUP || event == NIN_SELECT || event == NIN_KEYSELECT)
             ShowMenu(hwnd);
+        if (event == NIN_BALLOONUSERCLICK && g_balloonIsUpdate && !g_updateUrl.empty())
+            ShellExecuteW(nullptr, L"open", g_updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return 0;
+    }
+    if (msg == WM_BUNBUN_UPDATE) {
+        auto* news = reinterpret_cast<UpdateNews*>(lp);
+        OnUpdateNews(news, wp == 1);
+        delete news;
         return 0;
     }
     if (msg == g_taskbarCreated && g_taskbarCreated) {  // Explorer restarted
@@ -312,6 +396,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
         return 1;
     }
     bb::agents::Start();
+    g_updateStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_updateThread = std::thread(UpdateLoop);
     if (!bb::hooks::ClaudeHooksInstalled()) {
         Balloon(L"Hi, I'm Bun!", L"Right-click me in the tray and choose “Connect Claude Code” to see your agents on the island.");
     }
@@ -349,6 +435,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
         }
     }
 
+    SetEvent(g_updateStop);
+    if (g_updateThread.joinable()) g_updateThread.join();
     bb::agents::Stop();
     NOTIFYICONDATAW nid{sizeof nid};
     nid.hWnd = g_trayWnd;

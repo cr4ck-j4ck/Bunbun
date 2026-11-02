@@ -14,6 +14,8 @@
 #include "island.h"
 #include "../mascot/mascot.h"
 #include "../assistant/assistant.h"
+#include "../common/todos.h"  // Bunbun: to-do file and repeats, shared with the settings app
+#include "../common/json.h"   // Bunbun: talking to the local AI helper
 #include <windows.h>
 #include <unknwn.h>
 #include <dwmapi.h>
@@ -34,6 +36,8 @@
 #include <audiopolicy.h>
 #include <endpointvolume.h>
 #include <mmdeviceapi.h>
+#include <devicetopology.h>                // Bunbun: Bluetooth audio connect / disconnect
+#include <functiondiscoverykeys_devpkey.h>
 #include <mmreg.h>
 #include <mmsystem.h>
 #include <objbase.h>
@@ -58,6 +62,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <functional>
+#include <regex>   // Bunbun: meeting links in calendar events
 #include <string>
 #include <string_view>
 #include <thread>
@@ -88,6 +94,7 @@
 #include <winrt/Windows.Devices.Bluetooth.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Devices.Radios.h>  // Bunbun: Bluetooth radio on/off
+#include <winrt/Windows.Devices.Power.h>   // Bunbun: battery report (charge rate, wear)
 #else
 #define DYNAMIC_ISLAND_HAS_BLUETOOTH_WATCHER 0
 #endif
@@ -402,6 +409,10 @@ enum class IslandKind {
     Split,
     Lookup,
     Agent,  // Bunbun: coding-agent session / approval card
+    Meeting,   // Bunbun: next meeting from the calendar link, with Join
+    Privacy,   // Bunbun: "<app> is using your microphone / camera / screen"
+    Reminder,  // Bunbun: a to-do reminder that's due, with Snooze / Done
+    Download,  // Bunbun: a browser download in progress / just finished
 };
 
 enum class BluetoothDeviceCategory {
@@ -584,6 +595,7 @@ struct Settings {
     bool expandedMediaAnim = false;   // hover player: text/cover flip/controls transitions
     bool pillCoverAnim = false;      // collapsed pill: cover spin/drop
     float animationSpeed = 1.0f;
+    int powerSaver = 0;  // Bunbun: 0 auto (on battery / Windows battery saver), 1 always, 2 never
     bool media = true;
     bool mediaAutoExpand = false;
     bool clipboard = true;
@@ -662,6 +674,19 @@ struct Settings {
     D2D1_COLOR_F camDotColor = D2D1::ColorF(0.204f, 0.780f, 0.349f, 1.0f); // #34C759
     bool hardwareMonitorModule = true;
     bool connectivityModule = true;  // Bunbun: Wi-Fi / Bluetooth / DND tab
+    bool todoModule = true;          // Bunbun: To-do tab and reminders
+    bool localAi = false;            // Bunbun: Ask Bun's local AI (bunbun-brain.exe)
+    std::wstring localAiModel;       // Bunbun: a .gguf file; empty = the first in %LOCALAPPDATA%\Bunbun\models
+    int localAiIdleMinutes = 5;      // Bunbun: close the helper (free its memory) after this long idle
+    bool reminderSound = true;       // Bunbun: play Windows' reminder sound when one is due
+    bool quietReminders = true;      // Bunbun: silent, small pill in full screen / presenting / meetings / focus
+    std::wstring calendarIcsUrl;     // Bunbun: private iCal link(s) for the next meeting
+    int meetingAlertMinutes = 10;    // Bunbun: meeting pill shows this long before; 0 = never
+    bool downloadsModule = true;     // Bunbun: browser download pill
+    bool batteryMoods = true;        // Bunbun: mascot plug / drowsy / cheer
+    int chargingReminderMinutes = 15;  // Bunbun: "still charging" pill interval; 0 = off
+    bool privacyDotsScreen = true;   // Bunbun: dot while the screen is being captured
+    D2D1_COLOR_F privacyDotsScreenHex = D2D1::ColorF(0.31f, 0.55f, 1.0f, 1.0f);
     bool doNotDisturbIndicator = true;
     bool notificationRespectDnD = true;
 
@@ -788,7 +813,12 @@ struct ClipboardSnapshot {
 struct BatterySnapshot {
     bool active = false;
     bool low = false;
-    bool charging = false;
+    bool charging = false;      // plugged in
+    bool hasBattery = false;    // Bunbun: a laptop / tablet (desktops report none)
+    bool reallyCharging = false;  // Bunbun: plugged in and the battery is taking charge
+    bool reminder = false;      // Bunbun: this alert is the periodic "still charging" one
+    bool full = false;          // Bunbun: this alert says the battery just filled up
+    int minutesToFull = -1;     // Bunbun: from the battery report, -1 when unknown
     int percent = 100;
     DWORD secondsRemaining = BATTERY_LIFE_UNKNOWN;
     double expiresAt = 0.0;
@@ -880,10 +910,14 @@ struct SystemSnapshot {
     bool charging = false;
     bool micActive = false;      // orange dot: microphone in use
     bool cameraActive = false;   // green dot: camera in use
+    bool screenActive = false;   // Bunbun: blue dot, an app is capturing the screen
+    std::wstring screenApp;
     std::wstring foregroundTitle;
     std::wstring micApp;
     std::wstring cameraApp;
 };
+
+#include "modules/bunbun_types.inc"  // Bunbun: types for the Bunbun modules
 
 // Bunbun: Wi-Fi / Ethernet / Bluetooth status for the Connectivity tab.
 // Do Not Disturb comes from g_isDnDActive, which is already event-driven.
@@ -896,6 +930,20 @@ struct ConnectivitySnapshot {
     bool ethernetConnected = false;
     int bluetoothRadio = -1;     // -1 no radio, 0 off, 1 on
     std::vector<std::wstring> bluetoothDevices;
+    // Bunbun: the laptop / tablet battery. Desktops report none and get no card.
+    bool hasBattery = false;
+    int batteryPercent = 0;
+    bool onPower = false;        // plugged in
+    bool charging = false;       // actually charging (plugged in can also mean "held at a limit")
+    bool batterySaver = false;
+    DWORD batterySecondsLeft = BATTERY_LIFE_UNKNOWN;
+    int chargeRateMw = 0;        // from the battery report; 0 when unknown
+    int remainingMwh = 0;
+    int fullMwh = 0;             // today's full charge
+    int designMwh = 0;           // when new
+    // Long-press lists, only filled while one is on screen.
+    std::vector<WifiNetwork> wifiNetworks;
+    std::vector<BluetoothListDevice> bluetoothList;
 };
 
 struct Activity {
@@ -989,6 +1037,8 @@ struct LookupSnapshot {
     std::wstring example;    // dictionary example sentence, if any
     std::wstring source;     // "Dictionary" / "Wikipedia"
     double expiresAt = 0.0;
+    bool talking = false;    // Bunbun: the local AI is still writing this answer (mascot talks)
+    bool confused = false;   // Bunbun: Bun didn't understand, or couldn't get an answer (mascot is puzzled)
 };
 
 // Shared by Renderer::MeasureLookupCard / DrawLookup and ActivityForKind so the
@@ -1048,6 +1098,7 @@ struct LookupUiState {
     double caretResetAt = 0.0;      // blink restarts on every edit
     std::wstring clipboardQuery;    // clipboard suggestion captured when the panel opened
     HWND prevForeground = nullptr;  // window to hand focus back to
+    int historyPos = -1;            // Bunbun: Up / Down through earlier queries; -1 = typing
 };
 LookupUiState g_lookupUi;
 
@@ -1121,6 +1172,11 @@ struct SharedState {
     BluetoothDeviceSnapshot bluetoothDevice;
     DoNotDisturbSnapshot doNotDisturb;
     BatterySnapshot battery;
+    MeetingSnapshot meeting;    // Bunbun: calendar link
+    PrivacyAlertSnapshot privacyAlert;  // Bunbun: "<app> is using your microphone"
+    std::vector<TodoItem> todos;        // Bunbun: to-dos (todos_module.inc)
+    ReminderSnapshot reminder;          // Bunbun: a reminder that's due
+    DownloadSnapshot download;  // Bunbun: browser downloads
     ProgressSnapshot progress;
     SystemSnapshot system;
     ConnectivitySnapshot connectivity;  // Bunbun
@@ -1157,7 +1213,10 @@ struct SpringValue {
             totalDt -= dt;
         }
 
-        if (std::fabs(value - target) < 0.01f && std::fabs(velocity) < 0.01f) {
+        // Bunbun: settle once the motion is far below a pixel. The old 0.01 / 0.01
+        // limits let sub-pixel nudges (text-measured widths shifting by a hair)
+        // keep a spring "moving" forever, and with it a full-refresh-rate redraw.
+        if (std::fabs(value - target) < 0.05f && std::fabs(velocity) < 0.5f) {
             value = target;
             velocity = 0.0f;
         }
@@ -1240,6 +1299,7 @@ std::atomic<int> g_hoveredSourceSlot{-1};
 std::atomic<int> g_pressedSourceSlot{-1};
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
 std::atomic<int> g_hoveredConnectivityCard = -1;  // Bunbun: Connectivity tab card under the cursor
+int g_connectivityCards = 3;  // Bunbun: cards last drawn on the Connectivity tab (4 with a battery); render thread only
 std::atomic<int> g_hoveredFileTrayAction = -1;  // -2 = bin button, >=0 = cut button of that row
 std::atomic<bool> g_trayDragOver{false};      // a file drag from outside is hovering the island
 std::atomic<bool> g_trayInternalDrag{false};  // a drag that started from the tray itself is running
@@ -1277,9 +1337,36 @@ std::mutex g_bluetoothBatteryCacheMutex;
 std::unordered_map<std::wstring, int> g_bluetoothBatteryCache;  // Bluetooth device Id -> last known battery percent (-1 = never learned)
 std::atomic<uint64_t> g_bluetoothConnectGeneration = 0;
 std::atomic<bool> g_isDnDActive = false;
+bool FocusModeActive();             // Bunbun: focus_module.inc
+void HoldNotificationForFocus();    // Bunbun: focus_module.inc
 void* g_wnfDndSubscription = nullptr;
 
+// Bunbun: battery saver. On when the setting says so, or (auto) when the PC runs
+// on battery or Windows' own battery saver is on. Read by the render loop only.
+bool g_powerSaving = false;
+long long g_framesDrawn = 0;  // Bunbun: render-thread only, for BUNBUN_LOG diagnostics
+double g_renderMsTotal = 0.0, g_ulwMsTotal = 0.0, g_loopBusyMs = 0.0;  // Bunbun: same; time in Render() and in UpdateLayeredWindow
+double QpcMs() { static LARGE_INTEGER f{}; if (!f.QuadPart) QueryPerformanceFrequency(&f); LARGE_INTEGER c; QueryPerformanceCounter(&c); return c.QuadPart * 1000.0 / f.QuadPart; }
+void UpdatePowerSaving(int mode, double now) {
+    static double s_checkedAt = -1e9;
+    if (mode == 1) { g_powerSaving = true; return; }
+    if (mode == 2) { g_powerSaving = false; return; }
+    if (now - s_checkedAt < 5.0) return;  // power state changes rarely
+    s_checkedAt = now;
+    SYSTEM_POWER_STATUS ps{};
+    g_powerSaving = GetSystemPowerStatus(&ps) && (ps.ACLineStatus == 0 || (ps.SystemStatusFlag & 1) != 0);
+}
+
 std::atomic<bool> g_gameOverlayPinned{false};
+// Bunbun: the game overlay keeps hover from expanding the island (so a mouse near
+// the top mid-game doesn't pop it open), which also made the dashboard impossible
+// to scroll. Scrolling the wheel over the island is deliberate, so it opens a
+// "peek" that shows the normal dashboard until the cursor has been away a moment.
+std::atomic<double> g_gameOverlayPeekUntil{0.0};
+double NowSeconds();
+bool GameOverlayShown(bool enabled) {
+    return (enabled || g_gameOverlayPinned.load()) && NowSeconds() >= g_gameOverlayPeekUntil.load(std::memory_order_relaxed);
+}
 std::atomic<bool> g_pinnedExpanded{false};
 std::atomic<int> g_pillOpacityOverride{-1};
 
@@ -1445,6 +1532,7 @@ int ActiveTabCount(const Settings& settings) {
     if (settings.hardwareMonitorModule) ++count;
     if (settings.connectivityModule) ++count;  // Bunbun
     if (settings.fileTrayModule) ++count;
+    if (settings.todoModule) ++count;  // Bunbun
     if (settings.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed)) ++count;
     return count;
 }
@@ -1833,35 +1921,6 @@ float MediaScrubFractionUnbounded(const MediaContentPoint& rawPt) {
 
 // Index of the File Tray row under a content-space point, or -1. Rows are drawn
 // newest-first, so index 0 is the most recently dropped file.
-// Bunbun: Connectivity tab layout, shared by DrawConnectivityDashboard and the
-// click / hover hit test so the two can't drift apart.
-namespace ConnectivityLayout {
-    constexpr float kPadX = 24.0f;
-    constexpr float kCardsTop = 40.0f;
-    constexpr float kCardHeight = 118.0f;
-    constexpr float kCardGap = 9.0f;
-    constexpr int kCards = 3;  // network, Bluetooth, Do Not Disturb
-}
-
-int ConnectivityCardAtContentPoint(const MediaContentPoint& pt) {
-    using namespace ConnectivityLayout;
-    if (!pt.valid || pt.height <= MediaLayout::kExpandedMinHeight) {
-        return -1;
-    }
-    if (pt.y < kCardsTop || pt.y > kCardsTop + kCardHeight) {
-        return -1;
-    }
-    const float cardW = (pt.width - kPadX * 2.0f - kCardGap * (kCards - 1)) / kCards;
-    const float x = pt.x - kPadX;
-    if (x < 0.0f || cardW <= 0.0f) {
-        return -1;
-    }
-    const int index = static_cast<int>(x / (cardW + kCardGap));
-    if (index >= kCards || x - index * (cardW + kCardGap) > cardW) {
-        return -1;
-    }
-    return index;
-}
 
 int FileTrayRowAtContentPoint(const MediaContentPoint& pt, int itemCount) {
     if (!pt.valid || itemCount <= 0 || pt.height <= MediaLayout::kExpandedMinHeight) {
@@ -2530,6 +2589,11 @@ void LoadSettings() {
     } else {
         next.animationSpeed = 1.0f;
     }
+    {
+        // Bunbun: battery saver mode
+        const std::wstring saver = GetStringSettingCopy(L"Animations.PowerSaver");
+        next.powerSaver = saver == L"always" ? 1 : saver == L"never" ? 2 : 0;
+    }
 
     next.media = Wh_GetIntSetting(L"Modules.Media") != 0;
     next.mediaAutoExpand = Wh_GetIntSetting(L"Modules.MediaAutoExpand") != 0;
@@ -2914,6 +2978,19 @@ void LoadSettings() {
     next.autoHideFullscreen = Wh_GetIntSetting(L"Behavior.AutoHideFullscreen") != 0;
     next.hardwareMonitorModule = Wh_GetIntSetting(L"Modules.HardwareMonitorModule") != 0;
     next.connectivityModule = Wh_GetIntSetting(L"Modules.ConnectivityModule") != 0;  // Bunbun
+    next.todoModule = Wh_GetIntSetting(L"Modules.TodoModule") != 0;                          // Bunbun
+    next.localAi = Wh_GetIntSetting(L"Bunbun.LocalAi") != 0;
+    next.localAiModel = GetStringSettingCopy(L"Bunbun.LocalAiModel");
+    next.localAiIdleMinutes = std::max(1, Wh_GetIntSetting(L"Bunbun.LocalAiIdleMinutes"));
+    next.reminderSound = Wh_GetIntSetting(L"Modules.ReminderSound") != 0;
+    next.quietReminders = Wh_GetIntSetting(L"Modules.QuietReminders") != 0;
+    next.calendarIcsUrl = GetStringSettingCopy(L"Modules.CalendarIcsUrl");                    // Bunbun
+    next.meetingAlertMinutes = std::max(0, Wh_GetIntSetting(L"Modules.MeetingAlertMinutes"));
+    next.downloadsModule = Wh_GetIntSetting(L"Modules.Downloads") != 0;
+    next.batteryMoods = Wh_GetIntSetting(L"Bunbun.BatteryMoods") != 0;
+    next.chargingReminderMinutes = std::max(0, Wh_GetIntSetting(L"Bunbun.ChargingReminderMinutes"));
+    next.privacyDotsScreen = Wh_GetIntSetting(L"Indicators.PrivacyDotsScreen") != 0;
+    next.privacyDotsScreenHex = ColorFromHex(GetStringSettingCopy(L"Indicators.PrivacyDotsScreenHex"), D2D1::ColorF(0.31f, 0.55f, 1.0f, 1.0f));
     const std::wstring borderModeStr = GetStringSettingCopy(L"Themes.ContourBorderMode");
     if (EqualsNoCase(borderModeStr, L"borderless")) {
         next.contourBorderMode = ContourBorderMode::Borderless;
@@ -5530,6 +5607,12 @@ DWORD WINAPI NotificationThreadProc(void*) {
                             if (g_settings.notificationRespectDnD && g_isDnDActive.load()) {
                                 continue;
                             }
+                            // Bunbun: Focus mode holds notifications back (they stay in Windows'
+                            // notification centre) and counts them for the summary.
+                            if (FocusModeActive()) {
+                                HoldNotificationForFocus();
+                                continue;
+                            }
 
                             NotificationSnapshot snapshot;
                             snapshot.active = true;
@@ -6523,6 +6606,28 @@ DWORD WINAPI AudioThreadProc(void*) {
 
     return 0;
 }
+// Bunbun: when the mascot last cheered for a full battery (NowSeconds clock).
+std::atomic<double> g_batteryCheerAt{-100.0};
+
+// Bunbun: minutes until the battery is full, from Windows' battery report; -1 if
+// the firmware doesn't say.
+int BatteryMinutesToFull() {
+#if DYNAMIC_ISLAND_HAS_BLUETOOTH_WATCHER
+    try {
+        const auto report = winrt::Windows::Devices::Power::Battery::AggregateBattery().GetReport();
+        const auto rate = report.ChargeRateInMilliwatts();
+        const auto remaining = report.RemainingCapacityInMilliwattHours();
+        const auto full = report.FullChargeCapacityInMilliwattHours();
+        if (rate && remaining && full && rate.Value() > 0 && full.Value() > remaining.Value()) {
+            const int minutes = static_cast<int>((full.Value() - remaining.Value()) * 60LL / rate.Value());
+            return minutes > 0 && minutes < 24 * 60 ? minutes : -1;
+        }
+    } catch (...) {
+    }
+#endif
+    return -1;
+}
+
 void UpdateBatterySnapshot() {
     SYSTEM_POWER_STATUS status = {};
     if (!GetSystemPowerStatus(&status)) {
@@ -6556,9 +6661,37 @@ void UpdateBatterySnapshot() {
         g_state.battery.secondsRemaining = status.BatteryLifeTime;
         g_state.battery.low = (!newCharging && newPercent <= 20);
 
+        // Bunbun: laptops get a "still charging" pill every few minutes while the
+        // battery takes charge, and one when it fills up (the mascot cheers).
+        const bool hasBattery = status.BatteryFlag != 128 && status.BatteryFlag != 255;
+        const bool reallyCharging = hasBattery && (status.BatteryFlag & 8) != 0;
+        const double now = NowSeconds();
+        static double s_lastReminder = 0.0;
+        if (reallyCharging && !g_state.battery.reallyCharging) s_lastReminder = now;  // the plug-in alert counts as the first
+        const bool justFull = hasBattery && newCharging && newPercent >= 100 && g_state.battery.reallyCharging && !reallyCharging;
+        g_state.battery.hasBattery = hasBattery;
+        g_state.battery.reallyCharging = reallyCharging;
+        g_state.battery.minutesToFull = reallyCharging ? BatteryMinutesToFull() : -1;
+        if (!triggerAlert) {
+            g_state.battery.reminder = false;
+            g_state.battery.full = false;
+        }
+        const int every = g_settings.chargingReminderMinutes;
+        if (reallyCharging && every > 0 && now - s_lastReminder >= every * 60.0) {
+            s_lastReminder = now;
+            triggerAlert = true;
+            g_state.battery.reminder = true;
+        }
+        if (justFull) {
+            triggerAlert = true;
+            g_state.battery.full = true;
+            g_batteryCheerAt.store(now, std::memory_order_relaxed);
+        }
+        bb::mascot::SetCharging(g_settings.batteryMoods && reallyCharging);
+
         if (triggerAlert) {
             g_state.battery.active = true;
-            g_state.battery.expiresAt = NowSeconds() + 4.0;
+            g_state.battery.expiresAt = NowSeconds() + ((g_state.battery.reminder || g_state.battery.full) ? 5.0 : 4.0);
         }
     }
 
@@ -6688,136 +6821,13 @@ void FormatBitRate(wchar_t (&buf)[N], float mbps, bool fresh) {
     }
 }
 
-// ── Bunbun: connectivity sampler (Wi-Fi, Ethernet, Bluetooth) ────────────────
-// Runs on its own thread: WLAN queries and the WinRT radio / device lookups can
-// take tens of milliseconds, too slow for the render thread. It samples once at
-// start, then only while the Connectivity tab is on screen (the render loop
-// stamps g_connectivityWantedAt and wakes it when the tab appears).
-std::atomic<double> g_connectivityWantedAt = 0.0;
-HANDLE g_connectivityWake = nullptr;
-HANDLE g_connectivityThread = nullptr;
-
-static std::wstring WideFromBytes(const unsigned char* bytes, size_t length) {
-    if (length == 0) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(bytes), static_cast<int>(length), nullptr, 0);
-    std::wstring out(static_cast<size_t>(std::max(n, 0)), L'\0');
-    if (n > 0) {
-        MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(bytes), static_cast<int>(length), out.data(), n);
-    }
-    return out;
-}
-
-static ConnectivitySnapshot SampleConnectivity(HANDLE& wlan) {
-    ConnectivitySnapshot c;
-    c.sampled = true;
-
-    if (!wlan) {
-        DWORD negotiated = 0;
-        if (WlanOpenHandle(2, nullptr, &negotiated, &wlan) != ERROR_SUCCESS) {
-            wlan = nullptr;
-        }
-    }
-    if (wlan) {
-        PWLAN_INTERFACE_INFO_LIST list = nullptr;
-        if (WlanEnumInterfaces(wlan, nullptr, &list) == ERROR_SUCCESS && list) {
-            for (DWORD i = 0; i < list->dwNumberOfItems; ++i) {
-                const WLAN_INTERFACE_INFO& info = list->InterfaceInfo[i];
-                if (c.wifiRadio < 0) c.wifiRadio = 0;
-
-                DWORD size = 0;
-                PWLAN_RADIO_STATE radio = nullptr;
-                if (WlanQueryInterface(wlan, &info.InterfaceGuid, wlan_intf_opcode_radio_state, nullptr, &size,
-                                       reinterpret_cast<PVOID*>(&radio), nullptr) == ERROR_SUCCESS && radio) {
-                    for (DWORD phy = 0; phy < radio->dwNumberOfPhys; ++phy) {
-                        if (radio->PhyRadioState[phy].dot11SoftwareRadioState == dot11_radio_state_on &&
-                            radio->PhyRadioState[phy].dot11HardwareRadioState == dot11_radio_state_on) {
-                            c.wifiRadio = 1;
-                        }
-                    }
-                    WlanFreeMemory(radio);
-                } else {
-                    c.wifiRadio = 1;  // adapter present, state unknown: assume on
-                }
-
-                if (info.isState == wlan_interface_state_connected) {
-                    c.wifiConnected = true;
-                    c.wifiRadio = 1;
-                    PWLAN_CONNECTION_ATTRIBUTES conn = nullptr;
-                    // Windows 11 24H2+ withholds the network name unless location
-                    // access is on for desktop apps; the card then just says Connected.
-                    if (WlanQueryInterface(wlan, &info.InterfaceGuid, wlan_intf_opcode_current_connection, nullptr, &size,
-                                           reinterpret_cast<PVOID*>(&conn), nullptr) == ERROR_SUCCESS && conn) {
-                        const DOT11_SSID& ssid = conn->wlanAssociationAttributes.dot11Ssid;
-                        c.wifiName = WideFromBytes(ssid.ucSSID, std::min<ULONG>(ssid.uSSIDLength, DOT11_SSID_MAX_LENGTH));
-                        c.wifiSignal = static_cast<int>(conn->wlanAssociationAttributes.wlanSignalQuality);
-                        WlanFreeMemory(conn);
-                    }
-                }
-            }
-            WlanFreeMemory(list);
-        }
-    }
-
-    ULONG64 ignoredIn = 0, ignoredOut = 0;
-    ReadPhysicalOctets(ignoredIn, ignoredOut, &c.ethernetConnected);
-
-#if DYNAMIC_ISLAND_HAS_BLUETOOTH_WATCHER
-    try {
-        using namespace winrt::Windows::Devices::Radios;
-        for (const Radio& radio : Radio::GetRadiosAsync().get()) {
-            if (radio.Kind() == RadioKind::Bluetooth) {
-                c.bluetoothRadio = radio.State() == RadioState::On ? 1 : 0;
-            }
-        }
-        if (c.bluetoothRadio == 1) {
-            using winrt::Windows::Devices::Bluetooth::BluetoothConnectionStatus;
-            using winrt::Windows::Devices::Bluetooth::BluetoothDevice;
-            using winrt::Windows::Devices::Bluetooth::BluetoothLEDevice;
-            using winrt::Windows::Devices::Enumeration::DeviceInformation;
-            const winrt::hstring selectors[] = {
-                BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected),
-                BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected),
-            };
-            for (const auto& selector : selectors) {
-                for (const DeviceInformation& device : DeviceInformation::FindAllAsync(selector).get()) {
-                    std::wstring name(device.Name());
-                    if (!name.empty() &&
-                        std::find(c.bluetoothDevices.begin(), c.bluetoothDevices.end(), name) == c.bluetoothDevices.end()) {
-                        c.bluetoothDevices.push_back(std::move(name));
-                    }
-                }
-            }
-        }
-    } catch (...) {
-        // Radio access can be blocked by policy; the card then shows "Unavailable".
-    }
-#endif
-    return c;
-}
-
-DWORD WINAPI ConnectivityThreadProc(void*) {
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
-    HANDLE wlan = nullptr;
-    const HANDLE waits[2] = {g_stopEvent, g_connectivityWake};
-    DWORD timeout = 0;  // sample once straight away
-    for (;;) {
-        const DWORD r = WaitForMultipleObjects(g_connectivityWake ? 2 : 1, waits, FALSE, timeout);
-        if (r == WAIT_OBJECT_0 || r == WAIT_FAILED) {
-            break;
-        }
-        ConnectivitySnapshot snapshot = SampleConnectivity(wlan);
-        {
-            std::lock_guard lock(g_stateMutex);
-            g_state.connectivity = std::move(snapshot);
-        }
-        g_layoutDirty = true;
-        const bool wanted = NowSeconds() - g_connectivityWantedAt.load(std::memory_order_relaxed) < 3.0;
-        timeout = wanted ? 2000 : INFINITE;
-    }
-    if (wlan) WlanCloseHandle(wlan, nullptr);
-    winrt::uninit_apartment();
-    return 0;
-}
+// Bunbun: connectivity sampler, Wi-Fi / Bluetooth lists and actions, battery report.
+#include "modules/connectivity_module.inc"
+// Bunbun: next meeting from the calendar link, and browser downloads.
+#include "modules/calendar_module.inc"
+#include "modules/downloads_module.inc"
+// Bunbun: to-dos and reminders.
+#include "modules/todos_module.inc"
 
 // ---- Endpoint volume notifications ----
 // Event-driven rather than polled: a 1s poll turned a held volume key into
@@ -7351,17 +7361,8 @@ void UpdateProgressSnapshot() {
     g_state.progress.percent = ClampInt(progress, 0, 100);
 }
 
-void UpdatePrivacyIndicators() {
-    std::wstring micApp;
-    std::wstring camApp;
-    const bool mic = (g_settings.privacyDots && g_settings.privacyDotsMic) ? IsMicrophoneActive(&micApp) : false;
-    const bool cam = (g_settings.privacyDots && g_settings.privacyDotsCam) ? IsCameraActive(&camApp) : false;
-    std::lock_guard lock(g_stateMutex);
-    g_state.system.micActive = mic;
-    g_state.system.cameraActive = cam;
-    g_state.system.micApp = micApp;
-    g_state.system.cameraApp = camApp;
-}
+// Bunbun: privacy dots (mic from live capture sessions, camera / screen from ConsentStore).
+#include "modules/privacy_module.inc"
 
 std::wstring ReadClipboardText(HWND hwnd) {
     std::wstring text;
@@ -7808,6 +7809,9 @@ int LookupRowAtContentPoint(const MediaContentPoint& pt, int rowCount, bool head
 // Press the Quick Lookup hotkey to look up whatever text is on the clipboard.
 #include "modules/lookup_module.inc"
 // ── Bunbun: agent card buttons ──────────────────────────────────────────────
+bool FocusAgentApp(const bb::AgentView& agent);
+bool FocusNotificationApp(const std::wstring& appName, const std::wstring& notifTitle);
+
 int AgentButtonAt(int x, int y) {
     if (g_agentButtons.empty()) return -1;
     const MediaContentPoint pt = MediaContentFromClient(x, y);
@@ -7958,7 +7962,27 @@ void SaveFileTray();
 void LoadFileTray();
 
 void HandleStatusClickAtPoint(HWND hwnd, LPARAM lParam) {
-    return;
+    bb::AgentView agent;
+    std::wstring notifApp, notifTitle;
+    bool hasAgent = false, hasNotif = false;
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (g_settings.bunbunAgents && g_state.agent.phase != bb::AgentPhase::None &&
+            (!g_state.agent.project.empty() || !g_state.agent.agent.empty())) {
+            agent = g_state.agent;
+            hasAgent = true;
+        }
+        if (g_state.notification.active) {
+            notifApp = g_state.notification.app;
+            notifTitle = g_state.notification.title;
+            hasNotif = true;
+        }
+    }
+    if (hasAgent) {
+        FocusAgentApp(agent);
+    } else if (hasNotif) {
+        FocusNotificationApp(notifApp, notifTitle);
+    }
 }
 
 void StartFocusTimer(int minutes, bool isBreak) {
@@ -8002,6 +8026,9 @@ void StopFocusTimer() {
     }
     TriggerNudge();
 }
+
+// Bunbun: Focus mode (timer + mascot DND + held notifications + summary).
+#include "modules/focus_module.inc"
 
 void ToggleEndpointMute() {
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -8204,6 +8231,145 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
+// Bunbun: robustly focus a window bypassing Windows foreground lock
+bool FocusWindow(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (root) hwnd = root;
+    // Joining the current foreground window's input queue lets SetForegroundWindow
+    // through Windows' foreground lock (attaching to the target's thread doesn't).
+    const DWORD curThread = GetCurrentThreadId();
+    HWND foreground = GetForegroundWindow();
+    const DWORD targetThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : curThread;
+    if (curThread != targetThread) {
+        AttachThreadInput(curThread, targetThread, TRUE);
+    }
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ShowWindow(hwnd, SW_SHOW);
+    }
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+    SetActiveWindow(hwnd);
+    if (curThread != targetThread) {
+        AttachThreadInput(curThread, targetThread, FALSE);
+    }
+    return true;
+}
+
+// Bunbun: focus an active coding agent's window (Antigravity, Cursor, VS Code, Claude, terminal).
+// Best match first: the agent's own app with the project in its title, then the
+// app alone, then any window titled with the project. Bunbun's own windows never
+// count (the settings window is titled "Bunbun", which is also a project name).
+bool FocusAgentApp(const bb::AgentView& agent) {
+    struct AgentSearch {
+        std::wstring project;
+        std::wstring agentName;
+        DWORD self = 0;
+        HWND both = nullptr;
+        HWND exeOnly = nullptr;
+        HWND titleOnly = nullptr;
+    };
+    AgentSearch as;
+    as.project = ToLowerCopy(agent.project);
+    as.agentName = ToLowerCopy(agent.agent);
+    as.self = GetCurrentProcessId();
+
+    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+        if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) return TRUE;
+        auto* s = reinterpret_cast<AgentSearch*>(lp);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == 0 || pid == s->self) return TRUE;
+        wchar_t titleBuf[512];
+        const int len = GetWindowTextW(hwnd, titleBuf, ARRAYSIZE(titleBuf));
+        const std::wstring t = len > 0 ? ToLowerCopy(std::wstring(titleBuf, static_cast<size_t>(len))) : std::wstring();
+        const bool titled = !s->project.empty() && t.find(s->project) != std::wstring::npos;
+
+        std::wstring exePath, exeName;
+        if (ProcessImageNameForPid(pid, &exePath)) {
+            exeName = ToLowerCopy(exePath);
+            const size_t slash = exeName.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) exeName = exeName.substr(slash + 1);
+        }
+        const bool terminal = exeName == L"windowsterminal.exe" || exeName == L"powershell.exe" || exeName == L"pwsh.exe" ||
+                              exeName == L"cmd.exe" || exeName == L"wezterm-gui.exe" || exeName == L"alacritty.exe";
+        // "Claude Code" contains "code", so Claude is checked before VS Code.
+        bool app = false;
+        if (s->agentName.find(L"claude") != std::wstring::npos) app = exeName.find(L"claude") != std::wstring::npos || terminal;
+        else if (s->agentName.find(L"antigravity") != std::wstring::npos) app = exeName.find(L"antigravity") != std::wstring::npos;
+        else if (s->agentName.find(L"cursor") != std::wstring::npos) app = exeName.find(L"cursor") != std::wstring::npos;
+        else if (s->agentName.find(L"code") != std::wstring::npos || s->agentName.find(L"copilot") != std::wstring::npos)
+            app = exeName == L"code.exe" || exeName == L"code - insiders.exe";
+        else if (s->agentName.find(L"terminal") != std::wstring::npos || s->agentName.find(L"cli") != std::wstring::npos ||
+                 s->agentName.find(L"codex") != std::wstring::npos || s->agentName.find(L"gemini") != std::wstring::npos)
+            app = terminal;
+
+        if (app && titled) {
+            s->both = hwnd;
+            return FALSE;  // can't do better
+        }
+        if (app && !s->exeOnly) s->exeOnly = hwnd;
+        if (titled && !s->titleOnly) s->titleOnly = hwnd;
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&as));
+
+    HWND target = as.both ? as.both : as.exeOnly ? as.exeOnly : as.titleOnly;
+    return target ? FocusWindow(target) : false;
+}
+
+// Bunbun: focus an app from a toast/notification
+bool FocusNotificationApp(const std::wstring& appName, const std::wstring& notifTitle) {
+    if (appName.empty() && notifTitle.empty()) return false;
+    struct NotifSearch {
+        std::wstring app;
+        std::wstring title;
+        HWND foundHwnd = nullptr;
+    };
+    NotifSearch ns;
+    ns.app = ToLowerCopy(appName);
+    ns.title = ToLowerCopy(notifTitle);
+
+    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+        if (!IsWindowVisible(hwnd)) return TRUE;
+        auto* s = reinterpret_cast<NotifSearch*>(lp);
+        DWORD owner = 0;
+        GetWindowThreadProcessId(hwnd, &owner);
+        if (owner == GetCurrentProcessId()) return TRUE;  // Bunbun's own windows
+        wchar_t titleBuf[512];
+        if (GetWindowTextW(hwnd, titleBuf, ARRAYSIZE(titleBuf)) > 0) {
+            std::wstring t = ToLowerCopy(std::wstring(titleBuf));
+            if (!s->app.empty() && t.find(s->app) != std::wstring::npos) {
+                s->foundHwnd = hwnd;
+                return FALSE;
+            }
+        }
+        if (!s->app.empty()) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid != 0) {
+                std::wstring exePath;
+                if (ProcessImageNameForPid(pid, &exePath)) {
+                    std::wstring exeLower = ToLowerCopy(exePath);
+                    size_t slash = exeLower.find_last_of(L"\\/");
+                    std::wstring exeName = (slash != std::wstring::npos) ? exeLower.substr(slash + 1) : exeLower;
+                    if (exeName.find(s->app) != std::wstring::npos || s->app.find(exeName) != std::wstring::npos) {
+                        s->foundHwnd = hwnd;
+                        return FALSE;
+                    }
+                }
+            }
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&ns));
+
+    if (ns.foundHwnd) {
+        return FocusWindow(ns.foundHwnd);
+    }
+    return false;
+}
+
 void OpenRelevantApp() {
     std::wstring title;
     std::wstring app;
@@ -8223,10 +8389,7 @@ void OpenRelevantApp() {
         HWND hwndToFocus = search.foundHwnd ? search.foundHwnd : search.fallbackHwnd;
 
         if (hwndToFocus) {
-            if (IsIconic(hwndToFocus)) {
-                ShowWindow(hwndToFocus, SW_RESTORE);
-            }
-            SetForegroundWindow(hwndToFocus);
+            FocusWindow(hwndToFocus);
             return;
         }
     }
@@ -8358,9 +8521,13 @@ std::vector<MediaSourceMenuItem> AppendMediaSourceItems(HMENU menu) {
     return items;
 }
 
+// Bunbun: undo for Ask Bun's commands, and setting the screen brightness.
+#include "modules/bun_actions.inc"
+
 // ── Bunbun: Bun's local assistant ───────────────────────────────────────────
 // Parses with bb::assistant and carries the intent out. Runs on the window
-// thread; returns the card the Ask Bun box shows.
+// thread; returns the card the Ask Bun box shows. Commands that ran set
+// `command`, so the card only flashes and the island goes back home.
 QuickLookup::Result RunBun(const std::wstring& question) {
     namespace as = bb::assistant;
     QuickLookup::Result r;
@@ -8388,30 +8555,41 @@ QuickLookup::Result RunBun(const std::wstring& question) {
         case as::Action::None:
         case as::Action::Reply:
             r.body = in.reply;
+            r.unknown = in.unknown;  // Bunbun: the local AI may answer instead
             break;
         case as::Action::Open: {
             const std::wstring target = in.target.empty() ? as::FindStartMenuApp(in.label) : in.target;
             if (target.empty()) r.body = L"I couldn’t find “" + in.label + L"”. Try the app’s exact name.";
-            else if (open(target)) r.body = L"Opening " + in.label + L" ✨";
+            else if (open(target)) { r.body = L"Opening " + in.label + L" ✨"; r.command = true; }
             else r.body = L"Windows couldn’t open " + in.label + L".";
             break;
         }
         case as::Action::WebSearch:
-            r.body = open(in.target) ? L"Searching the web for “" + in.label + L"”."
-                                     : std::wstring(L"I couldn’t open your browser.");
+            r.command = open(in.target);
+            r.body = r.command ? L"Searching the web for “" + in.label + L"”."
+                               : std::wstring(L"I couldn’t open your browser.");
             break;
-        case as::Action::MediaPrevious: SendMediaTransportCommand(0); r.body = L"Previous track."; break;
-        case as::Action::MediaToggle: SendMediaTransportCommand(1); r.body = L"Play / pause."; break;
-        case as::Action::MediaNext: SendMediaTransportCommand(2); r.body = L"Next track."; break;
+        case as::Action::MediaPrevious: SendMediaTransportCommand(0); r.body = L"Previous track."; r.command = true; break;
+        case as::Action::MediaToggle: SendMediaTransportCommand(1); r.body = L"Play / pause."; r.command = true; break;
+        case as::Action::MediaNext: SendMediaTransportCommand(2); r.body = L"Next track."; r.command = true; break;
         case as::Action::VolumeSet:
         case as::Action::VolumeUp:
         case as::Action::VolumeDown: {
             float target = in.number / 100.0f;
             if (in.action == as::Action::VolumeUp) target = current + 0.10f;
             if (in.action == as::Action::VolumeDown) target = current - 0.10f;
+            BOOL wasMuted = FALSE;
+            if (g_endpointVolume) g_endpointVolume->GetMute(&wasMuted);
             if (setVolume(target)) {
                 swprintf(buf, 256, L"Volume %d%%.", static_cast<int>(std::lround(Clamp(target, 0.0f, 1.0f) * 100)));
                 r.body = buf;
+                r.command = true;
+                SetBunUndo([previous = current, wasMuted]() {  // Bunbun
+                    if (!g_endpointVolume) return std::wstring(L"I can’t reach your speakers right now.");
+                    g_endpointVolume->SetMasterVolumeLevelScalar(previous, nullptr);
+                    g_endpointVolume->SetMute(wasMuted, nullptr);
+                    return std::wstring(L"Volume back to ") + std::to_wstring(static_cast<int>(std::lround(previous * 100))) + L"%.";
+                });
             } else {
                 r.body = L"I can’t reach your speakers right now.";
             }
@@ -8420,8 +8598,15 @@ QuickLookup::Result RunBun(const std::wstring& question) {
         case as::Action::Mute:
         case as::Action::Unmute:
             if (g_endpointVolume) {
+                BOOL wasMuted = FALSE;
+                g_endpointVolume->GetMute(&wasMuted);
                 g_endpointVolume->SetMute(in.action == as::Action::Mute, nullptr);
                 r.body = in.action == as::Action::Mute ? L"Muted. Shh \U0001F92B" : L"Sound is back on.";
+                r.command = true;
+                SetBunUndo([wasMuted]() {  // Bunbun
+                    if (g_endpointVolume) g_endpointVolume->SetMute(wasMuted, nullptr);
+                    return std::wstring(wasMuted ? L"Muted again." : L"Sound is back on.");
+                });
             } else {
                 r.body = L"I can’t reach your speakers right now.";
             }
@@ -8429,9 +8614,11 @@ QuickLookup::Result RunBun(const std::wstring& question) {
         case as::Action::Lock:
             LockWorkStation();
             r.body = L"Locked. See you soon!";
+            r.command = true;
             break;
         case as::Action::Screenshot:
-            r.body = open(L"ms-screenclip:") ? L"Snip away." : L"Snipping Tool isn’t available.";
+            r.command = open(L"ms-screenclip:");
+            r.body = r.command ? L"Snip away." : L"Snipping Tool isn’t available.";
             break;
         case as::Action::TimerStart:
             if (!GetSettingsCopy().timerEnabled) { r.body = L"The timer module is turned off in settings."; break; }
@@ -8439,20 +8626,124 @@ QuickLookup::Result RunBun(const std::wstring& question) {
             swprintf(buf, 256, L"Timer set for %d minute%ls. I’ll hop when it’s done.", in.number,
                      in.number == 1 ? L"" : L"s");
             r.body = buf;
+            r.command = true;
+            SetBunUndo([]() { StopFocusTimer(); return std::wstring(L"Timer cancelled."); });  // Bunbun
             break;
         case as::Action::TimerStop:
             StopFocusTimer();
             r.body = L"Timer stopped.";
+            r.command = true;
             break;
         case as::Action::MascotDndOn:
         case as::Action::MascotDndOff: {
             // Bunbun: written to settings.ini like the settings app does; "off" removes
             // the key so the default applies. The file watcher reloads the island.
             const bool on = in.action == as::Action::MascotDndOn;
+            const bool wasOn = GetSettingsCopy().mascotDnd;
+            SetBunUndo([wasOn]() {  // Bunbun
+                WritePrivateProfileStringW(L"Bunbun", L"MascotDnd", wasOn ? L"true" : nullptr, bb::SettingsPath());
+                LoadSettings();
+                g_layoutDirty = true;
+                return std::wstring(wasOn ? L"Snack time again." : L"I’m back! Bouncing again.");
+            });
             WritePrivateProfileStringW(L"Bunbun", L"MascotDnd", on ? L"true" : nullptr, bb::SettingsPath());
             LoadSettings();
             g_layoutDirty = true;
             r.body = on ? L"Snack time. I’ll stay quiet until you say “dnd off”." : L"I’m back! Bouncing again.";
+            r.command = true;
+            break;
+        }
+        case as::Action::WifiOn:
+        case as::Action::WifiOff:
+        case as::Action::BluetoothOn:
+        case as::Action::BluetoothOff: {
+            // Bunbun: the same switch as the Connectivity cards (connectivity_module.inc).
+            const bool bt = in.action == as::Action::BluetoothOn || in.action == as::Action::BluetoothOff;
+            const bool on = in.action == as::Action::WifiOn || in.action == as::Action::BluetoothOn;
+            SetRadioAsync(bt, on);
+            r.body = std::wstring(bt ? L"Bluetooth " : L"Wi-Fi ") + (on ? L"on." : L"off.");
+            r.command = true;
+            SetBunUndo([bt, on]() {
+                SetRadioAsync(bt, !on);
+                return std::wstring(bt ? L"Bluetooth " : L"Wi-Fi ") + (on ? L"off again." : L"back on.");
+            });
+            break;
+        }
+        case as::Action::BrightnessSet:
+        case as::Action::BrightnessUp:
+        case as::Action::BrightnessDown: {
+            // Bunbun: the built-in screen (bun_actions.inc).
+            const int was = CurrentPanelBrightness();
+            if (was < 0) {
+                r.body = L"I can only change a laptop’s built-in screen. Opening display settings.";
+                open(L"ms-settings:display");
+                break;
+            }
+            int target = in.number;
+            if (in.action == as::Action::BrightnessUp) target = std::min(100, was + 10);
+            if (in.action == as::Action::BrightnessDown) target = std::max(0, was - 10);
+            if (SetPanelBrightness(target)) {
+                swprintf(buf, 256, L"Brightness %d%%.", target);
+                r.body = buf;
+                r.command = true;
+                SetBunUndo([was]() {
+                    SetPanelBrightness(was);
+                    return std::wstring(L"Brightness back to ") + std::to_wstring(was) + L"%.";
+                });
+            } else {
+                r.body = L"Windows didn’t let me change the brightness. Opening display settings.";
+                open(L"ms-settings:display");
+            }
+            break;
+        }
+        case as::Action::Undo:
+            r.body = RunBunUndo();
+            r.command = r.body != L"Nothing to undo.";
+            break;
+        case as::Action::FocusStart: {
+            // Bunbun: Focus mode (focus_module.inc).
+            StartFocus(in.number);
+            swprintf(buf, 256, L"Focus for %d min. Notifications wait, the mascot's on do-not-disturb.", in.number);
+            r.body = buf;
+            r.command = true;
+            SetBunUndo([]() {
+                g_focusActive.store(false);  // no summary for a session that never really happened
+                StopFocusTimer();
+                return std::wstring(L"Focus cancelled.");
+            });
+            break;
+        }
+        case as::Action::FocusStop:
+            if (FocusModeActive()) {
+                EndFocus(false, true);  // its summary replaces this card
+                return r;
+            }
+            r.body = L"Focus mode isn’t on.";
+            break;
+        case as::Action::TodoAdd:
+        case as::Action::TodoList:
+        case as::Action::TodoDone:
+        case as::Action::TodoClearDone: {
+            // Bunbun: to-dos and reminders (todos_module.inc). Undo puts the whole
+            // list back as it was.
+            std::vector<TodoItem> before;
+            {
+                std::lock_guard lock(g_stateMutex);
+                before = g_state.todos;
+            }
+            bool ran = false;
+            r.body = RunTodoIntent(in, &ran);
+            r.command = ran;
+            if (ran) {
+                SetBunUndo([before]() {
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        g_state.todos = before;
+                    }
+                    Todos::Commit();
+                    return std::wstring(L"Put your list back the way it was.");
+                });
+            }
             break;
         }
         case as::Action::Info: {
@@ -8487,7 +8778,12 @@ QuickLookup::Result RunBun(const std::wstring& question) {
                     break;
                 }
                 case as::Info::Weather:
-                    if (s.weather.hasData) {
+                    if (!in.target.empty() || in.number > 0) {
+                        // Bunbun: another place, or tomorrow: SubmitLookup fetches it.
+                        r.weatherFetch = true;
+                        r.weatherPlace = in.target;
+                        r.weatherDays = in.number;
+                    } else if (s.weather.hasData) {
                         const float temp = fahrenheit ? s.weather.temperature * 9.0f / 5.0f + 32.0f : s.weather.temperature;
                         swprintf(buf, 256, L"%.0f°%ls and %ls in %ls. Feels like %ls°, humidity %ls.", temp,
                                  fahrenheit ? L"F" : L"C", s.weather.weatherDesc.c_str(), s.weather.city.c_str(),
@@ -8521,6 +8817,9 @@ QuickLookup::Result RunBun(const std::wstring& question) {
     }
     return r;
 }
+
+// Bunbun: the optional local AI behind Ask Bun (bunbun-brain.exe).
+#include "modules/brain_module.inc"
 
 void ApplyMediaSourceMenuCommand(UINT cmd, const std::vector<MediaSourceMenuItem>& items) {
     if (cmd < kMediaSourceMenuIdBase) return;
@@ -8969,6 +9268,7 @@ struct IdleStripMetrics {
     float weatherWidth = 0.0f;
     bool hasWeather = false;
     bool hasPrivacy = false;
+    float privacyReserve = 0.0f;  // Bunbun: width kept clear for the privacy dots
     float totalWidth = IdleStripLayout::kMinWidth;
 };
 
@@ -9177,8 +9477,7 @@ class Renderer {
         EnsureBrushes(settings, state, now);
         settingsOpacity_ = settings.pillOpacity;
 
-        const bool gameMetricsPresent = primary.kind == IslandKind::Idle &&
-            (settings.gameOverlay || g_gameOverlayPinned.load());
+        const bool gameMetricsPresent = primary.kind == IslandKind::Idle && GameOverlayShown(settings.gameOverlay);
         // True while the island is collapsing to nothing (auto-hide / fullscreen).
         islandHiding_ = primary.width < 1.0f && primary.height < 1.0f && !secondary;
 
@@ -9255,7 +9554,9 @@ class Renderer {
         info.dwFlags = ULW_ALPHA;
         info.prcDirty = fullPaint ? nullptr : &dirty;  // only this rect is re-composited
 
+        const double ulwStart = QpcMs();
         const bool presented = UpdateLayeredWindowIndirect(hwnd_, &info) != FALSE;
+        g_ulwMsTotal += QpcMs() - ulwStart;
         if (presented) {
             stageValid_ = true;
             lastOrigin_ = stage.origin;
@@ -9395,18 +9696,15 @@ class Renderer {
                 MeasureTextWidthCached(WidestDigitForm(label), fmt, idleWeatherWidthCache_);
         }
 
-        metrics.hasPrivacy =
-            (state.system.micActive && settings.privacyDots && settings.privacyDotsMic) ||
-            (state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam);
+        metrics.privacyReserve = PrivacyDotsReserve(state, settings);  // Bunbun: one slot per lit dot
+        metrics.hasPrivacy = metrics.privacyReserve > 0.0f;
 
         float total = IdleStripLayout::kPadX * 2.0f + metrics.clockWidth;
         if (metrics.hasWeather) {
             total += IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth +
                      metrics.weatherWidth;
         }
-        if (metrics.hasPrivacy) {
-            total += IdleStripLayout::kPrivacyReserve;
-        }
+        total += metrics.privacyReserve;
 
         total = std::ceil(total / IdleStripLayout::kWidthQuantum) * IdleStripLayout::kWidthQuantum;
         metrics.totalWidth = Clamp(total, IdleStripLayout::kMinWidth, IdleStripLayout::kMaxWidth);
@@ -10133,48 +10431,65 @@ class Renderer {
         float unH = (rect.bottom - rect.top) * invScale;
         D2D1_RECT_F unscaledRect = D2D1::RectF(pillCenter.x - unW * 0.5f, pillCenter.y - unH * 0.5f, pillCenter.x + unW * 0.5f, pillCenter.y + unH * 0.5f);
 
+        // Bunbun: compact pills draw their content left of the privacy dots (the
+        // activity was widened by the same amount in ActivityForKind).
+        D2D1_RECT_F contentRect = unscaledRect;
+        if (unH <= 55.0f) contentRect.right -= PrivacyDotsReserve(state, settings);
+
         switch (activity.kind) {
             case IslandKind::Media:
                 DrawMedia(state, unscaledRect, settings, now);
                 break;
             case IslandKind::Clipboard:
-                DrawClipboard(state, unscaledRect);
+                DrawClipboard(state, contentRect);
                 break;
             case IslandKind::Notification:
-                DrawNotification(state, unscaledRect);
+                DrawNotification(state, contentRect);
                 break;
             case IslandKind::Volume:
-                DrawVolume(state, unscaledRect);
+                DrawVolume(state, contentRect);
                 break;
             case IslandKind::Brightness:
-                DrawBrightness(state, unscaledRect);
+                DrawBrightness(state, contentRect);
                 break;
             case IslandKind::CapsLock:
-                DrawCapsLock(state, unscaledRect);
+                DrawCapsLock(state, contentRect);
                 break;
             case IslandKind::Agent:
-                DrawAgent(state, unscaledRect, settings, now);
+                DrawAgent(state, contentRect, settings, now);
                 break;
             case IslandKind::Device:
-                DrawDevice(state, unscaledRect);
+                DrawDevice(state, contentRect);
                 break;
             case IslandKind::Bluetooth:
-                DrawBluetoothDevice(state, unscaledRect);
+                DrawBluetoothDevice(state, contentRect);
                 break;
             case IslandKind::Timer:
-                DrawTimer(state, unscaledRect);
+                DrawTimer(state, contentRect);
                 break;
             case IslandKind::BatteryLow:
-                DrawBattery(state, unscaledRect);
+                DrawBattery(state, contentRect);
                 break;
             case IslandKind::Progress:
-                DrawProgress(state, unscaledRect);
+                DrawProgress(state, contentRect);
                 break;
             case IslandKind::DoNotDisturb:
-                DrawDoNotDisturb(state, unscaledRect);
+                DrawDoNotDisturb(state, contentRect);
                 break;
             case IslandKind::Lookup:
-                DrawLookup(state, unscaledRect, settings, now);
+                DrawLookup(state, contentRect, settings, now);
+                break;
+            case IslandKind::Reminder:
+                DrawReminderPill(state, contentRect, now);
+                break;
+            case IslandKind::Privacy:
+                DrawPrivacyPill(state, settings, contentRect);
+                break;
+            case IslandKind::Meeting:
+                DrawMeetingPill(state, contentRect);
+                break;
+            case IslandKind::Download:
+                DrawDownloadPill(state, contentRect, now);
                 break;
             case IslandKind::Idle:
             default:
@@ -10340,33 +10655,27 @@ class Renderer {
 
         const bool mic = state.system.micActive && settings.privacyDots && settings.privacyDotsMic;
         const bool cam = state.system.cameraActive && settings.privacyDots && settings.privacyDotsCam;
-        if (!mic && !cam) return;
+        const bool screen = state.system.screenActive && settings.privacyDots && settings.privacyDotsScreen;  // Bunbun
+        if (!mic && !cam && !screen) return;
 
         const float dotR   = 4.0f;
         const float margin = 16.0f;
         const float dotY   = rect.top + (rect.bottom - rect.top) * 0.5f;
 
-        const float x = rect.right - margin - dotR;
+        float x = rect.right - margin - dotR;
 
-        if (cam) {
-            D2D1_COLOR_F camColor = settings.privacyDotsCamHex;
-            camColor.a = settingsOpacity_;
-            if (!camDotBrush_) target_->CreateSolidColorBrush(camColor, &camDotBrush_);
-            else camDotBrush_->SetColor(camColor);
-
-            if (camDotBrush_) {
-                target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, dotY), dotR, dotR), camDotBrush_.Get());
+        // Bunbun: one dot per device in use, outermost first: screen (blue), camera
+        // (green), microphone (orange), so the dots say what is being used.
+        auto dot = [&](D2D1_COLOR_F c) {
+            c.a = settingsOpacity_;
+            if (ID2D1SolidColorBrush* b = AcquireBrush(c)) {
+                target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, dotY), dotR, dotR), b);
             }
-        } else if (mic) {
-            D2D1_COLOR_F micColor = settings.privacyDotsMicHex;
-            micColor.a = settingsOpacity_;
-            if (!micDotBrush_) target_->CreateSolidColorBrush(micColor, &micDotBrush_);
-            else micDotBrush_->SetColor(micColor);
-
-            if (micDotBrush_) {
-                target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, dotY), dotR, dotR), micDotBrush_.Get());
-            }
-        }
+            x -= dotR * 2.0f + 5.0f;
+        };
+        if (screen) dot(settings.privacyDotsScreenHex);
+        if (cam) dot(settings.privacyDotsCamHex);
+        if (mic) dot(settings.privacyDotsMicHex);
     }
 
     ComPtr<ID2D1PathGeometry> CreateNotchGeometry(D2D1_RECT_F rect, float radius) {
@@ -10535,6 +10844,11 @@ class Renderer {
         // instead of being a one-off translucent slab.
         const D2D1_RECT_F hero = D2D1::RectF(rect.left + 22.0f * scale, rect.top + 16.0f * scale,
                                              rect.left + 115.0f * scale, rect.bottom - 20.0f * scale);
+        // Bunbun: with a meeting coming up, "Up next" takes the hero's place. The
+        // hero code still runs (it fills the caches the grid uses) but draws into
+        // an empty clip.
+        const bool upNext = state.meeting.valid;
+        if (upNext) target_->PushAxisAlignedClip(D2D1::RectF(0, 0, 0, 0), D2D1_ANTIALIAS_MODE_ALIASED);
         DrawCard(hero, 12.0f * scale);
 
         // The accent is the album-art / system accent like everywhere else. This
@@ -10636,6 +10950,11 @@ class Renderer {
                                D2D1::RectF(hero.left + 4.0f * scale, hero.bottom - 24.0f * scale,
                                            hero.right - 4.0f * scale, hero.bottom - 6.0f * scale),
                                mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+
+        if (upNext) {
+            target_->PopAxisAlignedClip();
+            DrawCalendarUpNext(state, hero, scale);
         }
 
         // ── Month grid ───────────────────────────────────────────────────────
@@ -11020,6 +11339,36 @@ class Renderer {
                     target_->DrawLine(D2D1::Point2F(x, c.y - 0.20f * s), D2D1::Point2F(x, c.y - 0.06f * s), brush, stroke * 0.8f);
                 }
                 target_->DrawLine(D2D1::Point2F(c.x, c.y + 0.12f * s), D2D1::Point2F(c.x, c.y + 0.42f * s), brush, stroke);
+                break;
+            }
+            case 14:    // Bunbun: battery, part full (on battery)
+            case 15:    // Bunbun: battery with a bolt (charging)
+            case 16: {  // Bunbun: battery, full (on power)
+                const D2D1_RECT_F body = D2D1::RectF(c.x - 0.40f * s, c.y - 0.22f * s, c.x + 0.30f * s, c.y + 0.22f * s);
+                target_->DrawRoundedRectangle(D2D1::RoundedRect(body, 0.07f * s, 0.07f * s), brush, stroke);
+                target_->FillRectangle(D2D1::RectF(c.x + 0.33f * s, c.y - 0.09f * s, c.x + 0.42f * s, c.y + 0.09f * s), brush);
+                const float in = stroke + 0.04f * s;
+                if (kind == 15) {
+                    ComPtr<ID2D1PathGeometry> bolt;
+                    if (SUCCEEDED(d2dFactory_->CreatePathGeometry(&bolt)) && bolt) {
+                        ComPtr<ID2D1GeometrySink> sink;
+                        if (SUCCEEDED(bolt->Open(&sink)) && sink) {
+                            const D2D1_POINT_2F pts[] = {{c.x + 0.02f * s, c.y - 0.17f * s}, {c.x - 0.16f * s, c.y + 0.03f * s},
+                                                         {c.x - 0.04f * s, c.y + 0.03f * s}, {c.x - 0.08f * s, c.y + 0.17f * s},
+                                                         {c.x + 0.10f * s, c.y - 0.03f * s}, {c.x - 0.02f * s, c.y - 0.03f * s}};
+                            sink->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_FILLED);
+                            for (int i = 1; i < 6; ++i) sink->AddLine(pts[i]);
+                            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                            sink->Close();
+                            target_->FillGeometry(bolt.Get(), brush);
+                        }
+                    }
+                } else {
+                    const float level = kind == 16 ? 1.0f : 0.55f;
+                    target_->FillRectangle(D2D1::RectF(body.left + in, body.top + in,
+                                                       body.left + in + (body.right - body.left - in * 2.0f) * level, body.bottom - in),
+                                           brush);
+                }
                 break;
             }
             default:
@@ -11646,9 +11995,9 @@ class Renderer {
         // load bar rather than a bar against an invented maximum.
         const HwMetric metrics[6] = {
             {3, L"CPU",      cpuBuf,  Clamp(state.system.cpuPercent / 100.0f, 0.0f, 1.0f)},
-            {6, L"NET UP",   upBuf,   -1.0f},
+            {6, L"UPLOAD",   upBuf,   -1.0f},  // Bunbun: was "NET UP"
             {4, L"RAM",      ramBuf,  ramFraction},
-            {7, L"NET DOWN", downBuf, -1.0f},
+            {7, L"DOWNLOAD", downBuf, -1.0f},  // Bunbun: was "NET DOWN"
             {5, L"GPU",      gpuBuf,  state.system.gpuPercent >= 0
                                           ? Clamp(state.system.gpuPercent / 100.0f, 0.0f, 1.0f)
                                           : -1.0f},
@@ -11738,140 +12087,12 @@ class Renderer {
         mutedBrush_->SetOpacity(0.75f);
     }
 
-    // ── Bunbun: Connectivity tab (Wi-Fi / Ethernet, Bluetooth, Do Not Disturb) ──
-    // Three cards; clicking one opens the matching Windows Settings page (see
-    // ConnectivityCardAtContentPoint and the WM_LBUTTONUP handler).
-    void DrawConnectivityDashboard(const SharedState& state, D2D1_RECT_F rect, float scale) {
-        using namespace ConnectivityLayout;
-        const float padX = kPadX * scale;
-
-        textBrush_->SetOpacity(0.96f);
-        const wchar_t* title = Loc(L"Connectivity");
-        if (boldTextFormat_) {
-            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            target_->DrawTextW(title, static_cast<UINT32>(wcslen(title)), boldTextFormat_.Get(),
-                               D2D1::RectF(rect.left + padX, rect.top + 16.0f * scale,
-                                           rect.right - padX, rect.top + 32.0f * scale),
-                               textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
-            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        }
-
-        const ConnectivitySnapshot& c = state.connectivity;
-        const bool dnd = g_isDnDActive.load(std::memory_order_relaxed);
-        const wchar_t* waiting = L"…";
-
-        struct Card {
-            int glyph;
-            std::wstring label, value, detail;
-            bool on;
-        };
-        Card cards[kCards];
-
-        // Network: Wi-Fi first; Ethernet takes over when it's the only link.
-        if (!c.wifiConnected && c.ethernetConnected) {
-            cards[0] = {13, Loc(L"ETHERNET"), Loc(L"Connected"), Loc(L"Wired network"), true};
-        } else {
-            Card& w = cards[0];
-            w.glyph = 10;
-            w.label = Loc(L"WI-FI");
-            w.on = c.wifiConnected;
-            if (!c.sampled) {
-                w.value = waiting;
-            } else if (c.wifiConnected) {
-                w.value = c.wifiName.empty() ? Loc(L"Connected") : c.wifiName;
-                wchar_t buf[48];
-                swprintf_s(buf, L"%s %d%%", Loc(L"Signal"), c.wifiSignal);
-                w.detail = buf;
-            } else {
-                w.value = c.wifiRadio == 1 ? Loc(L"Not connected") : c.wifiRadio == 0 ? Loc(L"Off") : Loc(L"No adapter");
-            }
-        }
-
-        {
-            Card& b = cards[1];
-            b.glyph = 11;
-            b.label = Loc(L"BLUETOOTH");
-            b.on = c.bluetoothRadio == 1;
-            if (!c.sampled) {
-                b.value = waiting;
-            } else if (c.bluetoothRadio < 0) {
-                b.value = Loc(L"Unavailable");
-            } else if (c.bluetoothRadio == 0) {
-                b.value = Loc(L"Off");
-            } else if (c.bluetoothDevices.empty()) {
-                b.value = Loc(L"On");
-                b.detail = Loc(L"No devices");
-            } else {
-                b.value = c.bluetoothDevices.front();
-                if (c.bluetoothDevices.size() > 1) {
-                    wchar_t buf[48];
-                    swprintf_s(buf, L"+%d %s", static_cast<int>(c.bluetoothDevices.size() - 1), Loc(L"more"));
-                    b.detail = buf;
-                } else {
-                    b.detail = Loc(L"Connected");
-                }
-            }
-        }
-
-        cards[2] = {12, Loc(L"DO NOT DISTURB"), dnd ? Loc(L"On") : Loc(L"Off"),
-                    dnd ? Loc(L"Alerts silenced") : Loc(L"Alerts on"), dnd};
-
-        const float gap = kCardGap * scale;
-        const float cardW = (rect.right - rect.left - padX * 2.0f - gap * (kCards - 1)) / kCards;
-        const float top = rect.top + kCardsTop * scale;
-        const int hovered = g_hoveredConnectivityCard.load(std::memory_order_relaxed);
-
-        for (int i = 0; i < kCards; ++i) {
-            const Card& k = cards[i];
-            const float left = rect.left + padX + static_cast<float>(i) * (cardW + gap);
-            const D2D1_RECT_F card = D2D1::RectF(left, top, left + cardW, top + kCardHeight * scale);
-            DrawCard(card, 11.0f * scale);
-            if (i == hovered) {
-                if (ID2D1SolidColorBrush* hi = AcquireBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f))) {
-                    target_->FillRoundedRectangle(D2D1::RoundedRect(card, 11.0f * scale, 11.0f * scale), hi);
-                }
-            }
-
-            // Icon bubble: accent when on, neutral when off.
-            const D2D1_POINT_2F ic = D2D1::Point2F(card.left + 24.0f * scale, card.top + 24.0f * scale);
-            const D2D1_COLOR_F tint = k.on ? material_.accent : material_.raisedStrong;
-            if (ID2D1SolidColorBrush* bubble = AcquireBrush(WithAlpha(tint, k.on ? 0.22f : 0.9f))) {
-                target_->FillEllipse(D2D1::Ellipse(ic, 15.0f * scale, 15.0f * scale), bubble);
-            }
-            const D2D1_COLOR_F glyphColor = k.on ? material_.accent : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.55f);
-            if (ID2D1SolidColorBrush* glyphBrush = AcquireBrush(WithAlpha(glyphColor, 0.95f * settingsOpacity_))) {
-                DrawMetricGlyph(ic, 17.0f * scale, k.glyph, glyphBrush);
-            }
-
-            const float textLeft = card.left + 12.0f * scale;
-            const float textRight = card.right - 10.0f * scale;
-            if (smallTextFormat_) {
-                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                mutedBrush_->SetOpacity(0.60f);
-                target_->DrawTextW(k.label.c_str(), static_cast<UINT32>(k.label.size()), smallTextFormat_.Get(),
-                                   D2D1::RectF(textLeft, card.top + 48.0f * scale, textRight, card.top + 62.0f * scale),
-                                   mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
-            if (textFormat_) {
-                textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                textBrush_->SetOpacity(0.95f);
-                target_->DrawTextW(k.value.c_str(), static_cast<UINT32>(k.value.size()), textFormat_.Get(),
-                                   D2D1::RectF(textLeft, card.top + 64.0f * scale, textRight, card.top + 84.0f * scale),
-                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-            }
-            if (smallTextFormat_ && !k.detail.empty()) {
-                mutedBrush_->SetOpacity(0.70f);
-                target_->DrawTextW(k.detail.c_str(), static_cast<UINT32>(k.detail.size()), smallTextFormat_.Get(),
-                                   D2D1::RectF(textLeft, card.top + 88.0f * scale, textRight, card.top + 104.0f * scale),
-                                   mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            }
-        }
-
-        textBrush_->SetOpacity(0.96f);
-        mutedBrush_->SetOpacity(0.75f);
-    }
+    // Bunbun: the Connectivity tab and its long-press device lists.
+#include "modules/connectivity_draw.inc"
+    // Bunbun: meeting and download pills, the calendar tab's "Up next".
+#include "modules/bunbun_pills_draw.inc"
+    // Bunbun: the To-do tab and the reminder pill.
+#include "modules/todos_draw.inc"
 
         // Karaoke effect: a soft wave rides the wipe boundary across the active line.
     // The layout and per-cluster rects are cached (karaokeCache_) and only rebuilt
@@ -12612,7 +12833,7 @@ class Renderer {
 
     void DrawIdleDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings,
                            double now) {
-        if (settings.gameOverlay || g_gameOverlayPinned.load()) {
+        if (GameOverlayShown(settings.gameOverlay)) {
             DrawGameOverlay(state, rect, 1.0f);
             return;
         }
@@ -12696,7 +12917,7 @@ class Renderer {
             // The dot is anchored to the right edge by DrawPrivacyDots, so reserve
             // its lane rather than shrinking the text box out from under the clock.
             const float privacyReserve =
-                idleMetrics.hasPrivacy ? IdleStripLayout::kPrivacyReserve * scale : 0.0f;
+                idleMetrics.privacyReserve * scale;  // Bunbun: as many slots as dots
             const float innerLeft = rect.left + IdleStripLayout::kPadX * scale;
             const float innerRight =
                 rect.right - IdleStripLayout::kPadX * scale - privacyReserve;
@@ -12773,6 +12994,7 @@ class Renderer {
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
             if (settings.connectivityModule) activeTabs.push_back(5);  // Bunbun
             if (settings.fileTrayModule) activeTabs.push_back(4);
+            if (settings.todoModule) activeTabs.push_back(7);  // Bunbun: To-do
 
             int maxTabs = static_cast<int>(activeTabs.size());
             int tabIdx = NormalizedTabIndex(settings);
@@ -12794,6 +13016,7 @@ class Renderer {
                 else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, fullRect, settings, scale);
                 else if (activeTabId == 5) DrawConnectivityDashboard(state, fullRect, scale);  // Bunbun
                 else if (activeTabId == 4) DrawFileTrayDashboard(state, fullRect, settings, scale);
+                else if (activeTabId == 7) DrawTodoDashboard(state, fullRect, scale);  // Bunbun
             });
 
             DrawTabPagination(fullRect, maxTabs);
@@ -13347,6 +13570,7 @@ class Renderer {
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
             if (settings.connectivityModule) activeTabs.push_back(6);  // Bunbun
             if (settings.fileTrayModule) activeTabs.push_back(4);
+            if (settings.todoModule) activeTabs.push_back(7);  // Bunbun: To-do
             if (settings.lyrics && !lyricsFirst) activeTabs.push_back(5);  // Lyrics (last)
 
             // Same settings object as the list above, so the index can't be
@@ -13596,6 +13820,8 @@ class Renderer {
                 DrawHardwareMonitorDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 6) {
                 DrawConnectivityDashboard(state, rect, 1.0f);  // Bunbun
+            } else if (activeTabId == 7) {
+                DrawTodoDashboard(state, rect, 1.0f);  // Bunbun
             } else if (activeTabId == 4) {
                 DrawFileTrayDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 5) {
@@ -13639,10 +13865,8 @@ class Renderer {
             // DrawMedia; this rect is only used to place the lyrics next to it.
             const D2D1_RECT_F artRect = collapsedArtRect;
 
-            float shiftX = 0.0f;
-            if (state.system.micActive || state.system.cameraActive) {
-                shiftX = 22.0f;
-            }
+            // Bunbun: clear of however many privacy dots are lit.
+            const float shiftX = PrivacyDotsReserve(state, settings);
 
             D2D1_RECT_F waveRect = D2D1::RectF(rect.right - 42.0f - shiftX, cy - 10.0f,
                                                rect.right - 14.0f - shiftX, cy + 10.0f);
@@ -16563,14 +16787,40 @@ class Renderer {
             }
         }
 
-        if (drawBadge && media.sourceIcon && artBadgeAlpha_ > 0.01f) {
-            D2D1_RECT_F badge = D2D1::RectF(rect.right - 24, rect.bottom - 22,
-                                           rect.right - 3, rect.bottom - 3);
-            DrawCircularBitmapPixels(*media.sourceIcon,
-                                     D2D1::Point2F((badge.left + badge.right) * 0.5f,
-                                                   (badge.top + badge.bottom) * 0.5f),
-                                     9.5f, mediaSourceIconBitmap_,
-                                     mediaSourceIconGeneration_, 0.98f * artBadgeAlpha_);
+        if (drawBadge && artBadgeAlpha_ > 0.01f) {
+            if (media.sourceIcon) {
+                D2D1_RECT_F badge = D2D1::RectF(rect.right - 24, rect.bottom - 22,
+                                               rect.right - 3, rect.bottom - 3);
+                DrawCircularBitmapPixels(*media.sourceIcon,
+                                         D2D1::Point2F((badge.left + badge.right) * 0.5f,
+                                                       (badge.top + badge.bottom) * 0.5f),
+                                         9.5f, mediaSourceIconBitmap_,
+                                         mediaSourceIconGeneration_, 0.98f * artBadgeAlpha_);
+            }
+
+            // Bunbun: sleek subscript badge (e.g. "Spotify") at the bottom of the cover art
+            if (!media.sourceName.empty() && smallTextFormat_ && textBrush_) {
+                const float textW = std::min(rect.right - rect.left - 8.0f, 68.0f);
+                const float pillH = 14.0f;
+                D2D1_RECT_F subPill = D2D1::RectF(rect.left + 4.0f, rect.bottom - pillH - 4.0f,
+                                                 rect.left + 4.0f + textW, rect.bottom - 4.0f);
+                if (scratchColorBrush_) {
+                    // 0x0C0E12 as one RGB value; ColorF(0x0C, 0x0E, 0x12, a) reads those as
+                    // 0-1 floats (12, 14, 18) and clamps to white, hiding the white text.
+                    scratchColorBrush_->SetColor(D2D1::ColorF(0x0C0E12, 0.72f * artBadgeAlpha_));
+                    target_->FillRoundedRectangle(D2D1::RoundedRect(subPill, 3.5f, 3.5f), scratchColorBrush_.Get());
+                }
+                const float oldTextAlpha = textBrush_->GetOpacity();
+                textBrush_->SetOpacity(0.88f * artBadgeAlpha_);
+                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                target_->DrawTextW(media.sourceName.c_str(), static_cast<UINT32>(media.sourceName.size()),
+                                   smallTextFormat_.Get(), subPill, textBrush_.Get(),
+                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                textBrush_->SetOpacity(oldTextAlpha);
+            }
         }
 
         if (roundedClip) {
@@ -16926,11 +17176,17 @@ class Renderer {
         }
 
         bb::mascot::Mood mood = bb::mascot::Mood::Idle;
-        if (now - s_lastPokeTime < 2.0) {
+        // Bunbun: battery moods. A cheer when the battery fills up; drowsy below 15%.
+        const bool cheer = settings.batteryMoods && now - g_batteryCheerAt.load(std::memory_order_relaxed) < 2.5;
+        const bool drowsy = settings.batteryMoods && state.battery.hasBattery && !state.battery.charging && state.battery.percent < 15;
+        if (cheer) s_moodSince = std::min(s_moodSince, g_batteryCheerAt.load(std::memory_order_relaxed));
+        if (now - s_lastPokeTime < 2.0 || cheer) {
             mood = bb::mascot::Mood::Happy;
+        } else if (drowsy && !music) {
+            mood = bb::mascot::Mood::Sleepy;
         } else if (music) {
             mood = bb::mascot::Mood::Music;
-        } else if (settings.mascotDnd) {
+        } else if (settings.mascotDnd || FocusModeActive()) {  // Bunbun: Focus mode too
             // Bunbun: the mascot's own do-not-disturb (settings or Ask Bun), so Bun
             // settles in with a snack. Deliberately independent of Windows' DND.
             mood = bb::mascot::Mood::Snack;
@@ -16989,16 +17245,24 @@ class Renderer {
         if (!AgentLayout::IsCard(a.phase)) {
             // Compact pill: Bun | who / step | status
             const float cy = (rect.top + rect.bottom) * 0.5f;
-            const float m = (rect.bottom - rect.top) - 8.0f;
-            const D2D1_POINT_2F mc = D2D1::Point2F(rect.left + 12.0f + m * 0.5f, cy + 1.0f);
+            // Bunbun: same 2 px margin as the clock-side slot (was 4 px), so a mood
+            // shown here is as big as the idle mascot beside the clock.
+            const float m = (rect.bottom - rect.top) - 4.0f;
+            const D2D1_POINT_2F mc = D2D1::Point2F(rect.left + 10.0f + m * 0.5f, cy);
+            float tx = settings.bunbunMascot ? mc.x + m * 0.5f + 6.0f : rect.left + 16.0f;
             if (settings.bunbunMascot) {
                 // Bunbun: fit the character's real outline to the square, not Bun's ears.
                 D2D1_POINT_2F fc{};
                 float fs = 0.0f;
                 bb::mascot::FitToBox(D2D1::RectF(mc.x - m * 0.5f, mc.y - m * 0.5f, mc.x + m * 0.5f, mc.y + m * 0.5f), &fc, &fs);
+                // Bunbun: room for art reaching past the head (a skin pack's sparks,
+                // question marks, a raised hand): clear of the pill's edge and the text.
+                float reachL = 0.5f, reachR = 0.5f;
+                bb::mascot::HorizontalReach(&reachL, &reachR);
+                fc.x += std::max(0.0f, rect.left + 8.0f - (fc.x - reachL * fs));
+                tx = std::max(tx, fc.x + reachR * fs + 4.0f);
                 bb::mascot::Draw(target_.Get(), fc, fs, mood, now, a.phaseSince, MascotLook(fc));
             }
-            const float tx = settings.bunbunMascot ? mc.x + m * 0.5f + 8.0f : rect.left + 16.0f;
             const float statusW = 70.0f;
 
             mutedBrush_->SetOpacity(0.75f);
@@ -17052,13 +17316,18 @@ class Renderer {
         const float top = rect.top + AgentLayout::kPadTop;
         const float ms = AgentLayout::kMascot;
         const D2D1_POINT_2F mc = D2D1::Point2F(left + ms * 0.5f, top + ms * 0.5f + 2.0f);
+        float tx = settings.bunbunMascot ? left + ms + 12.0f : left;
         if (settings.bunbunMascot) {
             D2D1_POINT_2F fc{};  // Bunbun: outline fit, as in the compact pill
             float fs = 0.0f;
             bb::mascot::FitToBox(D2D1::RectF(mc.x - ms * 0.5f, mc.y - ms * 0.5f, mc.x + ms * 0.5f, mc.y + ms * 0.5f), &fc, &fs);
+            // Bunbun: room for art reaching past the head, as in the compact pill.
+            float reachL = 0.5f, reachR = 0.5f;
+            bb::mascot::HorizontalReach(&reachL, &reachR);
+            fc.x += std::max(0.0f, rect.left + 6.0f - (fc.x - reachL * fs));
+            tx = std::max(tx, fc.x + reachR * fs + 8.0f);
             bb::mascot::Draw(target_.Get(), fc, fs, mood, now, a.phaseSince, MascotLook(fc));
         }
-        const float tx = settings.bunbunMascot ? left + ms + 12.0f : left;
 
         mutedBrush_->SetOpacity(0.75f);
         DrawAgentText(who, D2D1::RectF(tx, top, right - 40.0f, top + 16.0f), smallTextFormat_.Get(), mutedBrush_.Get());
@@ -17982,7 +18251,43 @@ class Renderer {
     }
 
     // The search box: accent magnifier, text with a real caret, key hint on the right.
-    void DrawLookupField(D2D1_RECT_F rect, double now) {
+    // Bunbun: in Ask Bun the mascot sits in the box instead of the magnifier. It
+    // watches what you type, thinks while the local AI writes, and cheers at a reply.
+    void DrawAskBunMascot(D2D1_RECT_F box, const LookupSnapshot& lk, float lookX, double now) {
+        static uint64_t s_seq = 0;
+        static double s_foundAt = -10.0;
+        static bb::mascot::Mood s_mood = bb::mascot::Mood::Idle;
+        static double s_moodSince = 0.0;
+        const uint64_t seq = g_lookupRequestSeq.load();
+        const bool bun = lk.source == L"Bun";
+        static bool s_wasBusy = false;
+        const bool busy = lk.talking || BrainBusyForCurrentCard();
+        if (lk.status == LookupStatus::Found && bun && (seq != s_seq || (s_wasBusy && !busy))) {
+            s_seq = seq;
+            s_foundAt = now;  // a new answer, or the local AI just finished one
+        }
+        s_wasBusy = busy;
+        // Typing: listening. Local AI writing: talking (thinking until the first word).
+        // An answer: a short cheer; no answer: puzzled for a few seconds.
+        bb::mascot::Mood mood = bb::mascot::Mood::Idle;
+        if (lk.talking) mood = bb::mascot::Mood::Talking;
+        else if (BrainBusyForCurrentCard() || (lk.status == LookupStatus::Loading && bun)) mood = bb::mascot::Mood::Thinking;
+        else if (!g_lookupUi.text.empty()) mood = bb::mascot::Mood::Listening;
+        else if (lk.status == LookupStatus::Found && bun && lk.confused && now - s_foundAt < 3.5) mood = bb::mascot::Mood::Confused;
+        else if (lk.status == LookupStatus::Found && bun && now - s_foundAt < 2.0) mood = bb::mascot::Mood::Happy;
+        if (mood != s_mood) {
+            s_mood = mood;
+            s_moodSince = now;
+        }
+        D2D1_POINT_2F c{};
+        float size = 0.0f;
+        bb::mascot::FitToBox(box, &c, &size);
+        // Eyes follow the caret while typing, the pointer otherwise.
+        const D2D1_POINT_2F look = lookX >= 0.0f ? D2D1::Point2F(Clamp(lookX, 0.0f, 1.0f), 0.35f) : MascotLook(c);
+        bb::mascot::Draw(target_.Get(), c, size, mood, now, s_moodSince, look);
+    }
+
+    void DrawLookupField(D2D1_RECT_F rect, const LookupSnapshot& lk, double now) {
         const LookupUiState& ui = g_lookupUi;
         const D2D1_RECT_F field = D2D1::RectF(
             rect.left + LookupLayout::kPadX, rect.top + LookupLayout::kFieldTop,
@@ -17991,9 +18296,12 @@ class Renderer {
         DrawCard(field, 12.0f, true);
         const float midY = (field.top + field.bottom) * 0.5f;
 
-        accentBrush_->SetOpacity(0.95f);
-        DrawLookupGlyph(D2D1::Point2F(field.left + 19.0f, midY), 16.0f, 0, accentBrush_.Get());
-        accentBrush_->SetOpacity(1.0f);
+        const bool mascot = g_settings.bunbunAssistant && g_settings.bunbunMascot;  // Bunbun
+        if (!mascot) {
+            accentBrush_->SetOpacity(0.95f);
+            DrawLookupGlyph(D2D1::Point2F(field.left + 19.0f, midY), 16.0f, 0, accentBrush_.Get());
+            accentBrush_->SetOpacity(1.0f);
+        }
 
         // Key hint chip: "Esc" while empty, the return arrow once there is text.
         const D2D1_RECT_F chip = D2D1::RectF(field.right - 44.0f, midY - 10.0f,
@@ -18017,7 +18325,11 @@ class Renderer {
                             mutedBrush_.Get());
         }
 
-        const float areaLeft = field.left + 38.0f;
+        // Bunbun: room for the mascot, and for a skin pack's art that reaches past its square.
+        float reachL = 0.5f, reachR = 0.5f;
+        if (mascot) bb::mascot::HorizontalReach(&reachL, &reachR);
+        const float bunShift = std::max(0.0f, (reachL - 0.5f) * 30.0f);
+        const float areaLeft = field.left + (mascot ? 42.0f + bunShift + std::max(0.0f, (reachR - 0.5f) * 30.0f) : 38.0f);
         const float areaRight = chip.left - 10.0f;
         const float areaW = std::max(8.0f, areaRight - areaLeft);
         float caretX = 0.0f;
@@ -18067,6 +18379,11 @@ class Renderer {
         }
         target_->PopAxisAlignedClip();
         mutedBrush_->SetOpacity(0.75f);
+        if (mascot) {
+            const float lookX = ui.text.empty() ? -1.0f : (caretX - scroll) / areaW;
+            DrawAskBunMascot(D2D1::RectF(field.left + 6.0f + bunShift, field.top + 3.0f, field.left + 36.0f + bunShift, field.bottom - 3.0f),
+                             lk, lookX, now);
+        }
     }
 
     // Clipboard suggestion + recents (box empty) or Look up + matching recents (typing).
@@ -18177,16 +18494,8 @@ class Renderer {
         const wchar_t* msg = lk.status == LookupStatus::Loading
                                  ? (bun ? L"Bun is thinking…" : Loc(L"Looking up..."))
                                  : Loc(L"No result found");
-        // Bunbun: Bun sits beside the status while it thinks.
-        float textLeft = left;
-        if (bun && g_settings.bunbunMascot) {
-            const float ms = LookupLayout::kStatusH;
-            D2D1_POINT_2F c{};  // Bunbun: outline fit
-            float fs = 0.0f;
-            bb::mascot::FitToBox(D2D1::RectF(left, y + 1.0f, left + ms, y + ms + 1.0f), &c, &fs);
-            bb::mascot::Draw(target_.Get(), c, fs, bb::mascot::Mood::Thinking, NowSeconds(), 0, D2D1::Point2F(0, 0));
-            textLeft += ms + 6.0f;
-        }
+        // Bunbun: Bun thinks in the box above (DrawAskBunMascot), not beside this line.
+        const float textLeft = left;
         DWRITE_TEXT_METRICS tm{};
         if (auto layout = MakeLineLayout(msg, textFormat_.Get(), right - textLeft, &tm, true)) {
             mutedBrush_->SetOpacity(0.75f);
@@ -18286,7 +18595,7 @@ class Renderer {
             target_->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         }
 
-        DrawLookupField(rect, now);
+        DrawLookupField(rect, lk, now);  // Bunbun: lk for the mascot's mood
 
         if (lk.status == LookupStatus::Search) {
             const std::vector<LookupRow> rows = BuildLookupRows(state.lookupRecent, g_lookupUi);
@@ -18325,41 +18634,54 @@ class Renderer {
         target_->CreateSolidColorBrush(material_.raisedStrong, &badgeBg);
         target_->FillRoundedRectangle(D2D1::RoundedRect(badge, br, br), badgeBg.Get());
 
-        // Draw battery vector icon
-        const float bx = badge.left + badgeSz * 0.25f;
-        const float by = cy - badgeSz * 0.22f;
-        const float bw = badgeSz * 0.45f;
-        const float bh = badgeSz * 0.44f;
-        D2D1_RECT_F batRect = D2D1::RectF(bx, by, bx + bw, by + bh);
-
-        ComPtr<ID2D1SolidColorBrush> batBorder;
-        target_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.85f), &batBorder);
-        target_->DrawRoundedRectangle(D2D1::RoundedRect(batRect, 2, 2), batBorder.Get(), 1.5f);
-
-        // Battery Terminal (Nub)
-        D2D1_RECT_F nubRect = D2D1::RectF(batRect.right, cy - 3, batRect.right + 2.5f, cy + 3);
-        target_->FillRectangle(nubRect, batBorder.Get());
-
-        // Battery Fill
-        const float pct = Clamp(state.battery.percent / 100.0f, 0.0f, 1.0f);
-        D2D1_RECT_F fillRect = D2D1::RectF(batRect.left + 2, batRect.top + 2,
-                                           batRect.left + 2 + (bw - 4) * pct, batRect.bottom - 2);
-
-        ComPtr<ID2D1SolidColorBrush> batFill;
-        if (state.battery.low) {
-            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.23f, 0.18f, 1.0f), &batFill); // Red
-        } else if (state.battery.charging) {
-            target_->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.83f, 0.38f, 1.0f), &batFill); // Green
+        // Bunbun: the charging reminder and "fully charged" pills show the mascot
+        // (holding its plug, or cheering) instead of the battery icon.
+        if (g_settings.bunbunMascot && g_settings.batteryMoods && (state.battery.reminder || state.battery.full)) {
+            D2D1_POINT_2F mc{};
+            float msize = 0.0f;
+            bb::mascot::FitToBox(D2D1::RectF(badge.left + 2.0f, badge.top + 2.0f, badge.right - 2.0f, badge.bottom - 2.0f), &mc, &msize);
+            const double t = NowSeconds();
+            bb::mascot::Draw(target_.Get(), mc, msize, state.battery.full ? bb::mascot::Mood::Happy : bb::mascot::Mood::Idle,
+                             t, g_batteryCheerAt.load(std::memory_order_relaxed), MascotLook(mc));
         } else {
-            target_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.95f), &batFill); // White
+            // Draw battery vector icon
+            const float bx = badge.left + badgeSz * 0.25f;
+            const float by = cy - badgeSz * 0.22f;
+            const float bw = badgeSz * 0.45f;
+            const float bh = badgeSz * 0.44f;
+            D2D1_RECT_F batRect = D2D1::RectF(bx, by, bx + bw, by + bh);
+
+            ComPtr<ID2D1SolidColorBrush> batBorder;
+            target_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.85f), &batBorder);
+            target_->DrawRoundedRectangle(D2D1::RoundedRect(batRect, 2, 2), batBorder.Get(), 1.5f);
+
+            // Battery Terminal (Nub)
+            D2D1_RECT_F nubRect = D2D1::RectF(batRect.right, cy - 3, batRect.right + 2.5f, cy + 3);
+            target_->FillRectangle(nubRect, batBorder.Get());
+
+            // Battery Fill
+            const float pct = Clamp(state.battery.percent / 100.0f, 0.0f, 1.0f);
+            D2D1_RECT_F fillRect = D2D1::RectF(batRect.left + 2, batRect.top + 2,
+                                               batRect.left + 2 + (bw - 4) * pct, batRect.bottom - 2);
+
+            ComPtr<ID2D1SolidColorBrush> batFill;
+            if (state.battery.low) {
+                target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.23f, 0.18f, 1.0f), &batFill); // Red
+            } else if (state.battery.charging) {
+                target_->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.83f, 0.38f, 1.0f), &batFill); // Green
+            } else {
+                target_->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.95f), &batFill); // White
+            }
+            target_->FillRoundedRectangle(D2D1::RoundedRect(fillRect, 1, 1), batFill.Get());
         }
-        target_->FillRoundedRectangle(D2D1::RoundedRect(fillRect, 1, 1), batFill.Get());
 
         // Text Labels
         const float tx = badge.right + 14;
         D2D1_RECT_F labelRect = D2D1::RectF(tx, cy - 16.0f, rect.right - 14.0f, cy - 1.0f);
         mutedBrush_->SetOpacity(0.50f);
-        std::wstring label = state.battery.charging ? L"Power Connected" : L"Battery Alert";
+        std::wstring label = state.battery.full ? Loc(L"Fully charged")
+                           : state.battery.reminder ? Loc(L"Charging")
+                           : state.battery.charging ? L"Power Connected" : L"Battery Alert";
         target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()),
                            smallTextFormat_.Get(), labelRect, mutedBrush_.Get(),
                            D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -18369,6 +18691,10 @@ class Renderer {
             const DWORD minutes = state.battery.secondsRemaining / 60;
             swprintf_s(value, ARRAYSIZE(value), L"%d%% \u2022 %luh %02lum left",
                        state.battery.percent, minutes / 60, minutes % 60);
+        } else if (state.battery.reallyCharging && state.battery.minutesToFull > 0) {
+            // Bunbun: "64% · full in 1h 10m"
+            swprintf_s(value, ARRAYSIZE(value), L"%d%% \u2022 %s %dh %02dm", state.battery.percent, Loc(L"full in"),
+                       state.battery.minutesToFull / 60, state.battery.minutesToFull % 60);
         } else {
             swprintf_s(value, ARRAYSIZE(value), L"%d%%", state.battery.percent);
         }
@@ -18773,6 +19099,22 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
             activity.width = 220.0f;
             activity.height = 42.0f;
             break;
+        case IslandKind::Reminder:  // Bunbun: small and silent when quiet
+            activity.width = state.reminder.quiet ? 260.0f : 380.0f;
+            activity.height = state.reminder.quiet ? 40.0f : 54.0f;
+            break;
+        case IslandKind::Privacy:   // Bunbun
+            activity.width = 320.0f;
+            activity.height = 40.0f;
+            break;
+        case IslandKind::Meeting:   // Bunbun
+            activity.width = 330.0f;
+            activity.height = 54.0f;
+            break;
+        case IslandKind::Download:  // Bunbun
+            activity.width = 320.0f;
+            activity.height = 54.0f;
+            break;
         case IslandKind::Lookup:
             // Width is fixed; the real height is measured per result by
             // Renderer::MeasureLookupCard in the render loop. This is only a seed.
@@ -18805,6 +19147,11 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
             break;
     }
 
+    // Bunbun: compact pills grow by the room the privacy dots need, so the dots
+    // never cover their content (the idle strip and media pill reserve their own).
+    if (kind != IslandKind::Idle && kind != IslandKind::Media && activity.width > 0.0f && activity.height <= 55.0f) {
+        activity.width += PrivacyDotsReserve(state, settings);
+    }
     activity.width *= settings.sizeScale;
     activity.height *= settings.sizeScale;
     return activity;
@@ -18815,6 +19162,16 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
 
     if (settings.quickLookup && state.lookup.active && now < state.lookup.expiresAt) {
         activities.push_back(IslandKind::Lookup);
+    }
+
+    // Bunbun: a reminder that's due comes before everything but Ask Bun.
+    if (settings.todoModule && state.reminder.active && now < state.reminder.expiresAt) {
+        activities.push_back(IslandKind::Reminder);
+    }
+
+    // Bunbun: name an app the moment it starts using the mic, camera or screen.
+    if (settings.privacyDots && state.privacyAlert.active && now < state.privacyAlert.expiresAt) {
+        activities.push_back(IslandKind::Privacy);
     }
 
     // Bunbun: an agent waiting for you outranks every passive alert.
@@ -18862,6 +19219,13 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
         ((state.timer.justFinished && now < state.timer.finishedExpiresAt) ||
          state.timer.active)) {
         activities.push_back(IslandKind::Timer);
+    }
+    // Bunbun: a meeting about to start, and a browser download.
+    if (MeetingPillWanted(state, settings, EpochNow())) {
+        activities.push_back(IslandKind::Meeting);
+    }
+    if (DownloadPillWanted(state, settings, now)) {
+        activities.push_back(IslandKind::Download);
     }
     // A working (or just-finished) agent sits beside the media pill.
     if (agentShown && !AgentLayout::IsCard(state.agent.phase)) {
@@ -20060,6 +20424,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;  // handled on button-up by HandleLookupClick
                 }
 
+                // Bunbun: holding a Wi-Fi or Bluetooth card opens its list.
+                if (g_settings.connectivityModule && NormalizedTabIndex(g_settings) == ConnectivityTabIndex(g_settings)) {
+                    ConnectivityOnButtonDown(hwnd, MediaContentFromClient(xPos, yPos));
+                }
+
                 // File Tray: remember a press on a row so moving the mouse picks it up
                 // for dragging, while a plain click still opens it.
                 s_trayPressActive = false;
@@ -20195,7 +20564,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             {
                 int card = -1;
                 if (g_settings.connectivityModule && currentTab == ConnectivityTabIndex(g_settings)) {
-                    card = ConnectivityCardAtContentPoint(MediaContentFromClient(xPos, yPos));
+                    const MediaContentPoint hp = MediaContentFromClient(xPos, yPos);
+                    card = g_connectivityList >= 0 ? ConnectivityListHitTest(hp, ConnectivityLayout::kMaxRows)
+                                                   : ConnectivityCardAtContentPoint(hp);
                 }
                 if (g_hoveredConnectivityCard.exchange(card) != card) {
                     g_layoutDirty = true;
@@ -20345,15 +20716,18 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     kinds = ChooseActivities(g_state, g_settings, NowSeconds());
                 }
 
-                // Clicking an active transient notification or clipboard card immediately dismisses it cleanly.
+                // Clicking an active transient notification or clipboard card focuses the app and dismisses it cleanly.
                 // In a split layout (kinds.size() > 1), don't dismiss if clicking on the secondary pill on the right.
                 const bool onSecondarySplit = (kinds.size() > 1 && g_pillClientRect.valid &&
                                                xPos > (g_pillClientRect.left + (g_pillClientRect.right - g_pillClientRect.left) * 0.5f));
                 if (!kinds.empty() && !onSecondarySplit &&
                     (kinds[0] == IslandKind::Notification || kinds[0] == IslandKind::Clipboard)) {
+                    std::wstring notifApp, notifTitle;
                     {
                         std::lock_guard lock(g_stateMutex);
                         if (kinds[0] == IslandKind::Notification) {
+                            notifApp = g_state.notification.app;
+                            notifTitle = g_state.notification.title;
                             g_state.notification.active = false;
                             g_state.notification.expiresAt = 0.0;
                         } else if (kinds[0] == IslandKind::Clipboard) {
@@ -20361,14 +20735,29 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                             g_state.clipboard.expiresAt = 0.0;
                         }
                     }
+                    if (!notifApp.empty() || !notifTitle.empty()) {
+                        FocusNotificationApp(notifApp, notifTitle);
+                    }
                     g_clickExpanded = false;
                     g_layoutDirty = true;
                     TriggerNudge();
                     return 0;
                 }
+                // Bunbun: the reminder pill's Snooze / Done (hit-tested against where the
+                // buttons were drawn, so it also works beside music or an agent).
+                if (ReminderPillClick(xPos, yPos)) {
+                    return 0;
+                }
+                // Bunbun: the meeting pill joins; a finished download shows its file.
+                if (!kinds.empty() && !onSecondarySplit && kinds[0] == IslandKind::Meeting) {
+                    JoinOrDismissMeeting();
+                    return 0;
+                }
+                if (!kinds.empty() && !onSecondarySplit && kinds[0] == IslandKind::Download && RevealDownload()) {
+                    return 0;
+                }
                 const bool gameMetricsPresent =
-                    !kinds.empty() && kinds[0] == IslandKind::Idle &&
-                    (g_settings.gameOverlay || g_gameOverlayPinned.load());
+                    !kinds.empty() && kinds[0] == IslandKind::Idle && GameOverlayShown(g_settings.gameOverlay);
 
                 bool expanded = g_pinnedExpanded.load() || g_clickExpanded.load();
                 if (!gameMetricsPresent && !g_settings.expandOnHover && !expanded) {
@@ -20385,21 +20774,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
                 const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
 
-                // Bunbun: a Connectivity card opens the matching Windows Settings page.
-                if (g_settings.connectivityModule && currentTab == ConnectivityTabIndex(g_settings)) {
-                    const int card = ConnectivityCardAtContentPoint(cp);
-                    if (card >= 0) {
-                        bool wired = false;
-                        {
-                            std::lock_guard lock(g_stateMutex);
-                            wired = !g_state.connectivity.wifiConnected && g_state.connectivity.ethernetConnected;
-                        }
-                        const wchar_t* page = card == 0 ? (wired ? L"ms-settings:network-ethernet" : L"ms-settings:network-wifi")
-                                            : card == 1 ? L"ms-settings:bluetooth"
-                                                        : L"ms-settings:notifications";
-                        ShellExecuteW(nullptr, L"open", page, nullptr, nullptr, SW_SHOWNORMAL);
-                        return 0;
-                    }
+                // Bunbun: ticking a to-do on the To-do tab.
+                if (g_settings.todoModule && currentTab == TodoTabIndex(g_settings) && TodoTabClick(cp)) {
+                    return 0;
+                }
+
+                // Bunbun: the calendar tab's Join button.
+                if (currentTab == CalendarTabIndex(g_settings) && CalendarUpNextJoinHit(cp)) {
+                    JoinOrDismissMeeting();
+                    return 0;
+                }
+
+                // Bunbun: Connectivity cards toggle, list rows connect (connectivity_module.inc).
+                if (g_settings.connectivityModule && currentTab == ConnectivityTabIndex(g_settings) &&
+                    ConnectivityOnButtonUp(hwnd, cp)) {
+                    return 0;
                 }
 
                 // File Tray: the bin clears the shelf, the cut button removes one file,
@@ -20526,7 +20915,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                     if (mediaActive) {
                         OpenRelevantApp();
-                    } else {
+                    } else if (!kinds.empty() && (kinds[0] == IslandKind::Agent || kinds[0] == IslandKind::Notification)) {
+                        // Bunbun: only when the pill is an agent or a notification; a click on
+                        // the clock strip (e.g. poking the mascot) shouldn't switch apps.
                         HandleStatusClickAtPoint(hwnd, lParam);
                     }
                 }
@@ -20576,6 +20967,17 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 return 0;
             }
             s_lastWheelStep = wheelNow;
+            // Bunbun: over the game overlay, the first notch opens a peek at the
+            // dashboard instead of moving through tabs nobody can see yet.
+            if (g_settings.gameOverlay || g_gameOverlayPinned.load()) {
+                const bool wasPeeking = NowSeconds() < g_gameOverlayPeekUntil.load();
+                g_gameOverlayPeekUntil.store(NowSeconds() + 3.0, std::memory_order_relaxed);
+                g_layoutDirty = true;
+                if (!wasPeeking) {
+                    s_wheelAccum = 0;
+                    return 0;
+                }
+            }
             // Bunbun: one ring of activities and dashboard tabs (see the render loop).
             const int ringSize = g_activeActivityCount.load(std::memory_order_relaxed);
             StepActivityScroll(s_wheelAccum > 0 ? -1 : 1, ringSize);  // wheel up = previous
@@ -20584,11 +20986,24 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_RBUTTONUP: {
+            // Bunbun: right-clicking a Connectivity card opens its Windows Settings page.
+            if (g_settings.connectivityModule && NormalizedTabIndex(g_settings) == ConnectivityTabIndex(g_settings) &&
+                ConnectivityOnRightClick(MediaContentFromClient(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))) {
+                return 0;
+            }
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ClientToScreen(hwnd, &pt);
             ShowContextMenu(hwnd, pt);
             return 0;
         }
+
+        case WM_TIMER:
+            if (ConnectivityOnTimer(hwnd, wParam)) return 0;  // Bunbun: long-press on a Connectivity card
+            break;
+
+        case WM_APP_BRAIN:  // Bunbun: the local AI finished a reply
+            BrainOnReply(wParam);  // Bunbun: 1 = a plan's web lookups are back
+            return 0;
 
         case WM_DPICHANGED:
         case WM_DISPLAYCHANGE: {
@@ -20802,6 +21217,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
     static double lastInteractionTime = NowSeconds();
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
+        const double iterStart = QpcMs();  // Bunbun: BUNBUN_LOG loop-cost diagnostics
         MSG message = {};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
             if (message.message == WM_APP_NEW_EVENT) {
@@ -20935,10 +21351,8 @@ DWORD WINAPI RenderThreadProc(void*) {
             UpdateProgressSnapshot();
             nextProgressPoll = now + 0.25;
         }
-        if (!pollBusy && now >= nextPrivacyPoll) {
-            UpdatePrivacyIndicators();
-            nextPrivacyPoll = now + 2.0;  // poll every 2 s
-        }
+        // Bunbun: privacy dots are sampled on their own thread (privacy_module.inc).
+        BrainIdleCheck(g_settings);  // Bunbun: free the local AI's memory when idle
 
         bool timerJustCompleted = false;
         SharedState snapshot;
@@ -20988,6 +21402,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (timerJustCompleted) {
                 TriggerNudge();
         }
+        UpdateFocus(timerJustCompleted, snapshot.timer.active);  // Bunbun: ends Focus mode with its summary
 
         // Quick Lookup: hand keyboard focus back once the panel has timed out or the
         // module was switched off in settings.
@@ -21016,8 +21431,18 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (k == IslandKind::Media) ringHost = IslandKind::Media;
             else if (k != IslandKind::Idle && inRing(k)) ringActivities.push_back(k);
         }
-        const int ringTabs = std::max(1, ActiveTabCount(g_settings));
-        const int ringSize = static_cast<int>(ringActivities.size()) + ringTabs;
+        int ringTabs = std::max(1, ActiveTabCount(g_settings));
+        // ActiveTabCount counts the Lyrics tab whenever a media session exists, but
+        // only the media view draws it. Counting it under the clock left a phantom
+        // last stop (one wheel notch that did nothing) before the ring wrapped.
+        if (ringHost == IslandKind::Idle && g_settings.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed)) {
+            ringTabs = std::max(1, ringTabs - 1);
+        }
+        // A media session that isn't the main view (paused, say) gets the last stop,
+        // so the player is always reachable: past the last tile, or one notch up from
+        // the first. At rest the island still shows the clock.
+        const bool mediaStop = ringHost == IslandKind::Idle && g_settings.media && snapshot.media.available;
+        const int ringSize = static_cast<int>(ringActivities.size()) + ringTabs + (mediaStop ? 1 : 0);
         g_activeActivityCount.store(ringSize, std::memory_order_relaxed);
 
         static double s_lastRingHover = 0.0;
@@ -21028,6 +21453,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         if (inRing(kinds[0])) {
             if (actIdx < static_cast<int>(ringActivities.size())) {
                 shownKind = ringActivities[static_cast<size_t>(actIdx)];
+            } else if (mediaStop && actIdx == ringSize - 1) {
+                shownKind = IslandKind::Media;  // Bunbun: the player's own stop
+                g_idleTab = MediaTabIndex(g_settings);
             } else {
                 shownKind = ringHost;
                 // Ring positions past the activities are the host's dashboard tabs.
@@ -21146,10 +21574,17 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         bool isHoverExpanded = g_settings.expandOnHover ? hover : (hover && g_clickExpanded.load());
-        const bool gameMetricsPresent = primary.kind == IslandKind::Idle &&
-            (g_settings.gameOverlay || g_gameOverlayPinned.load());
+        const bool gameMetricsPresent = primary.kind == IslandKind::Idle && GameOverlayShown(g_settings.gameOverlay);
         if (gameMetricsPresent) {
             isHoverExpanded = false;
+        } else if (g_settings.gameOverlay || g_gameOverlayPinned.load()) {
+            // Bunbun: a wheel peek is open. It stays open while the cursor is on the
+            // island and closes 1.5 s after it leaves.
+            const double wall = NowSeconds();
+            if (hover) {
+                g_gameOverlayPeekUntil.store(std::max(g_gameOverlayPeekUntil.load(), wall + 1.5), std::memory_order_relaxed);
+                isHoverExpanded = true;
+            }
         }
 
         if (currentlyHidden && !g_settings.unhideOnHover) {
@@ -21240,7 +21675,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (!g_endpointVolume) {
                 g_volumeEndpointStale = true;  // no audio device yet, or binding failed
             }
-            nextSystemPoll = now + 1.0;
+            nextSystemPoll = now + (g_powerSaving && !systemMetricsVisible ? 2.0 : 1.0);  // Bunbun: battery saver
         }
 
         if (primary.kind == IslandKind::Idle) {
@@ -21258,7 +21693,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             }
         }
         if (!isFullscreen && primary.kind == IslandKind::Idle &&
-            (g_settings.gameOverlay || g_gameOverlayPinned.load())) {
+            GameOverlayShown(g_settings.gameOverlay)) {
             // Width follows the metrics actually enabled (#25) so switching some
             // off shrinks the strip instead of leaving empty space, and compact
             // mode narrows it enough to sit neatly in the taskbar area. Both the
@@ -21335,6 +21770,13 @@ DWORD WINAPI RenderThreadProc(void*) {
                           primary.kind == IslandKind::Idle)
                              ? kBunSlotContent * g_settings.sizeScale
                              : 0.0f;
+        if (g_bunSlotWidth > 0.0f) {
+            // Bunbun: a skin pack whose art reaches past its square (music notes,
+            // sparks) gets a wider slot, so the clock doesn't overlap it.
+            float reachL = 0.5f, reachR = 0.5f;
+            bb::mascot::HorizontalReach(&reachL, &reachR);
+            g_bunSlotWidth *= Clamp(std::max(reachL, reachR) * 2.0f, 1.0f, 1.6f);
+        }
         if (g_bunSlotWidth > 0.0f) {
             float energy = 0.0f;
             for (float b : snapshot.bands) energy += b;
@@ -21435,11 +21877,16 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         SetClickThrough(hwnd, (primary.kind == IslandKind::Idle && !draggingOrHover && !pinned) || ctrlHoverCT);
 
-        // Check if animating structurally
-        if (std::abs(widthSpring.velocity) > 0.01f || std::abs(widthSpring.target - widthSpring.value) > 0.01f ||
-            std::abs(heightSpring.velocity) > 0.01f || std::abs(heightSpring.target - heightSpring.value) > 0.01f ||
-            std::abs(nudgeSpring.velocity) > 0.01f || std::abs(nudgeSpring.target - nudgeSpring.value) > 0.01f ||
-            std::abs(volumeBarSpring.velocity) > 0.01f || std::abs(volumeBarSpring.target - volumeBarSpring.value) > 0.01f) {
+        // Check if animating structurally.
+        // Bunbun: only motion that can show. The window lands on whole pixels, so
+        // anything under a quarter pixel is invisible; redrawing for it ran the
+        // island at the monitor's full refresh rate (about 128 frames a second
+        // under an agent pill) with nothing visibly moving.
+        constexpr float kVisible = 0.25f;
+        if (std::abs(widthSpring.velocity) > kVisible || std::abs(widthSpring.target - widthSpring.value) > kVisible ||
+            std::abs(heightSpring.velocity) > kVisible || std::abs(heightSpring.target - heightSpring.value) > kVisible ||
+            std::abs(nudgeSpring.velocity) > kVisible || std::abs(nudgeSpring.target - nudgeSpring.value) > kVisible ||
+            std::abs(volumeBarSpring.velocity) > kVisible || std::abs(volumeBarSpring.target - volumeBarSpring.value) > kVisible) {
             needsRender = true;
         }
 
@@ -21555,8 +22002,10 @@ DWORD WINAPI RenderThreadProc(void*) {
         // A working session's bob, blink and dots read fine at ~12 fps, painted
         // once per bucket like the seconds clock below, so a long agent run costs
         // a fraction of continuous animation.
+        // Bunbun: the mascot lives in the Ask Bun box, so it animates whenever the panel is open.
         const bool bunThinking = primary.kind == IslandKind::Lookup &&
-                                 snapshot.lookup.status == LookupStatus::Loading && snapshot.lookup.source == L"Bun";
+                                 ((snapshot.lookup.status == LookupStatus::Loading && snapshot.lookup.source == L"Bun") ||
+                                  (g_settings.bunbunAssistant && g_settings.bunbunMascot));
         const bool agentOnScreen = primary.kind == IslandKind::Agent ||
                                    (secondary && secondary->kind == IslandKind::Agent) || bunThinking ||
                                    (g_bunSlotWidth > 0.0f && !isHidden);
@@ -21567,7 +22016,9 @@ DWORD WINAPI RenderThreadProc(void*) {
             static long long s_agentFrame = -1;
             // The agent pill gets 12 fps; Bun idling beside the clock only breathes and blinks, so 8.
             const bool agentAnim = primary.kind == IslandKind::Agent || (secondary && secondary->kind == IslandKind::Agent) || bunThinking;
-            const long long frame = static_cast<long long>(now * (agentAnim ? 12.0 : 8.0));
+            // Bunbun: half that on battery; the motion still reads, at half the wakeups.
+            const double bucketFps = (agentAnim ? 12.0 : 8.0) * (g_powerSaving ? 0.5 : 1.0);
+            const long long frame = static_cast<long long>(now * bucketFps);
             if (frame != s_agentFrame) {
                 s_agentFrame = frame;
                 needsRender = true;
@@ -21720,9 +22171,12 @@ DWORD WINAPI RenderThreadProc(void*) {
                 renderSettings.backdropMaterial = BackdropMaterial::None;
             }
             std::lock_guard frameLock(g_frameMutex);  // Bunbun: see IslandSnapshotPng
+            const double renderStart = QpcMs();
             renderer.Render(snapshot, renderSettings, primary, secondary,
                             widthSpring.value, heightSpring.value, nudgeSpring.value,
                             hover, pinned, now);
+            g_renderMsTotal += QpcMs() - renderStart;
+            ++g_framesDrawn;  // Bunbun: for the BUNBUN_LOG frame diagnostics below
         }
 
         // --- Zero-CPU parking for auto-hidden states (idle timeout / fullscreen) ---
@@ -21756,6 +22210,9 @@ DWORD WINAPI RenderThreadProc(void*) {
             targetFps = s_cachedRate;
         }
         targetFps = ClampInt(targetFps, 30, 1000);
+        // Bunbun: on battery, springs don't need a 120-240 Hz panel's full rate.
+        UpdatePowerSaving(g_settings.powerSaver, now);
+        if (g_powerSaving) targetFps = std::min(targetFps, 60);
         double targetFrameMs = 1000.0 / static_cast<double>(targetFps);
 
         // Structural animation -- the springs resizing or nudging the island -- is
@@ -21782,7 +22239,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         // roughly halves the cost of having music playing; spring motion above
         // keeps the full refresh rate, so transitions stay fluid.
         if (continuousAnimation && !springsAnimating) {
-            const double continuousFrameMs = 1000.0 / static_cast<double>(g_settings.bunbunAmbientFps);
+            const int ambientFps = g_powerSaving ? std::min(g_settings.bunbunAmbientFps, 15) : g_settings.bunbunAmbientFps;
+            const double continuousFrameMs = 1000.0 / static_cast<double>(ambientFps);
             targetFrameMs = std::max(targetFrameMs, continuousFrameMs);
         }
 
@@ -21804,8 +22262,39 @@ DWORD WINAPI RenderThreadProc(void*) {
         if (continuousAnimation || springsAnimating) {
             lastAnimatingAt = now;
         }
-        setHighResTimer(lastAnimatingAt >= 0.0 && now - lastAnimatingAt < kHighResTimerHoldSec);
+        // Bunbun: a 1 ms timer resolution keeps the CPU out of deep idle states. On
+        // battery only spring motion gets it; ambient content paces fine without.
+        // Bunbun: with BUNBUN_LOG=1, one line a second saying how many frames were
+        // drawn and why, so an island that never settles is easy to spot.
+        {
+            static const bool s_logFrames = GetEnvironmentVariableW(L"BUNBUN_LOG", nullptr, 0) > 0;
+            static double s_logAt = 0.0;
+            static long long s_lastFrames = 0;
+            if (s_logFrames && now - s_logAt >= 1.0) {
+                static double s_lastRenderMs = 0.0, s_lastUlwMs = 0.0;
+                const long long n = std::max(1LL, g_framesDrawn - s_lastFrames);
+                static double s_lastBusy = 0.0;
+                Wh_Log(L"  per frame: render %.2f ms (of which UpdateLayeredWindow %.2f ms); loop busy %.1f ms/s",
+                       (g_renderMsTotal - s_lastRenderMs) / n, (g_ulwMsTotal - s_lastUlwMs) / n, g_loopBusyMs - s_lastBusy);
+                s_lastBusy = g_loopBusyMs;
+                s_lastRenderMs = g_renderMsTotal;
+                s_lastUlwMs = g_ulwMsTotal;
+                Wh_Log(L"frames %lld/s render=%d continuous=%d springs=%d (w %.2f->%.2f v%.2f, h %.2f->%.2f v%.2f, nudge %.2f, tab %d) kind=%d saver=%d",
+                       g_framesDrawn - s_lastFrames, needsRender ? 1 : 0, continuousAnimation ? 1 : 0, springsAnimating ? 1 : 0,
+                       widthSpring.value, widthSpring.target, widthSpring.velocity, heightSpring.value, heightSpring.target,
+                       heightSpring.velocity, nudgeSpring.value, g_tabAnimating.load() ? 1 : 0, static_cast<int>(primary.kind),
+                       g_powerSaving ? 1 : 0);
+                s_logAt = now;
+                s_lastFrames = g_framesDrawn;
+            }
+        }
+        if (g_powerSaving) {
+            setHighResTimer(springsAnimating);
+        } else {
+            setHighResTimer(lastAnimatingAt >= 0.0 && now - lastAnimatingAt < kHighResTimerHoldSec);
+        }
 
+        g_loopBusyMs += QpcMs() - iterStart;  // Bunbun: diagnostics
         if (!needsRender) {
             // Nothing changed on screen, so poll at ~60Hz rather than the target
             // frame rate. Accuracy does not matter here -- this is a poll interval,
@@ -21820,7 +22309,9 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (widthSpring.value <= 1.0f || heightSpring.value <= 1.0f) nearRect = GetIslandDockRect();
             InflateRect(&nearRect, 160, 120);
             const bool cursorNear = hover || PtInRect(&nearRect, cursor) != FALSE;
-            MsgWaitForMultipleObjects(1, &g_stopEvent, FALSE, cursorNear ? 16 : 50, QS_ALLINPUT);
+            // Bunbun: on battery the far-cursor wait is 250 ms (4 wakeups/s instead of 20).
+            const DWORD idleWait = cursorNear ? (g_powerSaving ? 33u : 16u) : (g_powerSaving ? 250u : 50u);
+            MsgWaitForMultipleObjects(1, &g_stopEvent, FALSE, idleWait, QS_ALLINPUT);
             nextFrameTarget = std::chrono::steady_clock::now();
         } else if (springsAnimating && g_settings.targetFps <= 0 && SUCCEEDED(DwmFlush())) {
             // Auto FPS while the island is resizing: block until DWM's next
@@ -21900,6 +22391,12 @@ bool StartThreads() {
     // Bunbun: Wi-Fi / Bluetooth status sampler for the Connectivity tab.
     g_connectivityWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_connectivityThread = CreateThread(nullptr, 0, ConnectivityThreadProc, nullptr, 0, nullptr);
+    g_calendarThread = CreateThread(nullptr, 0, CalendarThreadProc, nullptr, 0, nullptr);    // Bunbun
+    g_downloadsThread = CreateThread(nullptr, 0, DownloadsThreadProc, nullptr, 0, nullptr);  // Bunbun
+    g_privacyThread = CreateThread(nullptr, 0, PrivacyThreadProc, nullptr, 0, nullptr);      // Bunbun
+    std::thread([] { bb::assistant::WarmStartMenuIndex(); }).detach();                        // Bunbun: instant "open …"
+    g_todoWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);                                // Bunbun
+    g_todoThread = CreateThread(nullptr, 0, TodoThreadProc, nullptr, 0, nullptr);
     SubscribeDndNotification();
 
     return true;
@@ -21907,6 +22404,7 @@ bool StartThreads() {
 
 void StopThreads() {
     UnsubscribeDndNotification();
+    BrainShutdown();  // Bunbun: the local AI helper
     if (g_keyboardThreadId != 0) {
         PostThreadMessageW(g_keyboardThreadId, WM_QUIT, 0, 0);
     }
@@ -21917,7 +22415,8 @@ void StopThreads() {
         SetEvent(g_stopEvent);
     }
 
-    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread, g_connectivityThread};
+    HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread, g_connectivityThread,
+                       g_calendarThread, g_downloadsThread, g_privacyThread, g_todoThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -21937,6 +22436,14 @@ void StopThreads() {
     g_mouseThreadId = 0;
     g_bluetoothThread = nullptr;
     g_connectivityThread = nullptr;
+    g_calendarThread = nullptr;
+    g_downloadsThread = nullptr;
+    g_privacyThread = nullptr;
+    g_todoThread = nullptr;
+    if (g_todoWake) {
+        CloseHandle(g_todoWake);
+        g_todoWake = nullptr;
+    }
     if (g_connectivityWake) {
         CloseHandle(g_connectivityWake);
         g_connectivityWake = nullptr;

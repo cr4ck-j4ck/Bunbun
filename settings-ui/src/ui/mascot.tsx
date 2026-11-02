@@ -16,8 +16,8 @@ export type MascotStyle = {
 // Bunbun.MascotColor keeps one colour per character: "bunny=#F4B6C8;cat=#5B5868".
 // A plain hex from older settings applies to every character.
 export function colorFor(setting: string, character: string): string {
-  if (character === "spiderman" || character === "doom" || character.startsWith("custom:")) return "";
-  if (!setting.includes("=")) return setting;
+  if (character === "luffy" || character === "dazai" || character.startsWith("custom:")) return "";
+  if (!setting.includes("=")) return character === "spiderman" ? "" : setting;  // Spidey: only his own (Venom) colour
   for (const part of setting.split(";")) {
     const [k, v] = part.split("=");
     if (k?.trim().toLowerCase() === character) return (v ?? "").trim();

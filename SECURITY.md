@@ -23,5 +23,6 @@ properties). We aim to reply within a week.
 - The pipe's DACL admits only the current user, and remote clients are rejected.
 - The hook checks the pipe server's identity before sending anything.
 - When unsure, the hook defers to the agent's own prompt; it never approves on its own.
-- No telemetry. Network access is limited to weather, lyrics, dictionary lookups and searches you ask
-  for.
+- No telemetry. Network access is limited to weather, lyrics, dictionary lookups, searches you ask
+  for, and a daily read-only update check against GitHub's releases API (it never downloads or runs
+  anything; it can be turned off).

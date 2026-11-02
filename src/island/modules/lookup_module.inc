@@ -31,6 +31,7 @@ namespace QuickLookup {
 constexpr double kPanelIdleSeconds = 25.0;       // panel closes this long after the last key / mouse move
 constexpr double kResultSeconds = kPanelIdleSeconds;
 constexpr double kMessageSeconds = kPanelIdleSeconds;
+constexpr double kCommandSeconds = 1.6;          // Bunbun: a done command's "Opening Spotify ✨" before the island goes home
 constexpr size_t kRecentCapacity = 12;
 constexpr double kLoadingTimeoutSeconds = 30.0;  // upper bound for "Looking up..."
 constexpr size_t kMaxQueryChars = 300;           // Bunbun: room for a question to Bun; dictionary lookups cap at kMaxDictionaryChars
@@ -45,6 +46,13 @@ struct Result {
     std::wstring body;
     std::wstring example;
     std::wstring source;
+    bool command = false;  // Bunbun: Bun carried out a command; confirm briefly, then go home
+    bool unknown = false;  // Bunbun: Bun didn't understand; the local AI may take it
+    bool confused = false; // Bunbun: no real answer (didn't understand, or a fetch failed): puzzled mascot
+    // Bunbun: weather somewhere else (or tomorrow): fetched in the background.
+    bool weatherFetch = false;
+    std::wstring weatherPlace;
+    int weatherDays = 0;
 };
 
 // Failed means "could not get a real answer" (timeout, 429, 5xx, no network).
@@ -683,6 +691,7 @@ void FillSnapshot(LookupSnapshot& lk, const std::wstring& query, bool found, con
         lk.body = r->body;
         lk.example = r->example;
         lk.source = r->source;
+        lk.confused = r->confused || r->unknown;  // Bunbun
         lk.expiresAt = now + kResultSeconds;
     } else {
         lk.status = LookupStatus::NoResult;
@@ -821,6 +830,7 @@ void CloseLookupPanel(HWND hwnd) {
 
 // Runs a lookup and shows the outcome in the panel.
 QuickLookup::Result RunBun(const std::wstring& question);  // Bunbun, defined with the media helpers
+bool BrainTryAnswer(const std::wstring& question, uint64_t lookupId);  // Bunbun: brain_module.inc
 
 void SubmitLookup(const std::wstring& rawText) {
     const std::wstring query = QuickLookup::NormalizeQuery(rawText);
@@ -830,8 +840,10 @@ void SubmitLookup(const std::wstring& rawText) {
 
     const double now = NowSeconds();
     LookupUiState& ui = g_lookupUi;
-    ui.text = query;
-    ui.caret = query.size();
+    // Bunbun: the box empties once a query is sent, ready for the next one; the
+    // answer card shows what was asked, and Recent keeps it for re-use.
+    ui.text.clear();
+    ui.caret = 0;
     ui.selectAll = false;
     ui.selected = 0;
     ui.caretResetAt = now;
@@ -847,7 +859,53 @@ void SubmitLookup(const std::wstring& rawText) {
         // Local and instant: runs here on the window thread (the volume endpoint
         // lives on it) and the answer card replaces the panel's contents.
         const QuickLookup::Result result = RunBun(query);
+        if (result.weatherFetch) {
+            // Bunbun: weather for a named place (or tomorrow) comes from the network.
+            snap.status = LookupStatus::Loading;
+            snap.source = L"Bun";
+            snap.expiresAt = now + QuickLookup::kLoadingTimeoutSeconds;
+            const uint64_t id = PublishNewLookup(snap, false);
+            ui.historyPos = -1;
+            std::thread([id, query, place = result.weatherPlace, days = result.weatherDays]() {
+                QuickLookup::Result r;
+                r.source = L"Bun";
+                const bool ok = FetchWeatherReport(place, days, &r.title, &r.subtitle, &r.body);
+                if (!ok) {
+                    r.confused = true;
+                    r.title = place.empty() ? std::wstring(L"Weather") : place;
+                    r.body = place.empty() ? L"Couldn’t get the forecast. Is the network up?"
+                                           : L"Couldn’t find the weather for “" + place + L"”. Check the spelling, or add the country.";
+                }
+                QuickLookup::ApplyResult(id, query, true, r);
+            }).detach();
+            return;
+        }
+        if (result.unknown && GetSettingsCopy().localAi) {
+            // Bunbun: nothing matched, so the local AI takes it; its reply streams
+            // into this card (brain_module.inc). Off or not set up: the usual reply.
+            QuickLookup::Result thinking = result;
+            thinking.body = Loc(L"Thinking…");
+            thinking.unknown = false;  // not puzzled yet: the local AI is on it
+            QuickLookup::FillSnapshot(snap, query, true, &thinking, now);
+            const uint64_t id = PublishNewLookup(snap, false);
+            if (BrainTryAnswer(query, id)) {
+                ui.historyPos = -1;
+                std::lock_guard lock(g_stateMutex);
+                QuickLookup::PushRecentLocked(g_state, query, result);
+                return;
+            }
+        }
         QuickLookup::FillSnapshot(snap, query, true, &result, now);
+        // Bunbun: a command that ran (open, dnd, volume, timer…) only flashes its
+        // confirmation. The render loop then closes the panel, hands focus back
+        // to the previous app and the island returns home. Answers to questions,
+        // and commands that failed, stay up to be read.
+        if (result.command) snap.expiresAt = now + QuickLookup::kCommandSeconds;
+        {
+            std::lock_guard lock(g_stateMutex);
+            QuickLookup::PushRecentLocked(g_state, query, result);  // Bunbun: for Up-arrow history
+        }
+        ui.historyPos = -1;
         PublishNewLookup(snap, false);
         return;
     }
@@ -904,6 +962,7 @@ void SubmitLookupSelection() {
 void LookupUiEdited() {
     LookupUiState& ui = g_lookupUi;
     const double now = NowSeconds();
+    ui.historyPos = -1;  // Bunbun: typing leaves the history walk
     ui.selected = 0;
     ui.selectAll = false;
     ui.caretResetAt = now;
@@ -1032,6 +1091,25 @@ bool HandleLookupKeyDown(HWND hwnd, WPARAM vk) {
             return true;
         case VK_UP:
         case VK_DOWN: {
+            // Bunbun: in an empty box (or while stepping through it), Up / Down walk
+            // back through earlier queries like a terminal's history.
+            if (ui.text.empty() || ui.historyPos >= 0) {
+                std::vector<std::wstring> history;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    for (const LookupRecent& e : g_state.lookupRecent) history.push_back(e.query);
+                }
+                if (!history.empty()) {
+                    const int n = static_cast<int>(history.size());
+                    ui.historyPos = vk == VK_UP ? std::min(ui.historyPos + 1, n - 1) : ui.historyPos - 1;
+                    ui.text = ui.historyPos >= 0 ? history[static_cast<size_t>(ui.historyPos)] : std::wstring();
+                    ui.caret = ui.text.size();
+                    ui.selectAll = false;
+                    ui.caretResetAt = NowSeconds();
+                    g_layoutDirty = true;
+                    return true;
+                }
+            }
             LookupStatus status = LookupStatus::Search;
             const std::vector<LookupRow> rows = CurrentLookupRows(&status);
             if (status == LookupStatus::Search && !rows.empty()) {
@@ -1098,6 +1176,11 @@ bool HandleLookupKeyDown(HWND hwnd, WPARAM vk) {
             if (!ctrl) return false;
             InsertIntoLookupField(QuickLookup::CollapseWhitespace(
                 ReadClipboardText(hwnd), QuickLookup::kMaxQueryChars));
+            return true;
+        case 'Z':
+            // Bunbun: Ctrl+Z in an empty box undoes Bun's last command.
+            if (!ctrl || !ui.text.empty()) return false;
+            SubmitLookup(L"undo");
             return true;
         default:
             return false;
