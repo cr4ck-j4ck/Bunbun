@@ -85,21 +85,31 @@ Every option has a home, and changes apply to the island the moment you make the
 
 ## Download
 
-Grab **`Bunbun-<version>-win-x64.zip`** from the [latest release](../../releases/latest). There's
-no installer:
+Grab **`Bunbun-<version>-setup.exe`** from the [latest release](../../releases/latest) and run it.
+It installs for your account only (no admin prompt) into `%LOCALAPPDATA%\Programs\Bunbun`, adds
+Bunbun to the Start menu, and can:
 
-1. Unzip it somewhere permanent, for example `%LOCALAPPDATA%\Programs\Bunbun`. Connected coding
-   agents call `bunbun-hook.exe` from that folder, so moving it later means connecting them again.
-2. Run **`bunbun.exe`**.
+- start Bunbun when you sign in;
+- install the WebView2 Runtime if your Windows doesn't have it (the settings window needs it;
+  Windows 11 always does);
+- set up [Local AI](docs/local-ai.md) for Ask Bun: tick it and the installer downloads a small
+  language model (about 1.1 GB, checked against its published hash) and turns it on. Skip it and
+  add a model any time later.
 
-It runs on Windows 10 and 11 (x64) with nothing else to install. The settings window uses WebView2,
-which Windows 11 includes and Windows 10 gets with Microsoft Edge. The app isn't code-signed yet, so
-SmartScreen may warn the first time: choose **More info → Run anyway**. Check the download against
-`SHA256SUMS.txt` on the release page if you like.
+Uninstall from **Settings → Apps**. It quits Bunbun and disconnects the coding agents connected to
+it first; your settings, skin packs and models stay in your AppData folders.
+
+Prefer no installer? **`Bunbun-<version>-win-x64.zip`** is the same app, portable: unzip it
+somewhere permanent and run `bunbun.exe` (connected agents call `bunbun-hook.exe` from that folder,
+so moving it later means connecting them again).
+
+It runs on Windows 10 and 11 (x64). The app isn't code-signed yet, so SmartScreen may warn the
+first time: choose **More info → Run anyway**. Check the download against `SHA256SUMS.txt` on the
+release page if you like.
 
 ## Get started
 
-1. **Run it.** Start `bunbun.exe` from the release zip, or build it yourself (see
+1. **Run it.** Install it (above), or build it yourself (see
    [docs/building.md](docs/building.md)):
 
    ```bash
@@ -152,8 +162,8 @@ over a local pipe that only your user account can open.
 Bunbun checks GitHub once a day and shows a notification when a new version is out; click it, or
 **Update available** in the tray menu, to open the release page. You can also check any time from
 the tray (**Check for updates…**) or **Settings → General → Updates**. Nothing is downloaded or
-installed for you: unzip the new release over the old folder (quit Bunbun first) and your settings
-and connected agents carry over.
+installed for you: run the new setup, which replaces the old version in place, or unzip the new
+release over the old folder (quit Bunbun first). Your settings and connected agents carry over.
 
 ## Credits & license
 

@@ -2,7 +2,9 @@
 # One-time setup: downloads the pinned toolchains into .toolchain/ and installs
 # the settings UI's packages. Safe to re-run; anything already present is kept.
 #
-#   ./scripts/setup.sh
+#   ./scripts/setup.sh                 everything needed for ./build.sh
+#   ./scripts/setup.sh --local-ai      also what bunbun-brain.exe is built from
+#   ./scripts/setup.sh --installer     also Inno Setup, for the setup .exe (scripts/package.sh)
 #
 # Set TOOLCHAIN to put the toolchains somewhere else (then point build.sh at them
 # with LLVM_MINGW, WINRT_INCLUDE and WEBVIEW2).
@@ -17,11 +19,19 @@ WEBVIEW2_VER=1.0.4314.35
 LLAMA_CPP_TAG=b11721
 CMAKE_VER=4.4.4
 NINJA_VER=1.13.2
+# Optional installer compiler (Inno Setup). Only fetched with --installer.
+INNO_VER=6.4.3
 
 TOOLCHAIN="${TOOLCHAIN:-.toolchain}"
 mkdir -p "$TOOLCHAIN"
 LOCAL_AI=0
-[ "${1:-}" = "--local-ai" ] && LOCAL_AI=1
+INSTALLER=0
+for arg in "$@"; do
+    case "$arg" in
+        --local-ai) LOCAL_AI=1 ;;
+        --installer) INSTALLER=1 ;;
+    esac
+done
 
 # Extracts a zip (or .nupkg, which is a zip) with PowerShell; Git Bash has no unzip.
 extract() {
@@ -90,6 +100,18 @@ if [ "$LOCAL_AI" = 1 ]; then
         echo "llama.cpp $LLAMA_CPP_TAG"
         git clone --quiet --depth 1 --branch "$LLAMA_CPP_TAG" https://github.com/ggml-org/llama.cpp "$TOOLCHAIN/llama.cpp"
     fi
+fi
+
+# ── Optional: Inno Setup, which turns a release into a setup .exe ───────────
+# Installed portably into the toolchain folder: nothing registered system-wide.
+if [ "$INSTALLER" = 1 ] && [ ! -f "$TOOLCHAIN/innosetup/ISCC.exe" ]; then
+    echo "Inno Setup $INNO_VER"
+    fetch "https://github.com/jrsoftware/issrc/releases/download/is-${INNO_VER//./_}/innosetup-$INNO_VER.exe" "$TOOLCHAIN/innosetup-$INNO_VER-setup.exe"
+    # MSYS2_ARG_CONV_EXCL: Git Bash would otherwise turn "/VERYSILENT" into a path.
+    MSYS2_ARG_CONV_EXCL='*' "$TOOLCHAIN/innosetup-$INNO_VER-setup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /PORTABLE=1 /NOICONS \
+        /DIR="$(cygpath -w "$PWD/$TOOLCHAIN/innosetup")"
+    rm -f "$TOOLCHAIN/innosetup-$INNO_VER-setup.exe"
+    [ -f "$TOOLCHAIN/innosetup/ISCC.exe" ] || { echo "Inno Setup didn't install" >&2; exit 1; }
 fi
 
 echo "Toolchains ready in $TOOLCHAIN. Next: ./build.sh"

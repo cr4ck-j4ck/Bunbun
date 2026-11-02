@@ -8,8 +8,15 @@ commands ("it's too loud" becomes `volume down`).
 - **Offline.** The model runs on your CPU. No account, no API key, no internet; nothing you type
   leaves your PC.
 - **Optional.** It's off by default. Bunbun works the same without it.
-- **Not in the repository.** Model files are 0.5–2.5 GB, so you download one yourself (below).
-  Bunbun never downloads one for you.
+- **Not in the repository.** Model files are 0.5–2.5 GB, so they're never part of Bunbun's code or
+  downloads. Bunbun itself never fetches one.
+
+## The quick way: the installer
+
+Run `Bunbun-<version>-setup.exe` and tick **Set up Local AI for Ask Bun**. The installer downloads
+Qwen2.5 1.5B (about 1.1 GB, checked against its published SHA-256) into
+`%LOCALAPPDATA%\Bunbun\models\` and turns Local AI on. That's all: open Ask Bun (Ctrl+Alt+B) and
+ask away, or read [Bun as an agent](#bun-as-an-agent). The rest of this page is for the portable zip, other models, or building the helper yourself.
 
 ## What you need
 

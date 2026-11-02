@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Packages a release: dist/Bunbun-<version>-win-x64.zip plus SHA256SUMS.txt.
+# Packages a release: dist/Bunbun-<version>-setup.exe (the installer, when Inno
+# Setup is in .toolchain: ./scripts/setup.sh --installer), the portable
+# dist/Bunbun-<version>-win-x64.zip, and SHA256SUMS.txt.
 #
 #   ./scripts/package.sh            build, then package
 #   ./scripts/package.sh --no-build package what's already in build/ (e.g. while the island runs)
@@ -24,7 +26,7 @@ for f in "${required[@]}"; do
     [ -f "$f" ] || { echo "missing $f; run ./build.sh first" >&2; exit 1; }
 done
 
-rm -rf "$STAGE" "dist/$NAME.zip"
+rm -rf "$STAGE" "dist/$NAME.zip" "dist/Bunbun-$VERSION-setup.exe"
 mkdir -p "$STAGE"
 cp build/bunbun.exe build/bunbun-hook.exe build/bunbun-settings.exe build/WebView2Loader.dll "$STAGE/"
 cp -r build/settings-ui "$STAGE/settings-ui"
@@ -51,6 +53,20 @@ win_stage="$(cygpath -w "$PWD/$STAGE")"
 win_zip="$(cygpath -w "$PWD/dist/$NAME.zip")"
 powershell -NoProfile -Command "Compress-Archive -Path '$win_stage' -DestinationPath '$win_zip' -CompressionLevel Optimal -Force"
 
-(cd dist && sha256sum "$NAME.zip" > SHA256SUMS.txt)
+# The installer, from the same staged files (installer/bunbun.iss).
+ISCC="${ISCC:-.toolchain/innosetup/ISCC.exe}"
+artifacts=("$NAME.zip")
+if [ -f "$ISCC" ]; then
+    numeric="${VERSION%%-*}"  # Windows version info takes only digits
+    # MSYS2_ARG_CONV_EXCL: Git Bash would otherwise turn "/Q" and "/D…" into paths.
+    MSYS2_ARG_CONV_EXCL='*' "$ISCC" /Q "/DAppVersion=$VERSION" "/DAppVersionNumeric=$numeric" "/DSourceDir=$win_stage" \
+        "/O$(cygpath -w "$PWD/dist")" "$(cygpath -w "$PWD/installer/bunbun.iss")"
+    artifacts=("Bunbun-$VERSION-setup.exe" "${artifacts[@]}")
+    echo "Packaged dist/Bunbun-$VERSION-setup.exe ($(du -h "dist/Bunbun-$VERSION-setup.exe" | cut -f1))"
+else
+    echo "No installer: Inno Setup not found (./scripts/setup.sh --installer)"
+fi
+
+(cd dist && sha256sum "${artifacts[@]}" > SHA256SUMS.txt)
 echo "Packaged dist/$NAME.zip ($(du -h "dist/$NAME.zip" | cut -f1))"
 cat dist/SHA256SUMS.txt

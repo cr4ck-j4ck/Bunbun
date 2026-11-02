@@ -9,10 +9,12 @@
 //   bunbun.exe --install-hooks     connect Claude Code, then exit
 //   bunbun.exe --uninstall-hooks   disconnect Claude Code, then exit
 //   bunbun.exe --connect <agent> [--quiet]     claude, antigravity, cursor, copilot
-//   bunbun.exe --disconnect <agent> [--quiet]
+//   bunbun.exe --disconnect <agent> [--quiet] [--if-ours]   (--if-ours: only if its hooks call this copy)
 //   bunbun.exe --quit              ask a running Bunbun to quit cleanly, then exit
 //   bunbun.exe --replace           quit a running Bunbun, then start this one
 //                                  (scripts/dev.sh uses it to push a fresh build live)
+//   bunbun.exe --enable-local-ai   turn Local AI on in settings.ini, then exit (the
+//                                  installer uses it after downloading a model)
 #include <windows.h>
 #include <d2d1.h>
 #include <shellapi.h>
@@ -346,6 +348,37 @@ int RunConnect(bool connect, const std::wstring& agent, bool quiet) {
     return ok ? 0 : 1;
 }
 
+// True if the agent's config calls this copy's bunbun-hook.exe, in any of the
+// ways a path can be written there (JSON-escaped backslashes, forward slashes).
+// The uninstaller disconnects with --if-ours, so removing the installed copy
+// never unhooks another one (a portable or development build).
+bool HooksPointHere(const std::wstring& agent) {
+    std::wstring config;
+    if (agent == L"claude") config = bb::hooks::ClaudeSettingsPath();
+    else if (agent == L"antigravity") config = bb::hooks::AntigravitySettingsPath();
+    else if (agent == L"cursor") config = bb::hooks::CursorSettingsPath();
+    else if (agent == L"copilot" || agent == L"vscode") config = bb::hooks::CopilotHooksPath();
+    HANDLE f = CreateFileW(config.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    std::string text;
+    char buf[65536];
+    DWORD got = 0;
+    while (ReadFile(f, buf, sizeof buf, &got, nullptr) && got) text.append(buf, got);
+    CloseHandle(f);
+    const std::wstring hookW = bb::hooks::HookExePath();
+    std::string hook(WideCharToMultiByte(CP_UTF8, 0, hookW.c_str(), -1, nullptr, 0, nullptr, nullptr), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, hookW.c_str(), -1, hook.data(), static_cast<int>(hook.size()), nullptr, nullptr);
+    hook.resize(hook.size() - 1);
+    auto lower = [](std::string s) { for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c))); return s; };
+    text = lower(text);
+    hook = lower(hook);
+    std::string escaped, forward = hook;
+    for (char c : hook) escaped += c == '\\' ? std::string("\\\\") : std::string(1, c);
+    for (char& c : forward) if (c == '\\') c = '/';
+    return text.find(hook) != std::string::npos || text.find(escaped) != std::string::npos ||
+           text.find(forward) != std::string::npos;
+}
+
 // The word after `flag` in the command line, lower-cased ("" if absent).
 std::wstring ArgAfter(const std::wstring& args, const wchar_t* flag) {
     size_t at = args.find(flag);
@@ -365,8 +398,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     if (args.find(L"--install-hooks") != std::wstring::npos) return RunConnect(true, L"claude", quiet);
     if (args.find(L"--uninstall-hooks") != std::wstring::npos) return RunConnect(false, L"claude", quiet);
     if (args.find(L"--connect") != std::wstring::npos) return RunConnect(true, ArgAfter(args, L"--connect"), quiet);
-    if (args.find(L"--disconnect") != std::wstring::npos) return RunConnect(false, ArgAfter(args, L"--disconnect"), quiet);
+    if (args.find(L"--disconnect") != std::wstring::npos) {
+        const std::wstring agent = ArgAfter(args, L"--disconnect");
+        if (args.find(L"--if-ours") != std::wstring::npos && !HooksPointHere(agent)) return 0;
+        return RunConnect(false, agent, quiet);
+    }
     if (args.find(L"--quit") != std::wstring::npos) return QuitRunningInstance(10000) ? 0 : 1;
+    if (args.find(L"--enable-local-ai") != std::wstring::npos) {
+        // Only this one key is written; every other setting keeps its live default.
+        bb::EnsureSettingsFile();
+        return WritePrivateProfileStringW(L"Bunbun", L"LocalAi", L"true", bb::SettingsPath()) ? 0 : 1;
+    }
     if (args.find(L"--replace") != std::wstring::npos && !QuitRunningInstance(10000)) return 1;
 
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\Bunbun.Instance");

@@ -82,12 +82,28 @@ python tests/simulate_agent.py demo
 
 Builds, then writes `dist/Bunbun-<version>-win-x64.zip` and `dist/SHA256SUMS.txt`. Pass `--no-build`
 to package what's already in `build/` (for example while the island is running). The zip is
-portable: the three exes, `WebView2Loader.dll`, `settings-ui/`, the licence and notices, and a
+portable: the exes, `WebView2Loader.dll`, `settings-ui/`, the licence and notices, and a
 `START HERE.txt`. Everything is linked statically, so it runs on a clean Windows 10/11 x64.
 
+**The installer.** With [Inno Setup](https://jrsoftware.org/isinfo.php) in the toolchain folder, the
+same files also become `dist/Bunbun-<version>-setup.exe`:
+
+```bash
+./scripts/setup.sh --installer   # a portable Inno Setup in .toolchain/innosetup, once
+./scripts/package.sh
+```
+
+The installer is `installer/bunbun.iss`. It installs per user without admin rights, adds Start menu
+shortcuts and an uninstaller, offers "start with Windows", installs the WebView2 Runtime when it's
+missing, and can download the recommended Local AI model (checked against its SHA-256) and run
+`bunbun.exe --enable-local-ai`. Uninstalling quits Bunbun and disconnects the coding agents whose hooks call
+this copy (`--disconnect <agent> --quiet --if-ours`), so none is left calling a deleted hook and
+hooks pointing at another copy (a portable or development build) stay.
+
 Releases are automated: CI builds and packages every push (the zip is attached to the run), and
-pushing a tag that matches `VERSION` publishes a GitHub Release with the zip, checksums and the
-CHANGELOG section as notes:
+pushing a tag that matches `VERSION` publishes a GitHub Release with the installer, the zip,
+checksums and the CHANGELOG section as notes. Release builds include the local AI helper
+(`setup.sh --local-ai --installer`):
 
 ```bash
 git tag v0.1.0

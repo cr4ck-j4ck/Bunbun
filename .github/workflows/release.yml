@@ -2,8 +2,9 @@
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# The tag must match the VERSION file. The release gets the portable zip and
-# SHA256SUMS.txt, with notes taken from that version's CHANGELOG section.
+# The tag must match the VERSION file. The release gets the installer, the
+# portable zip and SHA256SUMS.txt, with notes taken from that version's
+# CHANGELOG section. Both include the local AI helper (never a model).
 name: Release
 
 on:
@@ -37,7 +38,7 @@ jobs:
           cache-dependency-path: settings-ui/package-lock.json
 
       - name: Set up toolchains
-        run: ./scripts/setup.sh
+        run: ./scripts/setup.sh --local-ai --installer
 
       - name: Build
         env:
@@ -66,5 +67,5 @@ jobs:
         run: |
           version="$(tr -d ' \r\n' < VERSION)"
           gh release create "$GITHUB_REF_NAME" \
-            "dist/Bunbun-$version-win-x64.zip" dist/SHA256SUMS.txt \
+            "dist/Bunbun-$version-setup.exe" "dist/Bunbun-$version-win-x64.zip" dist/SHA256SUMS.txt \
             --title "Bunbun $version" --notes-file dist/NOTES.md

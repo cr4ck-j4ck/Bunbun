@@ -24,6 +24,13 @@ and versions follow [Semantic Versioning](https://semver.org/).
   and the slot beside the clock leave room for it.
 
 ### Added
+- **An installer.** `Bunbun-<version>-setup.exe` installs for your account (no admin prompt), adds
+  Start menu shortcuts and an uninstaller, can start Bunbun at sign-in, installs the WebView2
+  Runtime if it's missing, and can download a Local AI model and turn Local AI on. Uninstalling
+  disconnects the coding agents connected to that copy first. The portable zip is still there. Releases now include the
+  local AI helper.
+- `bunbun.exe --enable-local-ai` turns Local AI on in `settings.ini`; `--disconnect <agent> --if-ours`
+  only disconnects an agent whose hooks call that copy of Bunbun.
 - **Your own character from a character sheet.** Mascot studio → Custom skins → Pick a character
   sheet: Bunbun cuts out every frame, you say which row is which mood, and the frames play as
   animations. The resting idle frame's eyes follow your cursor, and a row of look directions
