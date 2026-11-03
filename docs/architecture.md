@@ -18,7 +18,7 @@ bunbun-settings.exe (WebView2) ──JSON bridge──▶ settings.ini ──fil
 | `src/island/modules/*.inc` | Pieces split out of the core, included inside the core's namespace: weather, lyrics, Ask Bun panel, connectivity (data + `connectivity_draw.inc`), privacy dots, to-dos (+ `todos_draw.inc`), Focus mode, Ask Bun actions (undo, brightness), calendar link, downloads, the meeting / download pills (`bunbun_pills_draw.inc`) and shared types (`bunbun_types.inc`). New modules go here, not into `island_core.cpp`; `*_draw.inc` files are included inside the `Renderer` class |
 | `src/island/settings_schema.yaml` | Every setting with its default, options and description |
 | `src/island/wh_shim.*` | Settings and state on top of INI files |
-| `src/agents/agent_bridge.cpp` | Pipe server and agent session state machine |
+| `src/agents/agent_bridge.cpp` | Agent session state machine, served over a named pipe (Windows) or a Unix socket (Linux) |
 | `src/agents/hook_installer.*` | Connect / disconnect for each supported agent |
 | `src/hook/bunbun_hook.cpp` | The relay agents run; translates each agent's hook format |
 | `src/mascot/` | The mascots, their moods, and custom skin packs, drawn with Direct2D |
@@ -27,6 +27,8 @@ bunbun-settings.exe (WebView2) ──JSON bridge──▶ settings.ini ──fil
 | `src/settings/settings_host.cpp` | The settings window: WebView2 host and JSON bridge |
 | `settings-ui/` | The settings UI: React, Vite, Framer Motion |
 | `src/main.cpp` | Tray icon, single instance, settings watcher, command-line flags |
+| `src/platform/linux/` | The Linux island (GTK, Cairo/Pango, layer-shell), MPRIS, the WebKitGTK settings host, and the Win32 / Direct2D stand-ins that let shared code build on Linux; see [Bunbun on Linux](linux.md) |
+| `CMakeLists.txt`, `packaging/linux/` | The Linux build, desktop entry and metadata |
 | `tests/` | Unit tests, agent simulator, mascot contact-sheet renderer |
 
 ## The island
@@ -39,12 +41,15 @@ bunbun-settings.exe (WebView2) ──JSON bridge──▶ settings.ini ──fil
   happen at once they share the island side by side; the mouse wheel steps through live activities
   and then the dashboard tabs.
 
+On Linux the island is a GTK window drawn with Cairo and Pango: a layer-shell surface on Wayland, a
+dock window on X11. The mascot is the same code on both systems. See [Bunbun on Linux](linux.md).
+
 ## Coding agents
 
 Each agent runs `bunbun-hook.exe --agent <name> <event>` and passes the event JSON on stdin. The
 hook normalises the agent's own format (Claude Code, Antigravity, Cursor, GitHub Copilot) to one
-shape, sends it to the island over a named pipe, and, for approval requests, waits for the answer
-and replies in the agent's format.
+shape, sends it to the island over a named pipe (a Unix socket on Linux), and, for approval
+requests, waits for the answer and replies in the agent's format.
 
 Rules the hook follows:
 

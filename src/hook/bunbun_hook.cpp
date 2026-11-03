@@ -8,32 +8,50 @@
 // per-user named pipe, and answered in that agent's own format. Only approval
 // requests wait for a reply. If the island is not running, or nobody clicks,
 // the agent gets its own "no opinion" and behaves as if Bunbun were not there.
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+
+#include <cstdlib>
+#endif
 
 #include <cstdio>
 #include <string>
 
 #include "../common/json.h"
+#ifdef _WIN32
 #include "../common/pipe.h"
+#else
+#include "../common/unix_socket.h"  // Linux: the same protocol over a Unix socket
+#endif
 
 using bb::json::Value;
 
 namespace {
 
-constexpr DWORD kConnectTimeoutMs = 300;
-constexpr DWORD kDecisionTimeoutMs = 110 * 1000;  // under the 120 s hook timeout
+constexpr unsigned kConnectTimeoutMs = 300;
+constexpr unsigned kDecisionTimeoutMs = 110 * 1000;  // under the 120 s hook timeout
 constexpr size_t kMaxString = 2000;
 constexpr size_t kMaxEditString = 256 * 1024;
 
 // Set BUNBUN_HOOK_DEBUG=1 to see on stderr why an event did not arrive.
 void Debug(const std::string& msg) {
+#ifdef _WIN32
     static const bool on = GetEnvironmentVariableW(L"BUNBUN_HOOK_DEBUG", nullptr, 0) > 0;
     if (!on) return;
     const std::string line = "bunbun-hook: " + msg + "\n";
     DWORD n = 0;
     WriteFile(GetStdHandle(STD_ERROR_HANDLE), line.data(), static_cast<DWORD>(line.size()), &n, nullptr);
+#else
+    static const bool on = getenv("BUNBUN_HOOK_DEBUG") != nullptr;
+    if (!on) return;
+    const std::string line = "bunbun-hook: " + msg + "\n";
+    if (write(STDERR_FILENO, line.data(), line.size()) < 0) return;
+#endif
 }
 
+#ifdef _WIN32
 std::string ReadStdin() {
     std::string data;
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
@@ -56,6 +74,26 @@ std::string Utf8(const std::wstring& w) {
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
     return s;
 }
+
+#else
+std::string ReadStdin() {
+    std::string data;
+    char buf[8192];
+    ssize_t n = 0;
+    while (data.size() < 8u * 1024u * 1024u && (n = read(STDIN_FILENO, buf, sizeof buf)) > 0)
+        data.append(buf, static_cast<size_t>(n));
+    return data;
+}
+
+void WriteStdout(const std::string& s) {
+    size_t off = 0;
+    while (off < s.size()) {
+        const ssize_t n = write(STDOUT_FILENO, s.data() + off, s.size() - off);
+        if (n <= 0) break;
+        off += static_cast<size_t>(n);
+    }
+}
+#endif
 
 // Cuts at a UTF-8 boundary and marks the cut.
 void Truncate(std::string* s, size_t max) {
@@ -106,6 +144,7 @@ void Slim(Value* payload, const std::string& event) {
     }
 }
 
+#ifdef _WIN32
 HANDLE ConnectToIsland() {
     const std::wstring name = bb::pipe::Name();
     const ULONGLONG deadline = GetTickCount64() + kConnectTimeoutMs;
@@ -138,6 +177,14 @@ DWORD WINAPI ReadReply(void* p) {
     w->ok = bb::pipe::ReadLine(w->pipe, &w->line);
     return 0;
 }
+#else
+// -1 when the island isn't running (no socket, or nobody listening on it).
+int ConnectToIsland() {
+    const int fd = bb::usock::Connect();
+    if (fd < 0) Debug("island not reachable at " + bb::usock::Path());
+    return fd;
+}
+#endif
 
 std::string PermissionReply(const std::string& behavior, const Value* updatedInput) {
     Value decision = Value::Object();
@@ -372,7 +419,12 @@ std::string Reply(Dialect d, const std::string& agent, const std::string& rawEve
 
 }  // namespace
 
+#ifdef _WIN32
 int wmain(int argc, wchar_t** argv) {
+#else
+int main(int argc, char** argv) {
+    const auto Utf8 = [](const char* s) { return std::string(s); };
+#endif
     std::string agent;
     std::string rawEvent;
     for (int i = 1; i < argc; ++i) {
@@ -415,8 +467,13 @@ int wmain(int argc, wchar_t** argv) {
     payload["hook_event_name"] = Value::String(event);
     if (!agent.empty()) payload["bunbun_agent"] = Value::String(agent);
     if (payload.getString("cwd").empty()) {
+#ifdef _WIN32
         wchar_t cwd[MAX_PATH];
         if (GetCurrentDirectoryW(MAX_PATH, cwd)) payload["cwd"] = Value::String(Utf8(cwd));
+#else
+        char cwd[4096];
+        if (getcwd(cwd, sizeof cwd)) payload["cwd"] = Value::String(cwd);
+#endif
     }
 
     Value originalInput;
@@ -429,6 +486,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     };
 
+#ifdef _WIN32
     HANDLE pipe = ConnectToIsland();
     if (pipe == INVALID_HANDLE_VALUE) return finish({});  // island not running
     const bool sent = bb::pipe::WriteAll(pipe, bb::json::Serialize(payload) + "\n");
@@ -445,4 +503,15 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(reader);
     CloseHandle(pipe);
     return finish(wait.line);
+#else
+    const int sock = ConnectToIsland();
+    if (sock < 0) return finish({});  // island not running
+    const bool sent = bb::usock::WriteAll(sock, bb::json::Serialize(payload) + "\n");
+    Debug((sent ? "sent " : "send failed: ") + event + " (" + rawEvent + ")");
+    std::string line;
+    // Nobody decided in time: no reply, and the agent's own prompt takes over.
+    const bool ok = sent && blocking && bb::usock::ReadLine(sock, &line, static_cast<int>(kDecisionTimeoutMs));
+    close(sock);
+    return finish(ok ? line : std::string());
+#endif
 }

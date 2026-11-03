@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.bunbun.Bunbun</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Bunbun</name>
+  <summary>A Dynamic Island with a mascot that watches your coding agents</summary>
+  <description>
+    <p>
+      Bunbun puts a small island at the top of your screen. It shows the time and what's
+      playing, and a mascot that reacts to your coding agents (Claude Code, Antigravity,
+      Cursor and others): what they are doing, and Allow / Deny buttons when they need you.
+    </p>
+  </description>
+  <launchable type="desktop-id">bunbun.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>

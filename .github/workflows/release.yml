@@ -2,10 +2,11 @@
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# The tag must match the VERSION file. The release gets one download, the
-# installer (with the local AI helper, never a model), and its SHA256SUMS.txt,
-# with notes taken from that version's CHANGELOG section. The portable zip is
-# still built and kept as a run artifact, not published.
+# The tag must match the VERSION file. The release gets the Windows installer
+# (with the local AI helper, never a model), the Linux .deb and AppImage, and
+# one SHA256SUMS.txt for all of them, with notes taken from that version's
+# CHANGELOG section. The portable zip is still built and kept as a run
+# artifact, not published.
 name: Release
 
 on:
@@ -16,7 +17,53 @@ permissions:
   contents: write
 
 jobs:
+  linux:
+    # Built on the oldest supported base (glibc 2.35), so it runs there and on anything newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches VERSION
+        run: |
+          version="$(tr -d ' \r\n' < VERSION)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match VERSION ($version)." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: settings-ui/package-lock.json
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build pkg-config dpkg-dev \
+            libgtk-3-dev libgtk-layer-shell-dev libwebkit2gtk-4.1-dev xvfb
+
+      - name: Build and package
+        env:
+          BUNBUN_HOMEPAGE: https://github.com/${{ github.repository }}
+        run: ./scripts/package-linux.sh
+
+      - name: Test
+        run: |
+          xvfb-run -a sh -c 'build-linux/bunbun & sleep 3; python3 tests/test_dialects.py; s=$?; build-linux/bunbun --quit; exit $s'
+          version="$(tr -d ' \r\n' < VERSION)"
+          # A release without both packages would leave Linux users with nothing to install.
+          [ -f "dist/Bunbun-$version-amd64.deb" ] && [ -f "dist/Bunbun-$version-x86_64.AppImage" ]
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bunbun-linux
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+
   release:
+    needs: linux
     runs-on: windows-latest
     defaults:
       run:
@@ -55,7 +102,17 @@ jobs:
           version="$(tr -d ' \r\n' < VERSION)"
           # A release without its installer would leave people with nothing to run.
           [ -f "dist/Bunbun-$version-setup.exe" ] || { echo "The installer wasn't built." >&2; exit 1; }
-          (cd dist && sha256sum "Bunbun-$version-setup.exe" > SHA256SUMS.txt)
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: bunbun-linux
+          path: dist
+
+      - name: Checksums
+        run: |
+          version="$(tr -d ' \r\n' < VERSION)"
+          (cd dist && sha256sum "Bunbun-$version-setup.exe" "Bunbun-$version-amd64.deb" \
+              "Bunbun-$version-x86_64.AppImage" > SHA256SUMS.txt)
 
       - uses: actions/upload-artifact@v7
         with:
@@ -75,6 +132,9 @@ jobs:
             echo "account (no admin prompt) and replaces an older version in place. Windows may show a"
             echo "SmartScreen warning because the app isn't code-signed yet: choose **More info → Run anyway**."
             echo
+            echo "**Linux:** on Debian or Ubuntu, \`sudo apt install ./Bunbun-$version-amd64.deb\`. Anywhere else,"
+            echo "make \`Bunbun-$version-x86_64.AppImage\` executable and run it. See docs/linux.md for what works where."
+            echo
             cat dist/CHANGES.md
           } > dist/NOTES.md
 
@@ -84,5 +144,6 @@ jobs:
         run: |
           version="$(tr -d ' \r\n' < VERSION)"
           gh release create "$GITHUB_REF_NAME" \
-            "dist/Bunbun-$version-setup.exe" dist/SHA256SUMS.txt \
+            "dist/Bunbun-$version-setup.exe" "dist/Bunbun-$version-amd64.deb" \
+            "dist/Bunbun-$version-x86_64.AppImage" dist/SHA256SUMS.txt \
             --title "Bunbun $version" --notes-file dist/NOTES.md

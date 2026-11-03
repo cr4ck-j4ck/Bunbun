@@ -1,4 +1,4 @@
-"""Drives bunbun-hook.exe with fake Claude Code events, to try the island
+"""Drives bunbun-hook with fake Claude Code events, to try the island
 without a real agent session.
 
     python tests/simulate_agent.py work       # prompt + a few tool calls
@@ -14,7 +14,9 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HOOK = os.path.join(HERE, "..", "build", "bunbun-hook.exe")
+# Windows: build/bunbun-hook.exe. Linux: the CMake build in build-linux/ (or set BUNBUN_HOOK).
+HOOK = os.environ.get("BUNBUN_HOOK") or (os.path.join(HERE, "..", "build", "bunbun-hook.exe") if os.name == "nt"
+                                         else os.path.join(HERE, "..", "build-linux", "bunbun-hook"))
 BASE = {"session_id": "demo-1", "cwd": os.path.abspath(os.path.join(HERE, ".."))}
 
 

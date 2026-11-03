@@ -399,11 +399,26 @@ bool UninstallCursorHooks(std::wstring* report) {
 }
 
 std::wstring HookExePath() {
+#ifndef _WIN32
+    // Linux: an AppImage mounts somewhere new on every run, so agents get the
+    // copy the island keeps in ~/.local/share/Bunbun/bin (see island_linux.cpp).
+    if (const char* appimage = getenv("APPIMAGE"); appimage && *appimage) {
+        PWSTR home = nullptr;
+        std::wstring p;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, 0, nullptr, &home))) p = home;
+        CoTaskMemFree(home);
+        return p + L"/.local/share/Bunbun/bin/bunbun-hook";
+    }
+#endif
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
     std::wstring p = self;
     p.resize(p.find_last_of(L"\\/") + 1);
+#ifdef _WIN32
     return p + L"bunbun-hook.exe";
+#else
+    return p + L"bunbun-hook";
+#endif
 }
 
 // PowerShell needs the call operator to run a quoted path.

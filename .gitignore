@@ -1,5 +1,6 @@
 # Build & binary outputs
 build/
+build-linux/
 bin/
 dist/
 out/

@@ -1,4 +1,4 @@
-"""Checks bunbun-hook.exe's reply to each agent's hook dialect.
+"""Checks bunbun-hook's reply to each agent's hook dialect.
 
 Runs the real hook against the running island (start Bunbun first) with
 "Ask before shell commands" off, so nothing waits for a click. Every agent must
@@ -13,7 +13,9 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HOOK = os.path.join(HERE, "..", "build", "bunbun-hook.exe")
+# Windows: build/bunbun-hook.exe. Linux: the CMake build in build-linux/ (or set BUNBUN_HOOK).
+HOOK = os.environ.get("BUNBUN_HOOK") or (os.path.join(HERE, "..", "build", "bunbun-hook.exe") if os.name == "nt"
+                                         else os.path.join(HERE, "..", "build-linux", "bunbun-hook"))
 CWD = os.path.abspath(os.path.join(HERE, ".."))
 
 CASES = [

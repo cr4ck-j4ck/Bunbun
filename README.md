@@ -4,7 +4,7 @@
 
 # Bunbun
 
-**A native Dynamic Island for Windows, with a small bunny named Bun who keeps an eye on your coding agents.**
+**A native Dynamic Island for Windows and Linux, with a small bunny named Bun who keeps an eye on your coding agents.**
 
 [Get started](#get-started) · [Features](#features) · [Settings](#the-settings-app) · [Docs](#documentation)
 
@@ -103,6 +103,14 @@ It runs on Windows 10 and 11 (x64). The app isn't code-signed yet, so SmartScree
 first time: choose **More info → Run anyway**. Check the download against `SHA256SUMS.txt` on the
 release page if you like.
 
+### Linux
+
+Each release also has **`Bunbun-<version>-amd64.deb`** for Debian, Ubuntu and their derivatives
+(`sudo apt install ./Bunbun-<version>-amd64.deb`) and **`Bunbun-<version>-x86_64.AppImage`** for
+most other distributions. It runs on GNOME and KDE, on Wayland and X11. The Linux version has the
+island, clock, music, the mascot, coding agents with Allow / Deny, and the settings app; the other
+modules are still being ported. See [Bunbun on Linux](docs/linux.md) for what works where.
+
 ## Get started
 
 1. **Run it.** Install it (above), or build it yourself (see
@@ -137,7 +145,8 @@ for quick options. Settings live in `%APPDATA%\Bunbun\settings.ini`.
 
 | Doc | What's in it |
 |---|---|
-| [Building](docs/building.md) | Toolchain, building, tests, the live dev loop |
+| [Building](docs/building.md) | Toolchain, building, tests, the live dev loop, the Linux build |
+| [Linux](docs/linux.md) | Installing on Linux, what works on which desktop, how the port is built |
 | [Coding agents](docs/agents.md) | Connecting agents, how approvals work, troubleshooting |
 | [Mascots](docs/mascots.md) | Characters, moods, custom skin packs |
 | [Local AI](docs/local-ai.md) | Optional offline AI for Ask Bun: what to download, setup, how it works |

@@ -15,6 +15,9 @@ using Microsoft::WRL::ComPtr;
 namespace bb::mascot {
 namespace {
 
+// Image files go through Windows Imaging here; the Linux build has its own
+// codec (src/platform/linux/image_codec.cpp).
+#ifdef _WIN32
 ComPtr<IWICImagingFactory> Wic() {
     ComPtr<IWICImagingFactory> wic;
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
@@ -52,6 +55,8 @@ bool Encode(const Image& img, IStream* stream) {
            SUCCEEDED(frame->WritePixels(img.h, img.w * 4, static_cast<UINT>(bgra.size()), bgra.data())) &&
            SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit());
 }
+
+#endif  // _WIN32
 
 int Diff(const uint8_t* p, const int bg[3]) {
     return std::abs(p[0] - bg[0]) + std::abs(p[1] - bg[1]) + std::abs(p[2] - bg[2]);
@@ -182,6 +187,7 @@ bool InHull(const std::vector<std::pair<int, int>>& hull, int x, int y) {
 
 }  // namespace
 
+#ifdef _WIN32
 bool DecodeImage(const void* data, size_t size, Image* out) {
     ComPtr<IWICImagingFactory> wic = Wic();
     ComPtr<IWICStream> stream;
@@ -217,6 +223,8 @@ bool EncodePngBytes(const Image& img, std::string* bytes) {
     ULONG read = 0;
     return SUCCEEDED(stream->Read(bytes->data(), static_cast<ULONG>(bytes->size()), &read)) && read == bytes->size();
 }
+
+#endif  // _WIN32
 
 std::vector<SheetRow> SliceSheet(const Image& sheet) {
     const int W = sheet.w, H = sheet.h;

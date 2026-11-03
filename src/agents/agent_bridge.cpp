@@ -5,10 +5,20 @@
 // island as an AgentView. PermissionRequest connections stay open until the
 // user clicks Allow / Deny on the island (or the request is withdrawn).
 // Event handling manages session lifecycles, active agent pills, and user decisions.
+//
+// Linux: the same state machine, served over a Unix socket (common/unix_socket.h)
+// instead of the named pipe; the transport is the only part that differs.
 #include "agent_view.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <sddl.h>
+#else
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -22,9 +32,15 @@
 #include <thread>
 
 #include "../common/json.h"
+#ifdef _WIN32
 #include "../common/pipe.h"
 #include "../island/island.h"
 #include "../island/wh_shim.h"
+#else
+#include "../common/unix_socket.h"
+#include "../platform/linux/island_api.h"
+#include "../platform/linux/platform.h"
+#endif
 
 namespace bb {
 namespace {
@@ -41,6 +57,7 @@ double Now() {
     return IslandNow();
 }
 
+#ifdef _WIN32
 std::wstring Wide(const std::string& s) {
     if (s.empty()) return {};
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -56,6 +73,32 @@ std::string Utf8(const std::wstring& w) {
     WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
     return s;
 }
+#else
+std::wstring Wide(const std::string& s) { return plat::Wide(s); }
+std::string Utf8(const std::wstring& w) { return plat::Utf8(w); }
+
+// The tick thread's wake-up, a manual-reset event like the Windows one, so the
+// shared code below reads the same on both systems.
+struct WakeEvent {
+    std::mutex m;
+    std::condition_variable cv;
+    bool set = false;
+};
+constexpr unsigned INFINITE = ~0u;
+constexpr bool TRUE = true, FALSE = false;
+WakeEvent* CreateEventW(void*, bool, bool, void*) { return new WakeEvent; }
+void SetEvent(WakeEvent* e) {
+    { std::lock_guard lock(e->m); e->set = true; }
+    e->cv.notify_all();
+}
+void ResetEvent(WakeEvent* e) { std::lock_guard lock(e->m); e->set = false; }
+void WaitForSingleObject(WakeEvent* e, unsigned ms) {
+    std::unique_lock lock(e->m);
+    if (ms == INFINITE) e->cv.wait(lock, [&] { return e->set; });
+    else e->cv.wait_for(lock, std::chrono::milliseconds(ms), [&] { return e->set; });
+}
+void CloseHandle(WakeEvent* e) { delete e; }
+#endif
 
 std::wstring Clip(std::wstring s, size_t max) {
     for (auto& c : s) if (c == L'\n' || c == L'\r' || c == L'\t') c = L' ';
@@ -229,7 +272,12 @@ uint64_t g_lastPublishedKey = 0;
 std::atomic<bool> g_running{false};
 std::thread g_serverThread;
 std::thread g_tickThread;
+#ifdef _WIN32
 HANDLE g_wake = nullptr;  // pokes the tick thread when timing may have changed
+#else
+WakeEvent* g_wake = nullptr;
+int g_listenFd = -1;
+#endif
 
 bool IsBusy(AgentPhase p) { return p == AgentPhase::Thinking || p == AgentPhase::Working; }
 
@@ -499,6 +547,7 @@ std::string HandleEvent(const Value& msg) {
     return {};
 }
 
+#ifdef _WIN32
 std::string Base64(const std::string& in) {
     static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
@@ -540,7 +589,12 @@ std::string HandleCommand(const std::string& cmd) {
     }
     return json::Serialize(out);
 }
+#else
+// The settings app's live preview is Windows-only for now.
+std::string HandleCommand(const std::string&) { return "{\"shown\":false}"; }
+#endif
 
+#ifdef _WIN32
 void ServeConnection(HANDLE pipe) {
     std::string line;
     if (bb::pipe::ReadLine(pipe, &line)) {
@@ -584,6 +638,57 @@ void ServerLoop() {
     }
     if (sd) LocalFree(sd);
 }
+#else
+void ServeConnection(int fd) {
+    std::string line;
+    if (usock::PeerIsSameUser(fd) && usock::ReadLine(fd, &line)) {
+        Value msg;
+        if (json::Parse(line, &msg) && msg.isObject()) {
+            const std::string command = msg.getString("bunbun_command");
+            const std::string reply = command.empty() ? HandleEvent(msg) : HandleCommand(command);
+            if (!reply.empty()) usock::WriteAll(fd, reply + "\n");
+        }
+    }
+    close(fd);
+}
+
+// Binds the socket. A socket file nobody answers on is left over from a crash
+// and is replaced; one that answers belongs to a running island.
+bool Listen() {
+    const std::string path = usock::Path();
+    sockaddr_un addr;
+    if (!usock::FillAddress(path, &addr)) return false;
+    if (const int probe = usock::Connect(); probe >= 0) {
+        close(probe);
+        Wh_Log(L"agents: another island owns %ls", Wide(path).c_str());
+        return false;
+    }
+    unlink(path.c_str());
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    const mode_t old = umask(0077);  // owner-only from the moment it exists
+    const bool ok = bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0 && listen(fd, 16) == 0;
+    umask(old);
+    if (!ok) {
+        Wh_Log(L"agents: can't listen on %ls", Wide(path).c_str());
+        close(fd);
+        return false;
+    }
+    g_listenFd = fd;
+    return true;
+}
+
+void ServerLoop() {
+    while (g_running) {
+        const int fd = accept4(g_listenFd, nullptr, nullptr, SOCK_CLOEXEC);
+        if (fd < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            break;  // Stop() shut the socket down
+        }
+        std::thread(ServeConnection, fd).detach();
+    }
+}
+#endif
 
 // Expires the finished/error flash and stale sessions. Sleeps indefinitely
 // while there is nothing time-dependent on screen.
@@ -616,6 +721,12 @@ namespace agents {
 
 bool Start() {
     if (g_running.exchange(true)) return true;
+#ifndef _WIN32
+    if (!Listen()) {
+        g_running = false;
+        return false;
+    }
+#endif
     g_wake = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_serverThread = std::thread(ServerLoop);
     g_tickThread = std::thread(TickLoop);
@@ -630,13 +741,22 @@ void Stop() {
     }
     g_decided.notify_all();
     SetEvent(g_wake);
+#ifdef _WIN32
     // Unblock ConnectNamedPipe with a throwaway connection.
     HANDLE h = CreateFileW(bb::pipe::Name().c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+#else
+    shutdown(g_listenFd, SHUT_RDWR);  // wakes accept()
+#endif
     if (g_serverThread.joinable()) g_serverThread.join();
     if (g_tickThread.joinable()) g_tickThread.join();
     CloseHandle(g_wake);
     g_wake = nullptr;
+#ifndef _WIN32
+    close(g_listenFd);
+    g_listenFd = -1;
+    unlink(usock::Path().c_str());
+#endif
 }
 
 void Decide(uint64_t requestId, AgentDecision decision, int answerIndex) {

@@ -5,6 +5,17 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Linux.** Bunbun now runs on Linux, packaged as a `.deb` (Debian, Ubuntu and derivatives) and an
+  AppImage (most other distributions), both attached to every release. It runs on GNOME and KDE, on
+  Wayland (layer-shell; GNOME through XWayland) and X11. This first Linux version has the island
+  with the clock, music from any MPRIS player (cover art, play / pause, next, previous), the
+  mascot with every character and mood, coding agents with Allow / Deny and question answers, the
+  right-click menu, and the settings app. Weather, lyrics, Ask Bun, the tray icon and the system
+  flyouts aren't on Linux yet. See [Bunbun on Linux](docs/linux.md).
+- Building on Linux: `cmake -S . -B build-linux`, and `./scripts/package-linux.sh` for the packages.
+  `tests/test_dialects.py` and `tests/simulate_agent.py` run against the Linux hook too.
+
 ## [0.2.0]
 
 ### Fixed

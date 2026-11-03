@@ -56,9 +56,10 @@ export function General() {
   const [autostart, setAutostart] = useState<boolean | null>(null);
   const [version, setVersion] = useState("");
   const [autostartError, setAutostartError] = useState("");
+  const [linux, setLinux] = useState(false);
   useEffect(() => {
-    call<{ autostart: boolean; version?: string }>("getSystem")
-      .then((r) => { setAutostart(r.autostart); setVersion(r.version ?? ""); })
+    call<{ autostart: boolean; version?: string; platform?: string }>("getSystem")
+      .then((r) => { setAutostart(r.autostart); setVersion(r.version ?? ""); setLinux(r.platform === "linux"); })
       .catch(() => setAutostart(false));
   }, []);
 
@@ -66,8 +67,8 @@ export function General() {
     <div className="page">
       <PageHead title="General" subtitle="Startup, language, clock and the hide/show hotkey." />
       <Section title="Startup">
-        <Row label="Start with Windows" description="Launch Bunbun when you sign in.">
-          <Toggle on={!!autostart} label="Start with Windows" disabled={autostart === null}
+        <Row label={linux ? "Start when you log in" : "Start with Windows"} description="Launch Bunbun when you sign in.">
+          <Toggle on={!!autostart} label={linux ? "Start when you log in" : "Start with Windows"} disabled={autostart === null}
             onChange={(v) => call<boolean>("setAutostart", { on: v })
               .then((r) => { setAutostart(r); setAutostartError(""); })
               .catch((e) => setAutostartError(String(e?.message ?? e)))} />
