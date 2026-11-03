@@ -5,6 +5,7 @@ import {
   LayoutGrid, Link2, ListChecks, Music2, Plus, Quote, RefreshCw, Sparkles, StickyNote, Timer, ToggleRight, X,
 } from "lucide-react";
 import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { LINUX_CARD_STAND_IN, LINUX_PAGES, useIsLinux } from "../platform";
 import { schema, useStore } from "../store";
 import { PageHead, Section, TextField, Toggle } from "../ui/controls";
 import { PageKey, PageThumb } from "../ui/PageThumb";
@@ -197,12 +198,14 @@ function PageRow({ page, first, last, onMove, onDrop }: { page: PageInfo; first:
   const s = useStore();
   const drag = useDragControls();
   const on = page.setting ? s.bool(page.setting) : true;
+  const linuxMissing = useIsLinux() && !LINUX_PAGES.has(page.key);
   return (
     <Reorder.Item value={page.key} as="div" className={`page-row ${on ? "" : "off"}`} dragListener={false} dragControls={drag} onDragEnd={onDrop}>
       <button className="grip" aria-label={`Drag ${page.name}`} onPointerDown={(e) => drag.start(e)}><GripVertical size={16} /></button>
       <Thumb page={page.key} off={!on} />
       <div className="label">
-        <b>{page.icon} {page.name}{page.when && <span className="badge muted">{page.when}</span>}</b>
+        <b>{page.icon} {page.name}{page.when && <span className="badge muted">{page.when}</span>}
+          {linuxMissing && <em className="badge muted linux">Not on Linux yet</em>}</b>
         <span>{page.desc}</span>
       </div>
       <div className="control">
@@ -236,6 +239,8 @@ function HomeCards({ studio }: { studio: boolean }) {
   const keys = ["Bunbun.HomeTile1", "Bunbun.HomeTile2", "Bunbun.HomeTile3"];
   const options = schema[keys[0]]?.options ?? [];
   const label = (v: string) => options.find((o) => o.value === v)?.label ?? v;
+  const linux = useIsLinux();
+  const standIn = linux ? LINUX_CARD_STAND_IN[s.get(keys[slot]) || ""] : undefined;
   return (
     <section className="section">
       <div className="section-title">
@@ -268,6 +273,7 @@ function HomeCards({ studio }: { studio: boolean }) {
               </button>
             ))}
           </div>
+          {standIn && <small className="linux-note">On Linux this card shows {standIn} for now.</small>}
         </div>
       </div>
     </section>

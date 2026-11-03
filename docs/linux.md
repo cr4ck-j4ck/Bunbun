@@ -1,9 +1,10 @@
 # Bunbun on Linux
 
 Bunbun runs on Linux as a `.deb` (Debian, Ubuntu and their derivatives) and an AppImage (most other
-distributions). The Linux version is newer and smaller than the Windows one: it has the island,
-the clock, music, the mascot, coding agents with Allow / Deny, and the settings app. The rest of
-this page says what works where, what isn't there yet, and how the port is built.
+distributions). The Linux version is newer and smaller than the Windows one: it has the island
+with the Studio layout, the clock, music, the mascot, coding agents (Allow / Deny, plans, questions
+and replies typed on the island), and the settings app. The rest of this page says what works where,
+what isn't there yet, and how the port is built.
 
 ## Install
 
@@ -52,6 +53,46 @@ it can. This needs XWayland, which GNOME ships by default. On a fractional scale
 island may look a little soft, because GNOME scales XWayland windows. A GNOME Shell extension that
 offers layer-shell would let Bunbun draw natively; there isn't a maintained one yet.
 
+## Studio on Linux
+
+The island opens into the Studio frame when the pointer rests on it, as on Windows: the page name,
+a tiny mascot, the date and time, the settings gear, the Claude Code usage ring, and a tab bar with
+one icon per page. Scroll or click the tab bar to change pages. The pages, and where Linux gets
+their data:
+
+| Page | On Linux |
+|---|---|
+| **Home** | Three cards picked in Settings → Island pages (Agent, Music, Focus, Weather, Calendar, Battery, System) and **Your links** under them |
+| **Music** | While something plays (MPRIS): cover, title, artist, album, controls, a glow in the album's colour |
+| **Lyrics** | Synced lyrics for the song that's playing, the current line in the middle (Features → Lyrics) |
+| **Calendar** | The month, today, and today's to-dos as an agenda. Calendar links (`.ics`) aren't read on Linux yet |
+| **Weather** | Open-Meteo, like Windows: now, today's high and low, the next hours. Your city from Settings, else roughly where you are from your IP address. Fetched with GIO, or `curl` where GIO can't do https |
+| **System** | CPU, memory and disk, network speed and uptime, from `/proc` and `/sys` |
+| **Quick toggles** | Wi-Fi (NetworkManager), Bluetooth (BlueZ) and Do not disturb (GNOME's notification banners) |
+| **To-do** | The same `todos.tsv` as the settings app; click to tick one off. Reminders show on the island when they're due |
+| **Agent** | What the agent is doing, its command, diff or recent tasks, the steps or your Claude Code limits, the model chip |
+| **Clipboard** | The last 8 texts you copied; click one to copy it again. On Wayland it may miss copies made while another app has the keyboard |
+| **Note** | `note.txt` next to `settings.ini`; click a `[ ]` line to tick it, **Edit** opens it in your text editor |
+| **Focus** | A focus timer with presets; the island tells you when time is up |
+| **All apps** | Every page and Settings in one grid |
+
+**Page order** (Settings → Island pages) orders these the same way as on Windows; the pages Linux
+doesn't have yet (File shelf, Mirror) are left out.
+
+**Lyrics** come from the same places as on Windows: LRCLIB first, then NetEase (Features → Lyrics →
+NetEase fallback), matched to the song by title, artist and length. Each song is looked up once and
+kept in `~/.cache/Bunbun/lyrics` (Features → Lyrics sets the cache's size). **Lyrics on the small
+island** (Features → Lyrics, or right-click the island) shows the current line in the music pill:
+the pill grows to fit the song's longest line, a long line gets a little smaller and then an
+ellipsis, and each new line rolls up from below. The timing follows the player's position over MPRIS;
+**Lyrics sync offset** (Features → Lyrics) moves it earlier or later. Lyrics are fetched with libsoup 3, which the
+`.deb` installs and the AppImage carries. Island pages shows real pictures of your island's pages: the island
+draws them in the background when the screen opens, and whenever you leave a page open for a moment.
+**Expand on hover** off makes a click open and close the island instead. A plan to approve and several questions at once get their own cards,
+with Approve / Change it… and one question at a time. **Reply…** on a finished agent, **Change it…**
+on a plan and **Other…** on a question let you type on the island: the keyboard goes to the island
+while you type (Enter sends, Esc cancels) and back to your windows after.
+
 **Without a compositor** (some X11 window managers, or XFCE with compositing off) transparency isn't
 possible, so the window is cut to the pill's shape instead: the island still looks like a pill, only
 without its soft shadow.
@@ -60,24 +101,20 @@ without its soft shadow.
 
 | Feature | Why | Plan |
 |---|---|---|
-| Studio layout (header, icon tab bar, Home cards) | The Windows Studio is drawn with Direct2D and DirectWrite inside the Windows island | Next: Linux draws the classic pill for now, whatever **Layout** says. The page order, Home cards and tab bar come first, then the Music and Agent pages |
-| Island pages (order, Home cards, page pictures) | Needs the Studio layout | Arrives with Studio. The screen works in Settings, with example drawings instead of real pictures |
-| Plan approval and several-question cards | Part of the Studio drawing | With Studio. Until then a plan shows Allow / Deny, and several questions are answered in the terminal |
-| Replying to a finished agent, typed answers | Need keyboard input on the island | After the cards (layer-shell keyboard focus on demand) |
-| Claude usage ring and history | Part of the Studio Agent page | With the Agent page. The numbers already reach the Linux island |
+| The lyric pill and the Lyrics page | Fetching lyrics needs the island to make web requests (a new library on Linux) | Waiting on a decision; the music pill shows the title meanwhile |
 | Tray icon | Linux has no single tray; it needs StatusNotifierItem over D-Bus | Right-click the island for the same menu. SNI tray later |
 | Ask Bun (Ctrl+Alt+B) | Its commands open Windows apps and Settings pages | Port the commands to Linux equivalents (`xdg-open`, desktop files, `pactl`) |
-| Weather, lyrics and the lyric pill, calendar, downloads, to-dos | Built into the Windows island; not ported yet | One module at a time; lyrics after Studio |
-| Volume, brightness, battery, Wi-Fi, Bluetooth flyouts | Need Linux system APIs | PipeWire/PulseAudio, `brightnessctl`/logind, UPower, NetworkManager, BlueZ |
+| Calendar links (`.ics`), browser downloads | Built into the Windows island; not ported yet | Later |
+| Volume, brightness, battery, Wi-Fi, Bluetooth pop-ups | Need Linux system APIs | PipeWire/PulseAudio, `brightnessctl`/logind, UPower. Wi-Fi and Bluetooth already switch from the Quick toggles page |
 | Notifications and clipboard peek | Need the desktop's notification service | `org.freedesktop.Notifications` monitoring |
 | Music waveform from the real audio | Needs audio capture | PipeWire monitor stream. The bars animate while music plays for now |
 | Several displays, other positions | The island sits top-centre on the primary display | Per-monitor layer surfaces / windows |
-| Clipboard, note, focus, apps and mirror pages, colour picker, tuck in full screen | Windows-only for now | Later |
+| File shelf (drop files on the island) and Mirror (camera preview) pages; colour picker; volume slider; tuck in full screen | Windows-only for now | File shelf through GTK drag and drop, Mirror through PipeWire's camera portal |
 | Live island preview in Settings, character-sheet import, Local AI | Windows-only for now | Later |
 | Update check | Packages are updated by your package manager or a new AppImage | Not planned |
 
-Settings for features that aren't on Linux yet still show in the settings app; changing them has no
-effect on Linux.
+Settings for features that aren't on Linux yet still show in the settings app, marked **Not on Linux
+yet** (in Island pages, Features and the other screens), so it's clear which switches do something.
 
 ## Files
 
@@ -102,6 +139,11 @@ These parts are the same code on both systems:
 - **The mascot** (`src/mascot/`): every character and mood, and skin packs. It's written against
   Direct2D; on Linux it compiles unchanged against a small Direct2D implementation on Cairo (see
   [Compatibility layer](#compatibility-layer)), so a new mood or character arrives on both systems at once.
+- **The Studio page model and icons** (`src/island/studio_pages.h`, `studio_icons.h`): which pages
+  there are and in what order, their names and colours, the Home cards and links, how plan and
+  question replies are built, and every tab icon (drawn through the same Direct2D stand-ins as the
+  mascot). Unit-tested by `tests/test_studio.cpp` on both systems. The frame itself is drawn twice:
+  Direct2D in `studio_draw.inc`, Cairo in `studio_linux.cpp`.
 - **The agent bridge** (`src/agents/agent_bridge.cpp`): sessions, phases, the approval queue and
   question answers. Only its transport differs: a named pipe on Windows, a Unix socket on Linux.
 - **The hook** (`src/hook/`): every agent dialect and reply format; again only the transport differs.
@@ -146,6 +188,7 @@ src/
   common/, assistant/
   platform/linux/
     island_linux.cpp               the island: window, layout, drawing, input
+    studio_linux.cpp               the Studio frame, its pages, plan / question cards, typing
     mpris.cpp                      now playing over D-Bus
     settings.cpp                   settings.ini and the generated defaults
     settings_host_linux.cpp        bunbun-settings on WebKitGTK
@@ -186,7 +229,8 @@ tree, and makes both packages from it:
 
 - the **`.deb`** takes its dependencies from the binaries (`dpkg-shlibdeps`), so on newer releases
   the 64-bit-time package names (`libgtk-3-0t64`) satisfy them;
-- the **AppImage** carries the programs, the settings UI and gtk-layer-shell, and uses the system's
+- the **AppImage** carries the programs, the settings UI, gtk-layer-shell and libsoup 3 (for the
+  island only; the settings window uses the system's), and uses the system's
   GTK 3 and WebKitGTK. Without WebKitGTK the island opens `settings.ini` in a text editor instead of
   the settings window. Because the AppImage's folder changes on every run, agent hooks point at a
   copy of `bunbun-hook` kept in `~/.local/share/Bunbun/bin`; the hook needs only the C library.
@@ -198,6 +242,8 @@ Fedora 36+, current Arch and openSUSE Tumbleweed. Building is covered in [Buildi
 
 The island has been run end to end on X11 (Openbox, with and without a compositor) and on Wayland
 (Sway): clock, music with cover art, the hover card and its controls, agent pills, and an approval
-answered with a real click. `tests/test_dialects.py` and `tests/simulate_agent.py` run against the
+answered with a real click. The Studio frame, its pages, the plan and question cards and typing a
+reply have been checked the same way, on X11 and on Sway (`tests/simulate_agent.py plan` and
+`questions` drive the cards). `tests/test_dialects.py` and `tests/simulate_agent.py` run against the
 Linux hook (they find `build-linux/bunbun-hook`, or set `BUNBUN_HOOK`). Real GNOME and KDE sessions
 haven't been tested yet.

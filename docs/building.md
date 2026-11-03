@@ -173,11 +173,11 @@ What the Linux version does and how it's put together is in [Bunbun on Linux](li
 **Packages** (Ubuntu 22.04 or newer, Debian 12 or newer):
 
 ```bash
-sudo apt install build-essential cmake ninja-build pkg-config dpkg-dev libgtk-3-dev libgtk-layer-shell-dev libwebkit2gtk-4.1-dev
+sudo apt install build-essential cmake ninja-build pkg-config dpkg-dev libgtk-3-dev libgtk-layer-shell-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev
 ```
 
-On Fedora: `gcc-c++ cmake ninja-build gtk3-devel gtk-layer-shell-devel webkit2gtk4.1-devel`. On Arch:
-`base-devel cmake ninja gtk3 gtk-layer-shell webkit2gtk-4.1`. Node.js 18+ builds the settings UI.
+On Fedora: `gcc-c++ cmake ninja-build gtk3-devel gtk-layer-shell-devel libsoup3-devel webkit2gtk4.1-devel`. On Arch:
+`base-devel cmake ninja gtk3 gtk-layer-shell libsoup3 webkit2gtk-4.1`. Node.js 18+ builds the settings UI.
 
 **Build:**
 

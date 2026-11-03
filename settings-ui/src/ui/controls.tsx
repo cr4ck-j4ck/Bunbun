@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { RotateCcw } from "lucide-react";
 import { ReactNode, useEffect, useId, useState } from "react";
+import { notOnLinux, useIsLinux } from "../platform";
 import { schema, useStore } from "../store";
 
 const spring = { type: "spring", stiffness: 520, damping: 34 } as const;
@@ -92,10 +93,11 @@ export function Section({ title, children }: { title?: string; children: ReactNo
 export function Row({ label, description, children, settingKeys }: { label: ReactNode; description?: ReactNode; children: ReactNode; settingKeys?: string[] }) {
   const store = useStore();
   const changed = settingKeys?.some((k) => !store.isDefault(k));
+  const linuxMissing = useIsLinux() && notOnLinux(settingKeys);
   return (
     <div className="row">
       <div className="label">
-        <b>{label}</b>
+        <b>{label}{linuxMissing && <em className="badge muted linux">Not on Linux yet</em>}</b>
         {description && <span>{description}</span>}
       </div>
       <div className="control">

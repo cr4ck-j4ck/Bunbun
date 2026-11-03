@@ -1,0 +1,106 @@
+// Bunbun — what island_linux.cpp and studio_linux.cpp share: the island's state
+// on the GTK main thread, its drawing helpers, and the Studio entry points.
+// Internal to the Linux island (the shared code's side is island_api.h).
+#pragma once
+
+#include <gtk/gtk.h>
+
+#include <string>
+#include <vector>
+
+#include "../../agents/agent_view.h"
+#include "compat/d2d1.h"
+#include "mpris.h"
+
+namespace bb::lisland {
+
+// ── Layout (logical pixels; GTK scales for HiDPI) ───────────────────────────
+
+struct Rect {
+    double x = 0, y = 0, w = 0, h = 0;
+    bool Contains(double px, double py) const { return px >= x && px < x + w && py >= y && py < y + h; }
+};
+
+enum class Action {
+    None, PlayPause, Next, Previous, Allow, Deny, Terminal, Answer, Settings,
+    // Studio (studio_linux.cpp)
+    Tab, OpenLink, OpenMusic, AgentPage, ModelCycle,
+    PlanApprove, PlanChange, QuestionToggle, QuestionNext, QuestionBack, QuestionOther, Reply,
+    ComposeSend, ComposeCancel,
+    // Pages: clipboard, note, to-dos, focus timer, quick toggles, all apps
+    ClipCopy, ClipClear, NoteToggle, NoteEdit, TodoToggle, TodoOpen,
+    FocusStart, FocusPause, FocusAdd, FocusStop, FocusPick, Radio, OpenPage,
+};
+struct Hit {
+    Rect r;
+    Action action;
+    int index = -1;
+};
+
+// ── State (all on the GTK main thread) ──────────────────────────────────────
+
+extern GtkWidget* g_window;
+extern bool g_layerShell;
+extern double g_scale;
+extern bool g_mascotOn, g_agentsOn, g_agentPill, g_mediaOn, g_clock24, g_showSeconds;
+extern bool g_hover;
+extern double g_mouseX, g_mouseY;
+extern std::vector<Hit> g_hits;
+extern int g_hoverHit;
+extern bb::mpris::Track g_track;
+extern GdkPixbuf* g_art;
+extern AgentView g_agent;
+extern ID2D1RenderTarget* g_rt;
+
+double Now();
+void Redraw();
+void OpenSettings();
+
+// ── Drawing helpers ─────────────────────────────────────────────────────────
+
+void RoundRect(cairo_t* cr, double x, double y, double w, double h, double r);
+// Text in a box, one line, ellipsized; returns its width.
+double Text(cairo_t* cr, const std::string& text, double x, double y, double maxW, double size, bool bold,
+            double r = 1, double g = 1, double b = 1, double a = 1, bool mono = false, int lines = 1);
+double TextWidth(cairo_t* cr, const std::string& text, double size, bool bold);
+void DrawMascot(cairo_t* cr, double cx, double cy, double size);
+void Art(cairo_t* cr, double x, double y, double size, double alpha);
+std::string ClockText();
+std::string AgentLine(const AgentView& a);
+// True when the pointer is on the hit about to be pushed (g_hits.size()).
+inline bool NextHitHovered() { return static_cast<int>(g_hits.size()) == g_hoverHit; }
+
+// ── Studio (studio_linux.cpp) ───────────────────────────────────────────────
+
+void StudioLoadSettings();
+bool StudioLayout();                      // Bunbun.Layout = studio
+// 0 = the media view (something is playing), 1 = the idle view.
+int StudioContext();
+// Opens the Agent page the next time the frame opens (hovering an agent pill).
+void StudioShowAgentPage();
+// The frame: header, the current page, tab bar. `mix` fades it in (0..1).
+void PaintStudio(cairo_t* cr, const Rect& island, double mix);
+// The wheel or a touchpad over the open frame: the next or previous page.
+void StudioScroll(double delta);
+// Plan and several-question cards (drawn instead of the plain approval card).
+bool RichCardShown();
+void RichCardSize(cairo_t* cr, double* w, double* h);
+void PaintRichCard(cairo_t* cr, const Rect& p);
+// Studio's own actions (tabs, links, cards, compose, pages). False if not one of them.
+bool StudioDo(const Hit& h);
+// Lyrics on the small island (Bunbun.PillLyrics): the pill's width for this song
+// (0 = no usable lyrics), given the room the pill needs besides the text; and
+// the line itself, drawn into `area`.
+double LyricPillWidth(cairo_t* cr, double chrome);
+void PaintLyricPill(cairo_t* cr, const Rect& area);
+// A short message on the island (a reminder, the focus timer), for `seconds`.
+void ShowToast(const std::string& title, const std::string& text, double seconds);
+// Saves a picture of every Studio page for Settings → Island pages; returns how many.
+int StudioCapturePages();
+
+// Typing on the island: a reply, a plan change, an answer of your own.
+bool Composing();
+bool ComposeKey(GdkEventKey* e);  // true when the key was used
+void ComposeFocusOut();
+
+}  // namespace bb::lisland

@@ -4,6 +4,8 @@ without a real agent session.
     python tests/simulate_agent.py work       # prompt + a few tool calls
     python tests/simulate_agent.py approve    # Bash permission request (blocks for a click)
     python tests/simulate_agent.py question   # AskUserQuestion with options
+    python tests/simulate_agent.py questions  # two questions, one multi-select (the step-through card)
+    python tests/simulate_agent.py plan       # ExitPlanMode: a plan to approve or send back
     python tests/simulate_agent.py finish     # Stop -> Bun hops
     python tests/simulate_agent.py demo       # all of the above in order
 """
@@ -67,13 +69,36 @@ def question():
     send("PermissionRequest", tool_name="AskUserQuestion", tool_input=inp)
 
 
+def questions():
+    inp = {"questions": [
+        {"question": "Which color should Bun's ears be?", "header": "Ears", "multiSelect": False,
+         "options": [{"label": "Pink", "description": ""}, {"label": "Lavender", "description": ""},
+                     {"label": "Peach", "description": ""}]},
+        {"question": "Which hats can Bun wear?", "header": "Hats", "multiSelect": True,
+         "options": [{"label": "Crown", "description": ""}, {"label": "Beanie", "description": ""},
+                     {"label": "Party hat", "description": ""}, {"label": "Sunhat", "description": ""}]},
+    ]}
+    print("Answer both questions on the island...")
+    send("PermissionRequest", tool_name="AskUserQuestion", tool_input=inp)
+
+
+def plan():
+    inp = {"plan": "# Give Bun a hop\n\n1. Add a **Hop** mood to `mascot.cpp`.\n"
+                   "2. Trigger it from the agent bridge when a task finishes.\n"
+                   "- Keep the animation under 0.6 s\n- Respect *Reduce motion*\n\n"
+                   "## Tests\n- Render a contact sheet with the new mood\n- Run tests/run.sh"}
+    print("Approve the plan, or send it back, on the island...")
+    send("PermissionRequest", tool_name="ExitPlanMode", tool_input=inp)
+
+
 def finish():
     send("Stop", last_assistant_message="Bun now hops when a task finishes.")
 
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "demo"
-    steps = {"work": [work], "approve": [approve], "question": [question], "finish": [finish],
+    steps = {"work": [work], "approve": [approve], "question": [question], "questions": [questions], "plan": [plan],
+             "finish": [finish],
              "demo": [work, approve, question, finish]}[mode]
     for step in steps:
         step()

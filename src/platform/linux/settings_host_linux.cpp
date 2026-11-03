@@ -11,6 +11,7 @@
 // "not on Linux yet" result; see docs/linux.md.
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <gtk/gtk.h>
@@ -23,6 +24,8 @@
 
 #include "../../agents/hook_installer.h"
 #include "../../common/json.h"
+#include "../../common/todo_commands.h"
+#include "../../common/unix_socket.h"
 #include "mascot_png.h"
 #include "platform.h"
 #include "settings.h"
@@ -157,6 +160,45 @@ void SetAutostart(bool on) {
                                                "Icon=bunbun\n"
                                                "X-GNOME-Autostart-enabled=true\n"
                                                "NoDisplay=false\n");
+}
+
+// ── Page pictures (Island pages) ────────────────────────────────────────────
+// The island saves them to <state>/previews/<page>.png (studio_linux.cpp).
+
+// {key: {src: data URL, at: ms since 1970}} for pictures newer than `since`.
+Value PagePreviews(double since) {
+    Value out = Value::Object();
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(bb::plat::StateDir() + "/previews", ec)) {
+        if (entry.path().extension() != ".png") continue;
+        struct stat st{};
+        if (stat(entry.path().c_str(), &st) != 0) continue;
+        const double at = st.st_mtim.tv_sec * 1000.0 + st.st_mtim.tv_nsec / 1e6;
+        std::string png;
+        if (at <= since || !bb::plat::ReadFile(entry.path().string(), &png)) continue;
+        Value item = Value::Object();
+        item["src"] = Value::String("data:image/png;base64," + bb::plat::Base64(png));
+        item["at"] = Value::Number(at);
+        out[entry.path().stem().string()] = std::move(item);
+    }
+    return out;
+}
+
+// Asks the running island for fresh pictures; it draws them offscreen, so they
+// are all saved by the time it answers.
+Value CapturePages() {
+    Value out = Value::Object();
+    out["running"] = Value::Bool(false);
+    out["count"] = Value::Number(0);
+    const int fd = bb::usock::Connect();
+    if (fd < 0) return out;
+    std::string line;
+    const bool ok = bb::usock::WriteAll(fd, "{\"bunbun_command\":\"capture_pages\"}\n") && bb::usock::ReadLine(fd, &line, 6000);
+    close(fd);
+    Value reply;
+    out["running"] = Value::Bool(ok);
+    if (ok && bb::json::Parse(line, &reply) && reply.isObject()) out["count"] = Value::Number(reply.getNumber("count"));
+    return out;
 }
 
 bool IslandRunning() {
@@ -310,15 +352,10 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         o["error"] = Value::String("Update your package manager's copy, or download the new AppImage.");
         return o;
     }
-    // The Linux island has no Studio pages to photograph yet: no pictures, so
-    // Island pages shows its example drawings.
-    if (cmd == "getPagePreviews") return Value::Object();
-    if (cmd == "capturePages") {
-        Value o = Value::Object();
-        o["running"] = Value::Bool(IslandRunning());
-        o["count"] = Value::Number(0);
-        return o;
-    }
+    if (cmd == "getPagePreviews") return PagePreviews(args.getNumber("since"));
+    if (cmd == "listTodos" || cmd == "saveTodo" || cmd == "deleteTodo" || cmd == "clearDoneTodos")
+        return bb::todos::Command(cmd, args, bb::plat::Wide(bb::plat::ConfigDir() + "/todos.tsv"), err);
+    if (cmd == "capturePages") return CapturePages();
     *err = cmd + " isn't available on Linux yet";
     return {};
 }

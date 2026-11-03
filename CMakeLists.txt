@@ -3,8 +3,8 @@
 #   cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build-linux
 #
-# Needs GTK 3, gtk-layer-shell (0.6+), WebKitGTK 4.1 and Cairo/Pango development
-# files; docs/building.md lists the packages. The settings UI is built with npm
+# Needs GTK 3, gtk-layer-shell (0.6+), libsoup 3, WebKitGTK 4.1 and Cairo/Pango
+# development files; docs/building.md lists the packages. The settings UI is built with npm
 # when it's available (BUNBUN_BUILD_UI).
 cmake_minimum_required(VERSION 3.16)
 
@@ -30,6 +30,8 @@ option(BUNBUN_BUILD_SETTINGS "Build bunbun-settings (needs WebKitGTK 4.1)" ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 pkg_check_modules(LAYERSHELL REQUIRED IMPORTED_TARGET gtk-layer-shell-0>=0.6)
+# Lyrics (LRCLIB, NetEase) are fetched with libsoup 3.
+pkg_check_modules(SOUP REQUIRED IMPORTED_TARGET libsoup-3.0)
 if(BUNBUN_BUILD_SETTINGS)
     pkg_check_modules(WEBKIT REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
 endif()
@@ -62,9 +64,12 @@ target_link_libraries(bunbun_shared PUBLIC PkgConfig::GTK)
 # The island.
 add_executable(bunbun
     ${LINUX}/island_linux.cpp
+    ${LINUX}/studio_linux.cpp
+    ${LINUX}/sources.cpp
+    ${LINUX}/lyrics_linux.cpp
     ${LINUX}/mpris.cpp
     ${SRC}/agents/agent_bridge.cpp)
-target_link_libraries(bunbun PRIVATE bunbun_shared PkgConfig::GTK PkgConfig::LAYERSHELL)
+target_link_libraries(bunbun PRIVATE bunbun_shared PkgConfig::GTK PkgConfig::LAYERSHELL PkgConfig::SOUP)
 find_package(Threads REQUIRED)
 target_link_libraries(bunbun PRIVATE Threads::Threads)
 
@@ -72,6 +77,9 @@ target_link_libraries(bunbun PRIVATE Threads::Threads)
 # linked in, so the copy an AppImage leaves in ~/.local/share runs anywhere.
 add_executable(bunbun-hook ${SRC}/hook/bunbun_hook.cpp)
 target_link_options(bunbun-hook PRIVATE -static-libstdc++ -static-libgcc)
+
+# Unit tests for the Studio page model shared with Windows: ./build-linux/test_studio
+add_executable(test_studio tests/test_studio.cpp)
 
 if(BUNBUN_BUILD_SETTINGS)
     add_executable(bunbun-settings ${LINUX}/settings_host_linux.cpp)

@@ -75,6 +75,9 @@ button { font: inherit; color: inherit; }
 .row:first-child { border-top: 0; }
 .row .label { min-width: 0; }
 .row .label b { display: block; font-weight: 550; }
+em.badge.linux { font-style: normal; align-self: flex-start; }
+.row .label b .badge { margin-left: 8px; vertical-align: 1px; }
+.row .label b:has(> span + .badge) { display: flex; align-items: center; }
 .row .label span { display: block; margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
 .row .control { flex: none; display: flex; align-items: center; gap: 10px; }
 .row .reset { opacity: 0; border: 0; background: none; color: var(--faint); cursor: pointer; padding: 4px; border-radius: 6px; transition: opacity .15s, color .15s; }
@@ -333,6 +336,7 @@ code, .selectable { user-select: text; }
 .home-tile .n { position: absolute; top: 10px; right: 12px; font-size: 11px; color: rgba(255, 255, 255, 0.35); font-weight: 600; }
 .home-options { display: flex; align-items: center; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
 .home-options > span { color: var(--muted); font-size: 12.5px; }
+.home-options .linux-note { flex-basis: 100%; color: var(--muted); font-size: 12px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chips .chip { display: inline-flex; align-items: center; gap: 6px; }
 .chips .chip svg { width: 14px; height: 14px; }

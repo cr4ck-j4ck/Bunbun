@@ -1,6 +1,7 @@
 import { BookOpen, Bot, Check, FolderOpen, Info, Keyboard, Link2, Unlink2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { call } from "../bridge";
+import { useIsLinux } from "../platform";
 import { useStore } from "../store";
 import { PageHead, Row, Section, Setting, Toggle } from "../ui/controls";
 
@@ -53,6 +54,7 @@ function HotkeyKey({ value, onChange }: { value: string; onChange: (v: string) =
 
 export function Assistant() {
   const s = useStore();
+  const linux = useIsLinux();
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [busy, setBusy] = useState("");
   const [report, setReport] = useState("");
@@ -100,7 +102,8 @@ Your other settings stay as they are, and a backup is made first.`);
 
   return (
     <div className="page">
-      <PageHead title="Assistant & agents" subtitle="Bun is a local Windows assistant, and keeps an eye on your coding agents." />
+      <PageHead title="Assistant & agents" subtitle={linux ? "Bun keeps an eye on your coding agents. Ask Bun, the local assistant, isn't on Linux yet."
+        : "Bun is a local Windows assistant, and keeps an eye on your coding agents."} />
 
       <Section title="Ask Bun">
         <Setting k="Bunbun.Assistant" label="Ask Bun" description="Press the hotkey, type a command, press Enter. Everything runs on this PC; nothing is sent to any AI service." />

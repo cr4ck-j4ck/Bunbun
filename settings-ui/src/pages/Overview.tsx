@@ -7,7 +7,7 @@ import { Row, Section, Toggle } from "../ui/controls";
 import { LiveMascot, useMascotStyle } from "../ui/mascot";
 import { IslandPreview } from "../ui/preview";
 
-type System = { autostart: boolean; islandRunning: boolean; version: string };
+type System = { autostart: boolean; islandRunning: boolean; version: string; platform?: string };
 
 export function Overview({ go }: { go: (page: string) => void }) {
   const s = useStore();
@@ -75,7 +75,9 @@ export function Overview({ go }: { go: (page: string) => void }) {
         <Row label="Island" description={sys?.islandRunning ? "Running. Changes preview live." : "Not running. Start it to see your changes."}>
           <span className={`badge ${sys?.islandRunning ? "green" : ""}`}>{sys?.islandRunning ? "Running" : "Stopped"}</span>
         </Row>
-        <Row label="Version" description="Bunbun is native C++ and Direct2D; this window uses the system WebView2 only while it is open.">
+        <Row label="Version" description={sys?.platform === "linux"
+          ? "Bunbun is native C++ with GTK and Cairo; this window uses the system WebKitGTK only while it is open."
+          : "Bunbun is native C++ and Direct2D; this window uses the system WebView2 only while it is open."}>
           <span className="badge">v{sys?.version ?? "…"}</span>
         </Row>
       </Section>

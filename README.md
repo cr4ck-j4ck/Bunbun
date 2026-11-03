@@ -153,8 +153,10 @@ release page if you like.
 Each release also has **`Bunbun-<version>-amd64.deb`** for Debian, Ubuntu and their derivatives
 (`sudo apt install ./Bunbun-<version>-amd64.deb`) and **`Bunbun-<version>-x86_64.AppImage`** for
 most other distributions. It runs on GNOME and KDE, on Wayland and X11. The Linux version has the
-island, clock, music, the mascot, coding agents with Allow / Deny, and the settings app; the other
-modules are still being ported. See [Bunbun on Linux](docs/linux.md) for what works where.
+Studio island with its pages (Home, music, lyrics, calendar, weather, system, quick toggles, to-dos,
+agents, clipboard, note, focus), the mascot, coding agents with plans, questions and replies, and the
+settings app. Ask Bun and the tray icon aren't on Linux yet. See
+[Bunbun on Linux](docs/linux.md) for what works where.
 
 ## Get started
 

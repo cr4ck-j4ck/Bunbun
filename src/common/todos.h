@@ -6,15 +6,22 @@
 // `due` is Unix seconds (0 = no reminder). `repeat` is "", "daily", "weekdays" or
 // "weekly:1,3" (days of the week, 0 = Sunday). Files written before repeats
 // existed have no repeat column and still load. Pure apart from file I/O and
-// Windows' time-zone conversion, so the repeat maths is unit-tested.
+// the time-zone conversion, so the repeat maths is unit-tested.
+//
+// Linux: the same file next to settings.ini (~/.config/Bunbun); the file calls go
+// through the Win32 stand-ins in src/platform/linux/compat, the time through libc.
 #pragma once
 
 #include <windows.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <cwchar>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <ctime>
+#endif
 
 namespace bb::todos {
 
@@ -28,6 +35,7 @@ struct Item {
 };
 
 // ── Time ─────────────────────────────────────────────────────────────────────
+#ifdef _WIN32
 inline double ToUnix(const FILETIME& ft) {
     const ULONGLONG t = (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
     return static_cast<double>(t) / 1e7 - 11644473600.0;
@@ -74,6 +82,53 @@ inline SYSTEMTIME AddDays(SYSTEMTIME t, int days) {
     out.wMilliseconds = 0;
     return out;
 }
+#else
+inline double Now() {
+    timespec ts{};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+inline SYSTEMTIME FromTm(const tm& lt) {
+    return SYSTEMTIME{static_cast<WORD>(lt.tm_year + 1900), static_cast<WORD>(lt.tm_mon + 1), static_cast<WORD>(lt.tm_wday),
+                      static_cast<WORD>(lt.tm_mday), static_cast<WORD>(lt.tm_hour), static_cast<WORD>(lt.tm_min),
+                      static_cast<WORD>(lt.tm_sec), 0};
+}
+inline tm ToTm(const SYSTEMTIME& t) {
+    tm lt{};
+    lt.tm_year = t.wYear - 1900;
+    lt.tm_mon = t.wMonth - 1;
+    lt.tm_mday = t.wDay;
+    lt.tm_hour = t.wHour;
+    lt.tm_min = t.wMinute;
+    lt.tm_sec = t.wSecond;
+    lt.tm_isdst = -1;  // let mktime work out daylight saving
+    return lt;
+}
+// Unix seconds <-> the PC's local wall-clock time.
+inline SYSTEMTIME ToLocal(double unix) {
+    const time_t t = static_cast<time_t>(unix);
+    tm lt{};
+    localtime_r(&t, &lt);
+    return FromTm(lt);
+}
+inline double FromLocal(const SYSTEMTIME& local) {
+    tm lt = ToTm(local);
+    const time_t t = mktime(&lt);
+    return t == static_cast<time_t>(-1) ? 0.0 : static_cast<double>(t);
+}
+// The same wall-clock time `days` later (mktime normalises the day of the month).
+inline SYSTEMTIME AddDays(SYSTEMTIME t, int days) {
+    tm lt = ToTm(t);
+    lt.tm_mday += days;
+    lt.tm_hour = 12;  // step from midday so daylight saving can't move the date
+    mktime(&lt);      // also fills tm_wday
+    SYSTEMTIME out = FromTm(lt);
+    out.wHour = t.wHour;
+    out.wMinute = t.wMinute;
+    out.wSecond = t.wSecond;
+    return out;
+}
+#endif
 
 // ── Repeats ──────────────────────────────────────────────────────────────────
 // Which days of the week a repeat fires on, as a bit mask (bit 0 = Sunday); 0 for
@@ -184,7 +239,7 @@ inline std::wstring Serialize(const std::vector<Item>& items) {
         for (std::wstring* s : {&text, &repeat})
             std::replace_if(s->begin(), s->end(), [](wchar_t c) { return c == L'\t' || c == L'\n' || c == L'\r'; }, L' ');
         wchar_t head[96];
-        swprintf_s(head, L"%d\t%d\t%.0f\t%d\t", t.id, t.done ? 1 : 0, t.due, t.notified ? 1 : 0);
+        swprintf(head, 96, L"%d\t%d\t%.0f\t%d\t", t.id, t.done ? 1 : 0, t.due, t.notified ? 1 : 0);
         out += head + repeat + L"\t" + text + L"\n";
     }
     return out;

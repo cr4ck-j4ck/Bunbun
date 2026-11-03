@@ -62,6 +62,7 @@ using LPARAM = intptr_t;
 #define GENERIC_WRITE 0x40000000u
 #define FILE_SHARE_READ 1
 #define FILE_SHARE_WRITE 2
+#define FILE_SHARE_DELETE 4
 #define CREATE_NEW 1
 #define CREATE_ALWAYS 2
 #define OPEN_EXISTING 3

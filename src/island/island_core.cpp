@@ -17,6 +17,7 @@
 #include "../common/todos.h"  // Bunbun: to-do file and repeats, shared with the settings app
 #include "../common/json.h"   // Bunbun: talking to the local AI helper
 #include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
+#include "studio_icons.h"  // Bunbun: Studio page model and icons, shared with the Linux island
 #include <windows.h>
 #include <unknwn.h>
 #include <dwmapi.h>
@@ -1583,7 +1584,7 @@ std::wstring FormatWithName(const wchar_t* format, const std::wstring& name) {
 int StudioExtraTabCount(const Settings& s);  // Bunbun: Agent, Clipboard, Note (studio_module.inc)
 // Bunbun: every dashboard page. The tab order is user-set (Bunbun.PageOrder), so the
 // helpers below look a page up in DashboardTabIds instead of counting positions.
-enum class StudioPage { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror };
+using StudioPage = bb::studio::Page;  // Bunbun: studio_pages.h, shared with the Linux island
 int DashboardPageIndex(StudioPage page, const Settings& s);  // studio_module.inc; -1 when the page is off
 int DashboardPageIndexIn(int context, StudioPage page, const Settings& s);
 
@@ -2564,10 +2565,7 @@ void LoadSettings() {
     next.appsPage = Wh_GetIntSetting(L"Bunbun.AppsPage") != 0;
     for (int i = 0; i < 3; ++i) {
         static const wchar_t* kKeys[3] = {L"Bunbun.HomeTile1", L"Bunbun.HomeTile2", L"Bunbun.HomeTile3"};
-        static const wchar_t* kIds[] = {L"agent", L"music", L"focus", L"weather", L"calendar", L"battery", L"system"};
-        const std::wstring v = GetStringSettingCopy(kKeys[i]);
-        next.homeTile[i] = -1;
-        for (int k = 0; k < 7; ++k) if (EqualsNoCase(v, kIds[k])) next.homeTile[i] = k;
+        next.homeTile[i] = bb::studio::HomeTileSetting(GetStringSettingCopy(kKeys[i]));
     }
     next.bluetoothLowWarning = Wh_GetIntSetting(L"Bunbun.BluetoothLowWarning") != 0;
     next.sounds = Wh_GetIntSetting(L"Bunbun.Sounds") != 0;

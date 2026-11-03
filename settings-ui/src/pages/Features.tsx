@@ -1,5 +1,6 @@
 import { BatteryMedium, Bell, CalendarDays, Gamepad2, LayoutGrid, Mic, Music2, Quote, Search, SlidersHorizontal } from "lucide-react";
 import { ReactNode, useEffect, useRef, useState } from "react";
+import { notOnLinux, useIsLinux } from "../platform";
 import { useStore } from "../store";
 import { PageHead, Setting, Toggle } from "../ui/controls";
 
@@ -35,6 +36,7 @@ export function Features({ go }: { go?: (page: string) => void }) {
   const s = useStore();
   const [open, setOpen] = useState<string | null>(null);
   const g = GROUPS.find((x) => x.id === open);
+  const linux = useIsLinux();
   const optionsRef = useRef<HTMLElement>(null);
   // The options open under the grid, so bring them into view.
   useEffect(() => { if (open) optionsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [open]);
@@ -60,6 +62,7 @@ export function Features({ go }: { go?: (page: string) => void }) {
                 {x.main && <span onClick={(e) => e.stopPropagation()}><Toggle on={on} onChange={(v) => s.set(x.main!, v)} label={x.title} /></span>}
               </div>
               <p>{x.desc}</p>
+              {linux && notOnLinux(x.main ? [x.main, ...x.keys] : x.keys) && <em className="badge muted linux">Not on Linux yet</em>}
               <span className="more">{open === x.id ? "Hide options" : `${x.keys.length} options`}</span>
             </div>
           );

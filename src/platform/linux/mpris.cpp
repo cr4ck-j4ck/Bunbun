@@ -17,10 +17,14 @@ struct Player {
     GDBusProxy* player = nullptr;  // org.mpris.MediaPlayer2.Player
     std::string identity;
     gint64 lastPlaying = 0;     // monotonic µs of the last Playing we saw
+    double position = 0;        // seconds, as of positionAt
+    gint64 positionAt = 0;      // monotonic µs; 0 = ask again
+    bool asking = false;
 };
 
 GDBusConnection* g_bus = nullptr;
 guint g_ownerSub = 0;
+guint g_seekSub = 0;
 std::map<std::string, std::unique_ptr<Player>> g_players;
 std::function<void()> g_onChange;
 
@@ -40,7 +44,26 @@ void Changed() {
     if (g_onChange) g_onChange();
 }
 
-void OnProps(GDBusProxy*, GVariant*, GStrv, gpointer) { Changed(); }
+void OnProps(GDBusProxy* proxy, GVariant*, GStrv, gpointer) {
+    // A new track, a pause or a resume: the position needs asking again.
+    for (auto& [bus, p] : g_players)
+        if (p->player == proxy) p->positionAt = 0;
+    Changed();
+}
+
+// Seeked(x position) comes from the player's unique bus name.
+void OnSeeked(GDBusConnection*, const gchar* sender, const gchar*, const gchar*, const gchar*, GVariant* params, gpointer) {
+    gint64 us = 0;
+    g_variant_get(params, "(x)", &us);
+    for (auto& [bus, p] : g_players) {
+        gchar* owner = g_dbus_proxy_get_name_owner(p->player);
+        if (owner && sender && g_strcmp0(owner, sender) == 0) {
+            p->position = us / 1e6;
+            p->positionAt = g_get_monotonic_time();
+        }
+        g_free(owner);
+    }
+}
 
 // The app's own name (Identity), read once from the root interface.
 void ReadIdentity(Player* p) {
@@ -117,6 +140,8 @@ void Start(std::function<void()> onChange) {
     GVariant* r = g_dbus_connection_call_sync(g_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                                               "ListNames", nullptr, G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, 1000,
                                               nullptr, nullptr);
+    g_seekSub = g_dbus_connection_signal_subscribe(g_bus, nullptr, "org.mpris.MediaPlayer2.Player", "Seeked", kPath, nullptr,
+                                                   G_DBUS_SIGNAL_FLAGS_NONE, OnSeeked, nullptr, nullptr);
     if (r) {
         GVariantIter* it = nullptr;
         const gchar* name = nullptr;
@@ -132,7 +157,8 @@ void Start(std::function<void()> onChange) {
 void Stop() {
     while (!g_players.empty()) Remove(g_players.begin()->first);
     if (g_bus && g_ownerSub) g_dbus_connection_signal_unsubscribe(g_bus, g_ownerSub);
-    g_ownerSub = 0;
+    if (g_bus && g_seekSub) g_dbus_connection_signal_unsubscribe(g_bus, g_seekSub);
+    g_ownerSub = g_seekSub = 0;
     if (g_bus) g_object_unref(g_bus);
     g_bus = nullptr;
 }
@@ -168,6 +194,39 @@ Track Current() {
     }
     if (t.title.empty() && !t.playing) t.active = false;  // a paused player with nothing loaded
     return t;
+}
+
+double Position() {
+    Player* p = Best();
+    if (!p) return 0;
+    const gint64 now = g_get_monotonic_time();
+    if ((p->positionAt == 0 || now - p->positionAt > 2000000) && !p->asking) {
+        p->asking = true;
+        g_dbus_connection_call(g_bus, p->bus.c_str(), kPath, "org.freedesktop.DBus.Properties", "Get",
+                               g_variant_new("(ss)", "org.mpris.MediaPlayer2.Player", "Position"), G_VARIANT_TYPE("(v)"),
+                               G_DBUS_CALL_FLAGS_NONE, 1000, nullptr,
+                               [](GObject* src, GAsyncResult* res, gpointer data) {
+                                   std::string* bus = static_cast<std::string*>(data);
+                                   GVariant* r = g_dbus_connection_call_finish(G_DBUS_CONNECTION(src), res, nullptr);
+                                   auto it = g_players.find(*bus);
+                                   if (it != g_players.end()) {
+                                       Player& pl = *it->second;
+                                       pl.asking = false;
+                                       pl.positionAt = g_get_monotonic_time();
+                                       if (r) {
+                                           GVariant* v = nullptr;
+                                           g_variant_get(r, "(v)", &v);
+                                           if (v && g_variant_is_of_type(v, G_VARIANT_TYPE_INT64)) pl.position = g_variant_get_int64(v) / 1e6;
+                                           if (v) g_variant_unref(v);
+                                       }
+                                   }
+                                   if (r) g_variant_unref(r);
+                                   delete bus;
+                               },
+                               new std::string(p->bus));
+    }
+    if (p->positionAt == 0) return p->position;
+    return p->position + (IsPlaying(*p) ? (now - p->positionAt) / 1e6 : 0.0);
 }
 
 void PlayPause() { Call("PlayPause"); }

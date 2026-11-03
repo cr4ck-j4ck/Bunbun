@@ -11,8 +11,8 @@
 # Build on the oldest system you want to support: the binaries need that
 # glibc or newer. Release CI uses Ubuntu 22.04 (glibc 2.35).
 #
-# The AppImage carries Bunbun's own programs, the settings UI and
-# gtk-layer-shell, and uses the system's GTK 3 (on every GNOME and KDE
+# The AppImage carries Bunbun's own programs, the settings UI, gtk-layer-shell
+# and libsoup 3 (lyrics), and uses the system's GTK 3 (on every GNOME and KDE
 # desktop). The settings window also needs WebKitGTK 4.1; without it, the
 # island opens settings.ini in a text editor instead.
 #
@@ -72,7 +72,7 @@ mkdir -p "$STAGE/shlibs/debian"
 DEPENDS="$(cd "$STAGE/shlibs" && dpkg-shlibdeps -O --ignore-missing-info \
     "../deb/usr/lib/bunbun/bunbun" "../deb/usr/lib/bunbun/bunbun-settings" "../deb/usr/lib/bunbun/bunbun-hook" 2>/dev/null |
     sed -n 's/^shlibs:Depends=//p')"
-[ -n "$DEPENDS" ] || DEPENDS="libgtk-3-0, libgtk-layer-shell0, libwebkit2gtk-4.1-0"
+[ -n "$DEPENDS" ] || DEPENDS="libgtk-3-0, libgtk-layer-shell0, libsoup-3.0-0, libwebkit2gtk-4.1-0"
 INSTALLED_KB="$(du -sk "$PKG/usr" | cut -f1)"
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: bunbun
@@ -100,9 +100,13 @@ APPIMAGE="$DIST/Bunbun-$VERSION-x86_64.AppImage"
 rm -rf "$APPDIR" "$APPIMAGE"
 cp -a "$ROOT" "$APPDIR"
 mkdir -p "$APPDIR/usr/lib/bunbun/lib"
-# gtk-layer-shell is the one library many desktops don't have installed.
-lib="$(ldd "$APPDIR/usr/lib/bunbun/bunbun" | awk '/libgtk-layer-shell/ {print $3}')"
-[ -n "$lib" ] && cp -L "$lib" "$APPDIR/usr/lib/bunbun/lib/"
+# Libraries the island needs that many desktops don't have installed:
+# gtk-layer-shell, and libsoup 3 (lyrics) with its two less common dependencies.
+# HTTPS itself comes from the system's glib-networking, like every GNOME/KDE app.
+for want in libgtk-layer-shell libsoup-3.0 libnghttp2 libpsl; do
+    lib="$(ldd "$APPDIR/usr/lib/bunbun/bunbun" | awk -v w="$want" 'index($1, w) == 1 {print $3}')"
+    [ -n "$lib" ] && cp -L "$lib" "$APPDIR/usr/lib/bunbun/lib/"
+done
 cp "$APPDIR/usr/share/applications/bunbun.desktop" "$APPDIR/bunbun.desktop"
 cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/bunbun.png" "$APPDIR/bunbun.png"
 ln -sf bunbun.png "$APPDIR/.DirIcon"
@@ -110,12 +114,14 @@ cat > "$APPDIR/AppRun" <<'EOF'
 #!/bin/sh
 # Bunbun AppImage entry: the island by default; "settings" opens the settings window.
 HERE="$(dirname "$(readlink -f "$0")")"
-export LD_LIBRARY_PATH="$HERE/usr/lib/bunbun/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export BUNBUN_DATA_DIR="$HERE/usr/share/bunbun"
+# The bundled libraries are for the island only: the settings window uses the
+# system's WebKitGTK, which needs the system's own (newer) libsoup.
+ISLAND_LIBS="$HERE/usr/lib/bunbun/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 case "${1:-}" in
     settings) shift; exec "$HERE/usr/lib/bunbun/bunbun-settings" "$@" ;;
     hook)     shift; exec "$HERE/usr/lib/bunbun/bunbun-hook" "$@" ;;
-    *)        exec "$HERE/usr/lib/bunbun/bunbun" "$@" ;;
+    *)        LD_LIBRARY_PATH="$ISLAND_LIBS" exec "$HERE/usr/lib/bunbun/bunbun" "$@" ;;
 esac
 EOF
 chmod +x "$APPDIR/AppRun"

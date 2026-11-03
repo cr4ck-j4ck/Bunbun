@@ -93,7 +93,9 @@ async function mock(cmd: string, args: Record<string, unknown>): Promise<unknown
     case "agentStatus":
       return { claudeConnected: false, claudeSettingsPath: "~/.claude/settings.json" };
     case "getSystem":
-      return { autostart: false, islandRunning: true, version: "0.1.0", packsFolder: "%APPDATA%\\Bunbun\\mascots" };
+      // ?platform=linux shows what the settings app marks as not on Linux yet.
+      return { autostart: false, islandRunning: true, version: "0.1.0", packsFolder: "%APPDATA%\\Bunbun\\mascots",
+               platform: new URLSearchParams(location.search).get("platform") ?? "windows" };
     case "renderMascot":
       return "";
     case "checkUpdate":

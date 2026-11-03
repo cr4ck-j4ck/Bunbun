@@ -108,7 +108,7 @@ export function General() {
         <Updates />
       </Section>
       <Section title="About">
-        <Row label="Bunbun" description="A native Dynamic Island for Windows with coding agent companions and mascot vibes.">
+        <Row label="Bunbun" description={`A native Dynamic Island for ${linux ? "Linux" : "Windows"} with coding agent companions and mascot vibes.`}>
           <span className="badge">{version ? `v${version}` : "…"}</span>
         </Row>
       </Section>

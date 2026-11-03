@@ -154,256 +154,46 @@
         d2dFactory_->CreateStrokeStyle(p, nullptr, 0, &studioStroke_);
     }
 
+    // The icons and rings are shared with the Linux island (src/island/studio_icons.h).
+    bb::studio::Pen SPen() {
+        EnsureRoundStroke();
+        return {target_.Get(), d2dFactory_.Get(), studioStroke_.Get(),
+                [this](const D2D1_COLOR_F& c) { return AcquireBrush(c); }};
+    }
+
     // Open or closed polyline, in a 24-unit icon grid placed at `c` with `scale`.
     void SPoly(std::initializer_list<D2D1_POINT_2F> pts, D2D1_POINT_2F c, float scale, D2D1_COLOR_F col,
                float width, bool closed = false, bool fill = false) {
-        ComPtr<ID2D1PathGeometry> path;
-        if (FAILED(d2dFactory_->CreatePathGeometry(&path)) || !path) return;
-        ComPtr<ID2D1GeometrySink> sink;
-        if (FAILED(path->Open(&sink))) return;
-        bool first = true;
-        for (const auto& p : pts) {
-            const D2D1_POINT_2F q = D2D1::Point2F(c.x + (p.x - 12.0f) * scale, c.y + (p.y - 12.0f) * scale);
-            if (first) { sink->BeginFigure(q, fill ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW); first = false; }
-            else sink->AddLine(q);
-        }
-        sink->EndFigure(closed ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
-        sink->Close();
-        if (ID2D1SolidColorBrush* b = AcquireBrush(col)) {
-            if (fill) target_->FillGeometry(path.Get(), b);
-            else target_->DrawGeometry(path.Get(), b, width, studioStroke_.Get());
-        }
+        bb::studio::Poly(SPen(), pts, c, scale, col, width, closed, fill);
     }
 
     // An arc around (cx, cy) from angle a0 to a1 (radians, 0 = 3 o'clock, clockwise).
     void SArc(D2D1_POINT_2F c, float r, float a0, float a1, D2D1_COLOR_F col, float width) {
-        if (r <= 0.5f || std::fabs(a1 - a0) < 0.001f) return;
-        if (std::fabs(a1 - a0) >= 6.2831f) {
-            if (ID2D1SolidColorBrush* b = AcquireBrush(col)) target_->DrawEllipse(D2D1::Ellipse(c, r, r), b, width);
-            return;
-        }
-        ComPtr<ID2D1PathGeometry> path;
-        if (FAILED(d2dFactory_->CreatePathGeometry(&path)) || !path) return;
-        ComPtr<ID2D1GeometrySink> sink;
-        if (FAILED(path->Open(&sink))) return;
-        sink->BeginFigure(D2D1::Point2F(c.x + r * std::cos(a0), c.y + r * std::sin(a0)), D2D1_FIGURE_BEGIN_HOLLOW);
-        D2D1_ARC_SEGMENT arc{};
-        arc.point = D2D1::Point2F(c.x + r * std::cos(a1), c.y + r * std::sin(a1));
-        arc.size = D2D1::SizeF(r, r);
-        arc.rotationAngle = 0.0f;
-        arc.sweepDirection = a1 > a0 ? D2D1_SWEEP_DIRECTION_CLOCKWISE : D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE;
-        arc.arcSize = std::fabs(a1 - a0) > 3.14159f ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL;
-        sink->AddArc(arc);
-        sink->EndFigure(D2D1_FIGURE_END_OPEN);
-        sink->Close();
-        if (ID2D1SolidColorBrush* b = AcquireBrush(col)) target_->DrawGeometry(path.Get(), b, width, studioStroke_.Get());
+        bb::studio::Arc(SPen(), c, r, a0, a1, col, width);
     }
 
     // Progress ring from 12 o'clock: track plus a coloured arc.
     void SRing(D2D1_POINT_2F c, float r, float width, float fraction, D2D1_COLOR_F col) {
-        constexpr float kTop = -1.5707963f;
-        SArc(c, r, 0.0f, 6.2832f, SFade(D2D1::ColorF(1, 1, 1, 0.16f)), width);
-        fraction = Clamp(fraction, 0.0f, 1.0f);
-        if (fraction > 0.004f) SArc(c, r, kTop, kTop + 6.2831853f * std::min(fraction, 0.9999f), SFade(col), width);
+        bb::studio::Ring(SPen(), c, r, width, fraction, col, studioAlpha_);
     }
 
-    // ── Icons (24-unit grid, line style) ──
-    void SIcon(StudioPage page, D2D1_POINT_2F c, float size, D2D1_COLOR_F col) {
-        EnsureRoundStroke();
-        const float s = size / 24.0f;
-        const float w = 1.8f * s * (24.0f / 16.0f);
-        auto P = [](float x, float y) { return D2D1::Point2F(x, y); };
-        auto at = [&](float x, float y) { return D2D1::Point2F(c.x + (x - 12) * s, c.y + (y - 12) * s); };
-        ID2D1SolidColorBrush* b = AcquireBrush(col);
-        if (!b) return;
-        switch (page) {
-            case StudioPage::Home:
-                SPoly({P(4, 11), P(12, 4), P(20, 11)}, c, s, col, w);
-                SPoly({P(6, 9.5f), P(6, 20), P(18, 20), P(18, 9.5f)}, c, s, col, w);
-                break;
-            case StudioPage::Music:
-                target_->DrawEllipse(D2D1::Ellipse(at(8, 17), 3 * s, 3 * s), b, w);
-                SPoly({P(11, 17), P(11, 4), P(18, 6)}, c, s, col, w);
-                break;
-            case StudioPage::Calendar:
-                target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(at(4, 6).x, at(4, 6).y, at(20, 20).x, at(20, 20).y), 3 * s, 3 * s), b, w);
-                SPoly({P(4, 10.5f), P(20, 10.5f)}, c, s, col, w);
-                SPoly({P(8, 3.5f), P(8, 7)}, c, s, col, w);
-                SPoly({P(16, 3.5f), P(16, 7)}, c, s, col, w);
-                break;
-            case StudioPage::Weather:
-                target_->DrawEllipse(D2D1::Ellipse(at(12, 12), 4 * s, 4 * s), b, w);
-                for (int i = 0; i < 8; ++i) {
-                    const float a = i * 0.785398f;
-                    SLine(at(12 + 6.8f * std::cos(a), 12 + 6.8f * std::sin(a)),
-                          at(12 + 8.8f * std::cos(a), 12 + 8.8f * std::sin(a)), col, w);
-                }
-                break;
-            case StudioPage::Hardware:
-                target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(at(6, 6).x, at(6, 6).y, at(18, 18).x, at(18, 18).y), 2 * s, 2 * s), b, w);
-                target_->DrawRectangle(D2D1::RectF(at(9.5f, 9.5f).x, at(9.5f, 9.5f).y, at(14.5f, 14.5f).x, at(14.5f, 14.5f).y), b, w * 0.8f);
-                for (float k : {9.5f, 14.5f}) {
-                    SLine(at(k, 3), at(k, 6), col, w); SLine(at(k, 18), at(k, 21), col, w);
-                    SLine(at(3, k), at(6, k), col, w); SLine(at(18, k), at(21, k), col, w);
-                }
-                break;
-            case StudioPage::Connectivity:
-                for (int i = 1; i <= 3; ++i)
-                    SArc(at(12, 19), (i * 4.6f) * s, -2.356f, -0.785f, col, w);
-                target_->FillEllipse(D2D1::Ellipse(at(12, 19), 1.4f * s, 1.4f * s), b);
-                break;
-            case StudioPage::Tray:
-                SPoly({P(3.5f, 13), P(3.5f, 19), P(20.5f, 19), P(20.5f, 13)}, c, s, col, w);
-                SPoly({P(3.5f, 13), P(8.5f, 13), P(10, 15.5f), P(14, 15.5f), P(15.5f, 13), P(20.5f, 13)}, c, s, col, w);
-                SPoly({P(12, 4), P(12, 11)}, c, s, col, w);
-                SPoly({P(9, 8), P(12, 11), P(15, 8)}, c, s, col, w);
-                break;
-            case StudioPage::Todo:
-                SPoly({P(3.5f, 7), P(5.5f, 9), P(9, 5)}, c, s, col, w);
-                SPoly({P(3.5f, 16), P(5.5f, 18), P(9, 14)}, c, s, col, w);
-                SPoly({P(12, 7), P(20.5f, 7)}, c, s, col, w);
-                SPoly({P(12, 16), P(20.5f, 16)}, c, s, col, w);
-                break;
-            case StudioPage::Lyrics:
-                target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(at(9, 3).x, at(9, 3).y, at(15, 14).x, at(15, 14).y), 3 * s, 3 * s), b, w);
-                SArc(at(12, 10), 6.5f * s, 0.15f, 2.99f, col, w);
-                SPoly({P(12, 16.5f), P(12, 21)}, c, s, col, w);
-                break;
-            case StudioPage::Agent:
-                for (int i = 0; i < 4; ++i) {
-                    const float a = i * 0.785398f;
-                    SLine(at(12 - 7.5f * std::cos(a), 12 - 7.5f * std::sin(a)),
-                          at(12 + 7.5f * std::cos(a), 12 + 7.5f * std::sin(a)), col, w * 1.15f);
-                }
-                break;
-            case StudioPage::Clipboard:
-                target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(at(5, 5).x, at(5, 5).y, at(19, 21).x, at(19, 21).y), 2.5f * s, 2.5f * s), b, w);
-                target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(at(9, 3).x, at(9, 3).y, at(15, 7).x, at(15, 7).y), 1.5f * s, 1.5f * s), b, w);
-                break;
-            case StudioPage::Focus:
-                target_->DrawEllipse(D2D1::Ellipse(at(12, 13.5f), 7.5f * s, 7.5f * s), b, w);
-                SPoly({P(12, 13.5f), P(12, 9.5f)}, c, s, col, w);
-                SPoly({P(9.5f, 3.5f), P(14.5f, 3.5f)}, c, s, col, w);
-                break;
-            case StudioPage::Mirror:
-                target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(at(3, 7).x, at(3, 7).y, at(17, 18).x, at(17, 18).y), 2.5f * s, 2.5f * s), b, w);
-                SPoly({P(17, 11), P(21, 8.5f), P(21, 16.5f), P(17, 14)}, c, s, col, w, true);
-                break;
-            case StudioPage::Apps:
-                for (float gx : {6.5f, 13.5f})
-                    for (float gy : {6.5f, 13.5f})
-                        target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(at(gx - 3, gy - 3).x, at(gx - 3, gy - 3).y,
-                                                                                    at(gx + 3, gy + 3).x, at(gx + 3, gy + 3).y),
-                                                                        1.6f * s, 1.6f * s), b, w);
-                break;
-            case StudioPage::Note:
-                SPoly({P(6, 3.5f), P(14, 3.5f), P(19, 8.5f), P(19, 20.5f), P(6, 20.5f)}, c, s, col, w, true);
-                SPoly({P(9, 12), P(16, 12)}, c, s, col, w);
-                SPoly({P(9, 16), P(14, 16)}, c, s, col, w);
-                break;
-        }
-    }
-
-    void SGear(D2D1_POINT_2F c, float size, D2D1_COLOR_F col) {
-        EnsureRoundStroke();
-        const float s = size / 24.0f;
-        if (ID2D1SolidColorBrush* b = AcquireBrush(col)) {
-            target_->DrawEllipse(D2D1::Ellipse(c, 5.5f * s, 5.5f * s), b, 1.8f * s * 1.5f);
-            target_->DrawEllipse(D2D1::Ellipse(c, 2.0f * s, 2.0f * s), b, 1.5f * s * 1.5f);
-        }
-        for (int i = 0; i < 8; ++i) {
-            const float a = i * 0.785398f + 0.39f;
-            SLine(D2D1::Point2F(c.x + 6.5f * s * std::cos(a), c.y + 6.5f * s * std::sin(a)),
-                  D2D1::Point2F(c.x + 9.0f * s * std::cos(a), c.y + 9.0f * s * std::sin(a)), col, 2.6f * s * 1.5f);
-        }
-    }
-
-    // A pipette: a slanted barrel with a bulb at the top and a drop at the tip.
-    void SEyedropper(D2D1_POINT_2F c, float size, D2D1_COLOR_F col) {
-        EnsureRoundStroke();
-        const float s = size / 24.0f;
-        const float w = 1.8f * s * 1.5f;
-        auto P = [](float x, float y) { return D2D1::Point2F(x, y); };
-        SPoly({P(5, 19), P(14, 10)}, c, s, col, w * 1.6f);              // barrel
-        SPoly({P(12, 8), P(16, 12)}, c, s, col, w);                     // collar
-        SPoly({P(14, 10), P(17.5f, 6.5f)}, c, s, col, w * 2.2f);        // bulb
-        SPoly({P(4, 20), P(5, 19)}, c, s, col, w);                      // tip
-    }
-
+    void SIcon(StudioPage page, D2D1_POINT_2F c, float size, D2D1_COLOR_F col) { bb::studio::Icon(SPen(), page, c, size, col); }
+    void SGear(D2D1_POINT_2F c, float size, D2D1_COLOR_F col) { bb::studio::Gear(SPen(), c, size, col); }
+    void SEyedropper(D2D1_POINT_2F c, float size, D2D1_COLOR_F col) { bb::studio::Eyedropper(SPen(), c, size, col); }
     void SSpeaker(D2D1_POINT_2F c, float size, int level, bool muted, D2D1_COLOR_F col) {
-        EnsureRoundStroke();
-        const float s = size / 24.0f;
-        auto P = [](float x, float y) { return D2D1::Point2F(x, y); };
-        SPoly({P(4, 9), P(8, 9), P(13, 4.5f), P(13, 19.5f), P(8, 15), P(4, 15)}, c, s, col, 0, true, true);
-        if (muted) {
-            SPoly({P(16, 9), P(21, 15)}, c, s, col, 1.8f * s * 1.5f);
-            SPoly({P(21, 9), P(16, 15)}, c, s, col, 1.8f * s * 1.5f);
-            return;
-        }
-        const D2D1_POINT_2F mid = D2D1::Point2F(c.x + (13 - 12) * s, c.y);
-        if (level > 0) SArc(mid, 3.5f * s, -0.9f, 0.9f, col, 1.8f * s * 1.5f);
-        if (level > 1) SArc(mid, 7.0f * s, -0.9f, 0.9f, col, 1.8f * s * 1.5f);
+        bb::studio::Speaker(SPen(), c, size, level, muted, col);
     }
 
     // ── Page names and colours ──
     static void StudioName(StudioPage page, const bb::AgentView& agent, std::wstring* first, std::wstring* second) {
-        switch (page) {
-            case StudioPage::Home: *first = L"Bun"; *second = L"bun"; break;
-            case StudioPage::Music: *first = L"Now "; *second = L"Playing"; break;
-            case StudioPage::Calendar: *first = L"Your "; *second = L"Calendar"; break;
-            case StudioPage::Weather: *first = L"Weather "; *second = L"Now"; break;
-            case StudioPage::Hardware: *first = L"System "; *second = L"Monitor"; break;
-            case StudioPage::Connectivity: *first = L"Quick "; *second = L"Toggles"; break;
-            case StudioPage::Tray: *first = L"File "; *second = L"Tray"; break;
-            case StudioPage::Todo: *first = L"To-"; *second = L"do"; break;
-            case StudioPage::Lyrics: *first = L"Live "; *second = L"Lyrics"; break;
-            case StudioPage::Clipboard: *first = L"Clip"; *second = L"board"; break;
-            case StudioPage::Note: *first = L"Quick "; *second = L"Note"; break;
-            case StudioPage::Focus: *first = L"Focus "; *second = L"Timer"; break;
-            case StudioPage::Apps: *first = L"All "; *second = L"Apps"; break;
-            case StudioPage::Mirror: *first = L"Mir"; *second = L"ror"; break;
-            case StudioPage::Agent: {
-                std::wstring name = agent.agent.empty() ? L"Coding Agents" : agent.agent;
-                const size_t space = name.find(L' ');
-                if (space == std::wstring::npos) { *first = name; second->clear(); }
-                else { *first = name.substr(0, space + 1); *second = name.substr(space + 1); }
-                break;
-            }
-        }
+        bb::studio::PageName(page, agent.agent, first, second);
     }
 
-    static const wchar_t* StudioTabLabel(StudioPage page) {
-        switch (page) {
-            case StudioPage::Home: return L"Home";
-            case StudioPage::Music: return L"Music";
-            case StudioPage::Calendar: return L"Calendar";
-            case StudioPage::Weather: return L"Weather";
-            case StudioPage::Hardware: return L"System";
-            case StudioPage::Connectivity: return L"Toggles";
-            case StudioPage::Tray: return L"Tray";
-            case StudioPage::Todo: return L"To-do";
-            case StudioPage::Lyrics: return L"Lyrics";
-            case StudioPage::Agent: return L"Agent";
-            case StudioPage::Clipboard: return L"Clipboard";
-            case StudioPage::Note: return L"Note";
-            case StudioPage::Focus: return L"Focus";
-            case StudioPage::Apps: return L"Apps";
-            case StudioPage::Mirror: return L"Mirror";
-        }
-        return L"";
-    }
+    static const wchar_t* StudioTabLabel(StudioPage page) { return bb::studio::TabLabel(page); }
 
     // Each coding agent keeps its own brand colour; everything else on the island
     // follows the dynamic accent (SAccent).
-    static D2D1_COLOR_F AgentBrand(const std::wstring& agent) {
-        if (agent.find(L"Codex") != std::wstring::npos) return SCol(0x10a37f);        // OpenAI green
-        if (agent.find(L"Antigravity") != std::wstring::npos || agent.find(L"Gemini") != std::wstring::npos)
-            return SCol(0x3186ff);                                                    // Antigravity blue
-        if (agent.find(L"Cursor") != std::wstring::npos) return SCol(0xd6d6d6);       // Cursor's monochrome
-        if (agent.find(L"Copilot") != std::wstring::npos || agent.find(L"VS Code") != std::wstring::npos)
-            return SCol(0x0098ff);                                                    // VS Code blue
-        return SCol(0xd97757);  // Claude
-    }
+    static D2D1_COLOR_F AgentBrand(const std::wstring& agent) { return SCol(bb::studio::AgentBrand(agent)); }
 
     // The island's live accent: album art in Auto mode, else the system or custom
     // accent (Themes.AccentColorMode), already eased between changes.
@@ -414,17 +204,7 @@
         return c;
     }
 
-    static D2D1_COLOR_F AgentStatusColor(bb::AgentPhase p) {
-        switch (p) {
-            case bb::AgentPhase::Thinking:
-            case bb::AgentPhase::Working: return SCol(0xff9a1f);
-            case bb::AgentPhase::Approval:
-            case bb::AgentPhase::Question: return SCol(0xff9f0a);
-            case bb::AgentPhase::Finished: return SCol(0x30d158);
-            case bb::AgentPhase::Error: return SCol(0xff453a);
-            default: return SCol(0xb8c0b5);
-        }
-    }
+    static D2D1_COLOR_F AgentStatusColor(bb::AgentPhase p) { return SCol(bb::studio::AgentStatus(p)); }
 
     D2D1_COLOR_F StudioPageColor(StudioPage page, const SharedState& state) const {
         if (page == StudioPage::Agent) return AgentBrand(state.agent.agent);
@@ -1508,32 +1288,7 @@
     // Drawn instead of the plain approval card (DrawAgent) when the agent sent a
     // plan (ExitPlanMode) or questions the quick buttons can't answer. Buttons go
     // into g_agentButtons like the plain card's, with an action for the new ones.
-    static std::wstring CleanPlanText(const std::wstring& plan) {
-        std::wstring out;
-        size_t start = 0;
-        while (start <= plan.size()) {
-            size_t end = plan.find(L'\n', start);
-            if (end == std::wstring::npos) end = plan.size();
-            std::wstring line = plan.substr(start, end - start);
-            if (!line.empty() && line.back() == L'\r') line.pop_back();
-            size_t i = 0;
-            while (i < line.size() && line[i] == L'#') ++i;
-            if (i > 0) { line = line.substr(i); while (!line.empty() && line.front() == L' ') line.erase(line.begin()); }
-            size_t lead = 0;
-            while (lead < line.size() && line[lead] == L' ') ++lead;
-            if (lead + 1 < line.size() && (line[lead] == L'-' || line[lead] == L'*') && line[lead + 1] == L' ')
-                line = line.substr(0, lead) + L"\x2022 " + line.substr(lead + 2);
-            for (const wchar_t* tag : {L"**", L"`"}) {
-                for (size_t p = line.find(tag); p != std::wstring::npos; p = line.find(tag, p)) line.erase(p, wcslen(tag));
-            }
-            out += line;
-            out += L'\n';
-            if (end == plan.size()) break;
-            start = end + 1;
-        }
-        while (!out.empty() && (out.back() == L'\n' || out.back() == L' ')) out.pop_back();
-        return out;
-    }
+    static std::wstring CleanPlanText(const std::wstring& plan) { return bb::studio::CleanPlanText(plan); }
 
     bool DrawAgentRichCard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
         const bb::AgentView& a = state.agent;

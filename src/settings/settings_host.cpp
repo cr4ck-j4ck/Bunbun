@@ -28,7 +28,7 @@
 #include "../agents/hook_installer.h"
 #include "../common/json.h"
 #include "../common/pipe.h"
-#include "../common/todos.h"
+#include "../common/todo_commands.h"
 #include "../common/update.h"
 
 #include <memory>
@@ -580,65 +580,8 @@ std::wstring TodosPath() {
     return dir + L"\\todos.tsv";
 }
 
-Value TodoToJson(const bb::todos::Item& t) {
-    Value o = Value::Object();
-    o["id"] = Value::Number(t.id);
-    o["text"] = Str(t.text);
-    o["due"] = Value::Number(t.due);
-    o["done"] = Value::Bool(t.done);
-    o["repeat"] = Str(t.repeat);
-    return o;
-}
-
 Value TodoCommand(const std::string& cmd, const Value& args, std::string* err) {
-    namespace td = bb::todos;
-    std::vector<td::Item> items = td::Load(TodosPath());
-    if (cmd == "listTodos") {
-        Value list = Value::Array();
-        for (const td::Item& t : items) list.push(TodoToJson(t));
-        return list;
-    }
-    if (cmd == "saveTodo") {  // id 0 adds a new one
-        const int id = static_cast<int>(args.getNumber("id"));
-        const std::wstring text = Wide(args.getString("text"));
-        if (text.empty()) { *err = "text is empty"; return {}; }
-        td::Item* item = nullptr;
-        for (td::Item& t : items) if (t.id == id) item = &t;
-        if (!item) {
-            td::Item fresh;
-            fresh.id = td::NextId(items);
-            items.push_back(fresh);
-            item = &items.back();
-        }
-        const double due = args.getNumber("due");
-        const std::wstring repeat = due > 0 ? Wide(args.getString("repeat")) : std::wstring();
-        if (due != item->due || repeat != item->repeat) item->notified = false;  // rescheduled: ring again
-        item->text = text;
-        item->due = due;
-        item->repeat = repeat;
-        item->done = args.getBool("done");
-        if (item->done && !item->repeat.empty()) {
-            // A repeating reminder never finishes: ticking it skips its next occurrence.
-            item->done = false;
-            item->due = td::NextOccurrence(item->repeat, item->due, std::max(td::Now(), item->due));
-            item->notified = false;
-        }
-        if (!td::Save(TodosPath(), items)) { *err = "couldn't write todos.tsv"; return {}; }
-        return TodoToJson(*item);
-    }
-    if (cmd == "deleteTodo") {
-        const int id = static_cast<int>(args.getNumber("id"));
-        items.erase(std::remove_if(items.begin(), items.end(), [&](const td::Item& t) { return t.id == id; }), items.end());
-        if (!td::Save(TodosPath(), items)) { *err = "couldn't write todos.tsv"; return {}; }
-        return Value::Bool(true);
-    }
-    if (cmd == "clearDoneTodos") {
-        items.erase(std::remove_if(items.begin(), items.end(), [](const td::Item& t) { return t.done; }), items.end());
-        if (!td::Save(TodosPath(), items)) { *err = "couldn't write todos.tsv"; return {}; }
-        return Value::Bool(true);
-    }
-    *err = "unknown to-do command";
-    return {};
+    return bb::todos::Command(cmd, args, TodosPath(), err);  // common/todo_commands.h, shared with Linux
 }
 
 // The optional local AI: is the helper built, and which models are in the

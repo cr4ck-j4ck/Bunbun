@@ -24,6 +24,11 @@ void Stop();
 // The player worth showing: the one playing most recently, else a paused one.
 Track Current();
 
+// Where that player is in the track, in seconds (for synced lyrics). Players
+// don't announce their position, so it's asked for every couple of seconds and
+// on a seek, and runs on with the clock in between.
+double Position();
+
 void PlayPause();
 void Next();
 void Previous();

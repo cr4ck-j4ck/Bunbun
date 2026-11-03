@@ -11,9 +11,25 @@ and versions follow [Semantic Versioning](https://semver.org/).
   Wayland (layer-shell; GNOME through XWayland) and X11. This first Linux version has the island
   with the clock, music from any MPRIS player (cover art, play / pause, next, previous), the
   mascot with every character and mood, coding agents with Allow / Deny and question answers, the
-  right-click menu, and the settings app (Codex connects from there too). The Studio layout, plan
-  and several-question cards, weather, lyrics, Ask Bun, the tray icon and the system flyouts aren't
-  on Linux yet. See [Bunbun on Linux](docs/linux.md).
+  right-click menu, and the settings app (Codex connects from there too). Ask Bun, the tray icon and
+  the system pop-ups aren't on Linux yet.
+- **Studio on Linux.** The island opens into the Studio frame on Linux too, with the same header,
+  tab bar and page order, and the same pages: Home with its cards and your links, Music, Calendar,
+  Weather, System, Quick toggles (Wi-Fi, Bluetooth, Do not disturb), To-do with reminders,
+  Agent, Clipboard, Note, Focus and All apps. The plan and question cards, and Reply… / Change it… /
+  Other… typed on the island, work as on Windows. File shelf and Mirror come later.
+- **Lyrics on Linux**: the Lyrics page and lyrics on the small island, from LRCLIB and NetEase like
+  on Windows, cached per song. The Linux build now needs libsoup 3 (`libsoup-3.0-dev` to build; the
+  `.deb` depends on it and the AppImage carries it).
+  See [Studio on Linux](docs/linux.md#studio-on-linux).
+- **Settings on Linux** say what's there: Island pages shows real pictures of the Linux island's pages,
+  and features, pages and options Linux doesn't have yet are marked **Not on Linux yet**. The To-dos
+  screen works on Linux too. Music &
+  media, Expand on hover and Pill while an agent works now work on Linux too.
+
+### Fixed
+- A link on Home given as a bare file path (`C:\Notes\todo.txt`) was named after its drive (`C:`)
+  instead of its file. See [Bunbun on Linux](docs/linux.md).
 - Building on Linux: `cmake -S . -B build-linux`, and `./scripts/package-linux.sh` for the packages.
   `tests/test_dialects.py` and `tests/simulate_agent.py` run against the Linux hook too.
 

@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { Bot, Brush, Gauge, Home, LayoutGrid, LayoutPanelTop, ListChecks, Monitor, Search, Settings2, Smile } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { inHost } from "./bridge";
+import { useIsLinux } from "./platform";
 import { StoreContext, useSettingsStore } from "./store";
 import { useAppTheme } from "./theme";
 import { MascotImage, useMascotStyle } from "./ui/mascot";
@@ -32,12 +33,13 @@ const PAGES: { id: string; label: string; icon: ReactNode; group?: string }[] = 
 
 function Brand() {
   const style = useMascotStyle();
+  const linux = useIsLinux();
   return (
     <div className="brand">
       <MascotImage style={style} animate size={44} />
       <div>
         <h1>Bunbun</h1>
-        <p>Dynamic Island for Windows</p>
+        <p>Dynamic Island for {linux ? "Linux" : "Windows"}</p>
       </div>
     </div>
   );

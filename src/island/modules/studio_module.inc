@@ -12,21 +12,22 @@
 // ── Tabs ─────────────────────────────────────────────────────────────────────
 
 // The open Studio island: a 184-unit page between a 34-unit header and a 38-unit
-// tab bar, 520 wide (content units; times sizeScale on screen).
-constexpr float kStudioIslandW = 520.0f;
-constexpr float kStudioIslandH = 184.0f + 34.0f + 38.0f;
+// tab bar, 520 wide (content units; times sizeScale on screen). The page model is
+// shared with the Linux island (src/island/studio_pages.h).
+constexpr float kStudioIslandW = bb::studio::kIslandW;
+constexpr float kStudioIslandH = bb::studio::kIslandH;
 // Ask Bun's chat panel in the Studio layout.
 constexpr float kStudioChatW = 520.0f;
 constexpr float kStudioChatH = 300.0f;
 
 // Extra pages share their ids in both views; the built-in ids differ per view.
-constexpr int kTabAgent = 20;
-constexpr int kTabClipboard = 21;
-constexpr int kTabNote = 22;
-constexpr int kTabFocus = 23;
-constexpr int kTabApps = 24;
-constexpr int kTabMirror = 25;
-constexpr int kTabHome = 26;  // Home in the media view (Studio), so it stays while music plays
+using bb::studio::kTabAgent;
+using bb::studio::kTabClipboard;
+using bb::studio::kTabNote;
+using bb::studio::kTabFocus;
+using bb::studio::kTabApps;
+using bb::studio::kTabMirror;
+using bb::studio::kTabHome;
 
 // ── Which agents the island shows ────────────────────────────────────────────
 // Agents in the order of Settings::showAgent (Bunbun.Show*).
@@ -109,101 +110,32 @@ int StudioExtraTabCount(const Settings& s) {
 // the player), 1 = the idle view (first tab is the clock, or Home in Studio).
 // DrawMedia and DrawIdleDashboard both draw from this list, so the frame's tab
 // bar, the scroll ring and the click handlers can't disagree about the order.
-// The first page (player or Home) always leads; Bunbun.PageOrder orders the rest
-// by key, and any page it doesn't name keeps its default place after those.
-struct OrderedPage { const wchar_t* key; int mediaId; int idleId; };
-constexpr OrderedPage kOrderedPages[] = {
-    {L"calendar", 1, 0},  {L"weather", 2, 1},           {L"system", 3, 2},           {L"toggles", 6, 5},
-    {L"tray", 4, 4},      {L"todo", 7, 7},              {L"lyrics", 5, -1},          {L"agent", kTabAgent, kTabAgent},
-    {L"clipboard", kTabClipboard, kTabClipboard},       {L"note", kTabNote, kTabNote},
-    {L"focus", kTabFocus, kTabFocus},                   {L"mirror", kTabMirror, kTabMirror},
-    {L"apps", kTabApps, kTabApps},
-};
-
-bool OrderedPageOn(const wchar_t* key, const Settings& s) {
-    const std::wstring_view k = key;
-    if (k == L"calendar") return true;
-    if (k == L"weather") return s.weather;
-    if (k == L"system") return s.hardwareMonitorModule;
-    if (k == L"toggles") return s.connectivityModule;
-    if (k == L"tray") return s.fileTrayModule;
-    if (k == L"todo") return s.todoModule;
-    if (k == L"lyrics") return s.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed);
-    if (k == L"agent") return s.agentTab && AgentsShown(s);
-    if (k == L"clipboard") return s.clipboardHistory;
-    if (k == L"note") return s.quickNote;
-    if (k == L"focus") return s.focusPage;
-    if (k == L"mirror") return s.mirrorPage;
-    return s.appsPage;
+// The order itself (Bunbun.PageOrder, Home first in Studio) is bb::studio::TabIds.
+bb::studio::PageSwitches PageSwitchesFor(const Settings& s) {
+    bb::studio::PageSwitches p;
+    p.studio = s.studioLayout;
+    p.lyricsPinnedFirst = s.lyricsPinnedFirst;
+    p.weather = s.weather;
+    p.system = s.hardwareMonitorModule;
+    p.toggles = s.connectivityModule;
+    p.tray = s.fileTrayModule;
+    p.todo = s.todoModule;
+    p.lyrics = s.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed);
+    p.agent = s.agentTab && AgentsShown(s);
+    p.clipboard = s.clipboardHistory;
+    p.note = s.quickNote;
+    p.focus = s.focusPage;
+    p.mirror = s.mirrorPage;
+    p.apps = s.appsPage;
+    p.order = s.pageOrder;
+    return p;
 }
 
 std::vector<int> DashboardTabIds(int context, const Settings& s) {
-    // Rank each page: its place in PageOrder, or after all named pages in default order.
-    constexpr size_t kCount = std::size(kOrderedPages);
-    size_t rank[kCount];
-    for (size_t i = 0; i < kCount; ++i) rank[i] = 1000 + i;
-    size_t pos = 0, at = 0;
-    const std::wstring& order = s.pageOrder;
-    while (at <= order.size()) {
-        size_t comma = order.find(L',', at);
-        if (comma == std::wstring::npos) comma = order.size();
-        std::wstring key = order.substr(at, comma - at);
-        key.erase(0, key.find_first_not_of(L" \t"));
-        key.erase(key.find_last_not_of(L" \t") + 1);
-        for (size_t i = 0; i < kCount; ++i)
-            if (rank[i] >= 1000 && !key.empty() && EqualsNoCase(key, kOrderedPages[i].key)) rank[i] = pos++;
-        at = comma + 1;
-    }
-    size_t idx[kCount];
-    for (size_t i = 0; i < kCount; ++i) idx[i] = i;
-    std::stable_sort(idx, idx + kCount, [&](size_t a, size_t b) { return rank[a] < rank[b]; });
-
-    std::vector<int> ids;
-    // Studio keeps Home first in both views, so the three cards don't vanish when music starts.
-    if (context == 0 && s.studioLayout) ids.push_back(kTabHome);
-    const bool lyricsFirst = context == 0 && s.lyricsPinnedFirst && OrderedPageOn(L"lyrics", s);
-    if (lyricsFirst) ids.push_back(5);
-    ids.push_back(context == 0 ? 0 : 3);
-    for (size_t n = 0; n < kCount; ++n) {
-        const OrderedPage& p = kOrderedPages[idx[n]];
-        const int id = context == 0 ? p.mediaId : p.idleId;
-        if (id < 0 || !OrderedPageOn(p.key, s)) continue;
-        if (lyricsFirst && id == 5 && context == 0) continue;
-        ids.push_back(id);
-    }
-    return ids;
+    return bb::studio::TabIds(context, PageSwitchesFor(s));
 }
 
-StudioPage StudioPageFor(int context, int id) {
-    if (id == kTabHome) return StudioPage::Home;
-    if (id == kTabAgent) return StudioPage::Agent;
-    if (id == kTabClipboard) return StudioPage::Clipboard;
-    if (id == kTabNote) return StudioPage::Note;
-    if (id == kTabFocus) return StudioPage::Focus;
-    if (id == kTabApps) return StudioPage::Apps;
-    if (id == kTabMirror) return StudioPage::Mirror;
-    if (context == 0) {
-        switch (id) {
-            case 0: return StudioPage::Music;
-            case 1: return StudioPage::Calendar;
-            case 2: return StudioPage::Weather;
-            case 3: return StudioPage::Hardware;
-            case 4: return StudioPage::Tray;
-            case 5: return StudioPage::Lyrics;
-            case 6: return StudioPage::Connectivity;
-            default: return StudioPage::Todo;
-        }
-    }
-    switch (id) {
-        case 3: return StudioPage::Home;
-        case 0: return StudioPage::Calendar;
-        case 1: return StudioPage::Weather;
-        case 2: return StudioPage::Hardware;
-        case 4: return StudioPage::Tray;
-        case 5: return StudioPage::Connectivity;
-        default: return StudioPage::Todo;
-    }
-}
+StudioPage StudioPageFor(int context, int id) { return bb::studio::PageFor(context, id); }
 
 // Which view the dashboard was last drawn in (render thread writes, the window
 // proc reads; both run on the render thread, the atomic just keeps it honest).
@@ -656,39 +588,16 @@ struct ComposeTarget {
 };
 ComposeTarget g_compose;
 
-struct QuestionState {
-    uint64_t requestId = 0;
-    int index = 0;                              // the question on screen
-    std::vector<std::vector<int>> picks;        // chosen option indices per question
-    std::vector<std::wstring> other;            // typed answers per question
-};
+using QuestionState = bb::studio::Answers;  // studio_pages.h
 QuestionState g_questions;
 
 float g_planScroll = 0.0f;      // plan card: scrolled distance (wheel), render thread
 float g_planScrollMax = 0.0f;   // set while drawing; 0 = nothing to scroll
 uint64_t g_planScrollFor = 0;   // the request the scroll belongs to
 
-void SyncQuestions(const bb::AgentView& a) {
-    if (g_questions.requestId == a.requestId && g_questions.picks.size() == a.questions.size()) return;
-    g_questions = QuestionState{};
-    g_questions.requestId = a.requestId;
-    g_questions.picks.resize(a.questions.size());
-    g_questions.other.resize(a.questions.size());
-}
-
-// The step-through card is for what the quick buttons can't do: several
-// questions, multi-select, or a question with no or more than four options.
-bool NeedsQuestionCard(const bb::AgentView& a) {
-    if (a.phase != bb::AgentPhase::Question || a.questions.empty()) return false;
-    if (a.questions.size() > 1) return true;
-    const auto& q = a.questions[0];
-    return q.multi || q.options.size() < 2 || q.options.size() > 4 || a.options.empty();
-}
-
-bool QuestionAnswered(int i) {
-    if (i < 0 || i >= static_cast<int>(g_questions.picks.size())) return false;
-    return !g_questions.picks[i].empty() || !g_questions.other[i].empty();
-}
+void SyncQuestions(const bb::AgentView& a) { g_questions.Sync(a); }
+bool NeedsQuestionCard(const bb::AgentView& a) { return bb::studio::NeedsQuestionCard(a); }
+bool QuestionAnswered(int i) { return g_questions.Answered(i); }
 
 void ClearCompose() { g_compose = ComposeTarget{}; }
 
@@ -709,9 +618,7 @@ bool SubmitCompose(const std::wstring& raw) {
     if (text.empty()) return true;
     const ComposeTarget target = g_compose;
     if (target.kind == 1) {
-        bb::json::Value reply = bb::json::Value::Object();
-        reply["deny"] = bb::json::Value::String(QuickNote::Narrow(text));
-        bb::agents::DecideRaw(target.id, bb::json::Serialize(reply));
+        bb::agents::DecideRaw(target.id, bb::studio::PlanChangeReply(text));
     } else if (target.kind == 2) {
         bb::agents::SendReply(target.id, text);
     } else if (target.kind == 3 && target.question >= 0 &&
@@ -724,23 +631,7 @@ bool SubmitCompose(const std::wstring& raw) {
     return true;
 }
 
-// {"answers":{"<question>":"<answer>"}} for every question, or "" while one is unanswered.
-std::string QuestionsReply(const bb::AgentView& a) {
-    bb::json::Value reply = bb::json::Value::Object();
-    for (size_t i = 0; i < a.questions.size(); ++i) {
-        std::wstring answer = i < g_questions.other.size() ? g_questions.other[i] : std::wstring();
-        if (answer.empty() && i < g_questions.picks.size()) {
-            for (int o : g_questions.picks[i]) {
-                if (o < 0 || o >= static_cast<int>(a.questions[i].options.size())) continue;
-                if (!answer.empty()) answer += L", ";
-                answer += a.questions[i].options[o];
-            }
-        }
-        if (answer.empty()) return {};
-        reply["answers"][QuickNote::Narrow(a.questions[i].text)] = bb::json::Value::String(QuickNote::Narrow(answer));
-    }
-    return bb::json::Serialize(reply);
-}
+std::string QuestionsReply(const bb::AgentView& a) { return bb::studio::QuestionsReply(a, g_questions); }
 
 // Agent card buttons that aren't plain Allow / Deny (AgentButton::action).
 enum AgentAction { ActDecide = 0, ActPlanChange = 1, ActReply = 2, ActToggle = 3, ActNext = 4, ActOther = 5, ActBack = 6 };
@@ -761,16 +652,7 @@ void HandleAgentAction(int action, int arg) {
             break;
         case ActToggle: {
             SyncQuestions(a);
-            const int q = g_questions.index;
-            if (q < 0 || q >= static_cast<int>(a.questions.size())) break;
-            auto& picks = g_questions.picks[q];
-            g_questions.other[q].clear();
-            if (a.questions[q].multi) {
-                auto it = std::find(picks.begin(), picks.end(), arg);
-                if (it == picks.end()) picks.push_back(arg); else picks.erase(it);
-            } else {
-                picks.assign(1, arg);
-            }
+            g_questions.Toggle(a, arg);
             break;
         }
         case ActNext: {
@@ -953,21 +835,15 @@ void NoteTrayDrop(const std::vector<std::wstring>& paths) {
 // ── Home tiles ───────────────────────────────────────────────────────────────
 // What each of Home's three slots shows: Bunbun.HomeTile1-3 (auto = agent, or the
 // weather when no agent is shown; music; focus). Edit on Home cycles a slot.
-enum class HomeTile { Agent, Music, Focus, Weather, Calendar, Battery, System };
+using bb::studio::HomeTile;  // studio_pages.h
 bool g_homeEdit = false;  // render thread
 
-constexpr const wchar_t* kHomeTileIds[] = {L"agent", L"music", L"focus", L"weather", L"calendar", L"battery", L"system"};
+using bb::studio::kHomeTileIds;
 
 bool AgentsShown(const Settings& s);  // above
 
 HomeTile HomeTileKind(const Settings& s, int slot) {
-    const int v = s.homeTile[std::clamp(slot, 0, 2)];
-    if (v >= 0 && v <= static_cast<int>(HomeTile::System)) {
-        const HomeTile k = static_cast<HomeTile>(v);
-        return k == HomeTile::Agent && !AgentsShown(s) ? HomeTile::Weather : k;
-    }
-    if (slot == 0) return AgentsShown(s) ? HomeTile::Agent : HomeTile::Weather;
-    return slot == 1 ? HomeTile::Music : HomeTile::Focus;
+    return bb::studio::HomeTileFor(s.homeTile[std::clamp(slot, 0, 2)], slot, AgentsShown(s));
 }
 
 void CycleHomeTile(int slot) {
@@ -982,34 +858,7 @@ void CycleHomeTile(int slot) {
 // "Name|address; Name|address" -> up to four (name, address). A bare address is
 // named after its host or file name.
 std::vector<std::pair<std::wstring, std::wstring>> ParseHomeLinks(const std::wstring& text) {
-    std::vector<std::pair<std::wstring, std::wstring>> out;
-    auto trim = [](std::wstring t) {
-        while (!t.empty() && iswspace(t.front())) t.erase(t.begin());
-        while (!t.empty() && iswspace(t.back())) t.pop_back();
-        return t;
-    };
-    size_t start = 0;
-    while (start < text.size() && out.size() < 4) {
-        size_t end = text.find(L';', start);
-        if (end == std::wstring::npos) end = text.size();
-        const std::wstring item = trim(text.substr(start, end - start));
-        start = end + 1;
-        if (item.empty()) continue;
-        const size_t bar = item.find(L'|');
-        std::wstring name = bar == std::wstring::npos ? std::wstring() : trim(item.substr(0, bar));
-        std::wstring target = trim(bar == std::wstring::npos ? item : item.substr(bar + 1));
-        if (target.empty()) continue;
-        if (name.empty()) {
-            std::wstring t = target;
-            if (const size_t scheme = t.find(L"://"); scheme != std::wstring::npos) t = t.substr(scheme + 3);
-            if (t.rfind(L"www.", 0) == 0) t = t.substr(4);
-            const size_t cut = t.find_first_of(L"/\\");
-            name = cut == std::wstring::npos ? t : t.substr(0, cut);
-            if (name.size() > 2 && name[1] == L':') name = t.substr(t.find_last_of(L"/\\") + 1);
-        }
-        out.emplace_back(name, target);
-    }
-    return out;
+    return bb::studio::ParseHomeLinks(text);
 }
 
 // ── Focus page ───────────────────────────────────────────────────────────────

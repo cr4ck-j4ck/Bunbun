@@ -8,7 +8,9 @@
 //     an always-on-top dock window placed at the top of the work area.
 // It shows the clock, what's playing (MPRIS), the mascot, and coding agents
 // (the same agent bridge as on Windows, over a Unix socket), with Allow / Deny
-// and question answers. See docs/linux.md for what isn't ported yet.
+// and question answers. With the Studio layout (the default) the island opens
+// into the Studio frame on hover; that lives in studio_linux.cpp. See
+// docs/linux.md for what isn't ported yet.
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/file.h>
@@ -26,6 +28,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
+#include <memory>
 #include <cstring>
 #include <ctime>
 #include <mutex>
@@ -37,12 +41,16 @@
 #include "compat/d2d1.h"
 #include "../../mascot/mascot.h"
 #include "island_api.h"
+#include "island_linux.h"
+#include "../../island/studio_pages.h"
 #include "mascot_png.h"
 #include "mpris.h"
 #include "platform.h"
 #include "settings.h"
+#include "lyrics_linux.h"
+#include "sources.h"
 
-namespace {
+namespace bb::lisland {
 
 using bb::AgentPhase;
 using bb::AgentView;
@@ -50,21 +58,12 @@ namespace mascot = bb::mascot;
 
 // ── Layout (logical pixels; GTK scales for HiDPI) ───────────────────────────
 
-constexpr double kCanvasW = 520, kCanvasH = 230;  // the window; the pill sits inside it
+// The window; the pill sits inside it. Room for the Studio frame (520 x 256) and
+// the plan card (480 x 320), plus the nudge and the shadow.
+constexpr double kCanvasW = 540, kCanvasH = 340;
 constexpr double kTopGap = 6;                       // between the screen edge and the pill
 constexpr double kCollapsedH = 36;
-
-struct Rect {
-    double x = 0, y = 0, w = 0, h = 0;
-    bool Contains(double px, double py) const { return px >= x && px < x + w && py >= y && py < y + h; }
-};
-
-enum class Action { None, PlayPause, Next, Previous, Allow, Deny, Terminal, Answer, Settings };
-struct Hit {
-    Rect r;
-    Action action;
-    int index = -1;
-};
+constexpr double kOpenDelay = 0.15;                 // the pointer rests this long before Studio opens
 
 // ── State (all on the GTK main thread, except the agent mailbox) ────────────
 
@@ -75,12 +74,19 @@ double g_offsetY = 0;       // Appearance.OffsetY
 double g_opacity = 0.96;    // Themes.PillOpacity
 bool g_mascotOn = true;     // Bunbun.Mascot and MascotOnIsland
 bool g_agentsOn = true;     // Bunbun.Agents
+bool g_agentPill = true;    // Bunbun.AgentPill: the pill while an agent works (cards always show)
+bool g_mediaOn = true;      // Modules.Media: what's playing
+bool g_expandOnHover = true;  // Behavior.ExpandOnHover; off: a click opens and closes the island
+bool g_pinned = false;      // opened by a click (ExpandOnHover off)
+std::string g_toastTitle, g_toastText;  // a reminder or the focus timer, until g_toastUntil
+double g_toastUntil = 0;
 bool g_clock24 = true;
 bool g_showSeconds = false;
 
 double g_w = 120, g_h = kCollapsedH;  // the pill's current size (animated)
 double g_lastFrame = 0;
 bool g_hover = false;
+double g_hoverSince = 0;
 double g_mouseX = -1, g_mouseY = -1;
 std::vector<Hit> g_hits;
 int g_hoverHit = -1;
@@ -119,6 +125,10 @@ void LoadSettings() {
     g_opacity = std::clamp(s::GetInt(L"Themes.PillOpacity"), 30, 100) / 100.0;
     g_mascotOn = s::GetBool(L"Bunbun.Mascot") && s::GetBool(L"Bunbun.MascotOnIsland");
     g_agentsOn = s::GetBool(L"Bunbun.Agents");
+    g_agentPill = s::GetBool(L"Bunbun.AgentPill");
+    g_mediaOn = s::GetBool(L"Modules.Media");
+    g_expandOnHover = s::GetBool(L"Behavior.ExpandOnHover");
+    if (g_expandOnHover) g_pinned = false;
     g_showSeconds = s::GetBool(L"Modules.ShowSeconds");
     const std::wstring fmt = s::Get(L"Modules.ClockFormat");
     if (fmt == L"12h") g_clock24 = false;
@@ -135,6 +145,9 @@ void LoadSettings() {
                                                s::GetInt(L"Bunbun.MascotMotion"), s::GetInt(L"Bunbun.MascotHop"),
                                                s::GetInt(L"Bunbun.MascotBlinkEvery") * 10,
                                                s::GetBool(L"Bunbun.MascotEyesFollow"), s::GetBool(L"Bunbun.MascotCelebrate")));
+    StudioLoadSettings();
+    bb::llyrics::LoadSettings();
+    bb::llyrics::OnTrack(g_track);  // lyrics just switched on: look this song up
 }
 
 // ── Drawing helpers ─────────────────────────────────────────────────────────
@@ -149,9 +162,8 @@ void RoundRect(cairo_t* cr, double x, double y, double w, double h, double r) {
     cairo_close_path(cr);
 }
 
-// Text in a box, one line, ellipsized; returns its width.
 double Text(cairo_t* cr, const std::string& text, double x, double y, double maxW, double size, bool bold,
-            double r = 1, double g = 1, double b = 1, double a = 1, bool mono = false, int lines = 1) {
+            double r, double g, double b, double a, bool mono, int lines) {
     PangoLayout* layout = pango_cairo_create_layout(cr);
     PangoFontDescription* font = pango_font_description_from_string(mono ? "Monospace" : "Sans");
     pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
@@ -294,19 +306,28 @@ std::string AgentLine(const AgentView& a) {
 
 // ── What to show ────────────────────────────────────────────────────────────
 
-enum class Kind { Clock, Media, Agent, AgentCard };
+enum class Kind { Clock, Media, Agent, AgentCard, Studio, RichCard, Toast };
 
 Kind CurrentKind() {
+    Kind k = Kind::Clock;
+    const bool toast = Now() < g_toastUntil && !Composing() && !g_hover;
     if (g_agentsOn && g_agent.phase != AgentPhase::None) {
-        if (g_agent.phase == AgentPhase::Approval || g_agent.phase == AgentPhase::Question) return Kind::AgentCard;
-        return Kind::Agent;
+        if (g_agent.phase == AgentPhase::Approval || g_agent.phase == AgentPhase::Question)
+            return RichCardShown() ? Kind::RichCard : Kind::AgentCard;
+        if (g_agentPill) k = Kind::Agent;
     }
-    if (g_track.active) return Kind::Media;
-    return Kind::Clock;
+    if (toast) return Kind::Toast;
+    if (k == Kind::Clock && g_track.active && g_mediaOn) k = Kind::Media;
+    // Studio: the frame opens while the pointer rests on the island, and stays
+    // open while you type a reply into it.
+    const bool open = g_pinned || (g_expandOnHover && g_hover && Now() - g_hoverSince >= kOpenDelay);
+    if (StudioLayout() && (Composing() || open)) return Kind::Studio;
+    return k;
 }
 
 mascot::Mood MoodFor(Kind k) {
-    if (k == Kind::Agent || k == Kind::AgentCard) {
+    const bool agentShown = g_agentsOn && g_agent.phase != AgentPhase::None;
+    if (k == Kind::Agent || k == Kind::AgentCard || k == Kind::RichCard || (k == Kind::Studio && agentShown)) {
         switch (g_agent.phase) {
             case AgentPhase::Thinking: return mascot::Mood::Thinking;
             case AgentPhase::Working: return mascot::Mood::Working;
@@ -317,8 +338,8 @@ mascot::Mood MoodFor(Kind k) {
             default: break;
         }
     }
-    if (k == Kind::Media && g_track.playing) return mascot::Mood::Music;
-    if (Now() < g_pokeUntil) return mascot::Mood::Happy;
+    if ((k == Kind::Media || k == Kind::Studio) && g_track.playing) return mascot::Mood::Music;
+    if (k == Kind::Toast || Now() < g_pokeUntil) return mascot::Mood::Happy;
     return mascot::Mood::Idle;
 }
 
@@ -338,7 +359,9 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
             *h = kCollapsedH;
             return;
         case Kind::Media:
-            if (g_hover) { *w = 380; *h = 96; return; }
+            if (g_pinned || (g_expandOnHover && g_hover)) { *w = 380; *h = 96; return; }
+            // Lyrics on the small island: as wide as the song's longest line needs.
+            if (const double lw = LyricPillWidth(cr, 38 + 40); lw > 0) { *w = lw; *h = kCollapsedH; return; }
             *w = 36 + std::min(200.0, TextWidth(cr, g_track.title, 12.5, true)) + 44;
             *h = kCollapsedH;
             return;
@@ -353,6 +376,17 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
             *h = 54 + body + 52;
             return;
         }
+        case Kind::Studio:
+            *w = bb::studio::kIslandW;
+            *h = bb::studio::kIslandH;
+            return;
+        case Kind::RichCard:
+            RichCardSize(cr, w, h);
+            return;
+        case Kind::Toast:
+            *w = std::clamp(56 + std::max(TextWidth(cr, g_toastTitle, 11.5, true), TextWidth(cr, g_toastText, 13.5, true)) + 22, 200.0, 440.0);
+            *h = 50;
+            return;
     }
 }
 
@@ -376,8 +410,9 @@ void PaintMedia(cairo_t* cr, const Rect& p) {
         if (g_art) artAlpha = g_mascotOn ? (phase < 3.5 ? std::clamp(std::min(phase, 3.5 - phase) / 0.35, 0.0, 1.0) : 0.0) : 1.0;
         if (artAlpha < 1.0) DrawMascot(cr, p.x + 21, p.y + p.h / 2, 28);  // under the art while it fades
         Art(cr, p.x + 9, p.y + 5, p.h - 10, artAlpha);
-        Text(cr, g_track.title.empty() ? g_track.player : g_track.title, p.x + 38, p.y + (p.h - 16) / 2, p.w - 38 - 40, 12.5,
-             true);
+        if (bb::llyrics::PillOn()) PaintLyricPill(cr, {p.x + 38, p.y, p.w - 38 - 40, p.h});
+        else Text(cr, g_track.title.empty() ? g_track.player : g_track.title, p.x + 38, p.y + (p.h - 16) / 2, p.w - 38 - 40, 12.5,
+                  true);
         Bars(cr, p.x + p.w - 30, p.y + p.h / 2, 16);
         return;
     }
@@ -458,6 +493,13 @@ void PaintCard(cairo_t* cr, const Rect& p) {
     if (a.queued > 0) Text(cr, "+" + std::to_string(a.queued) + " waiting", p.x + p.w - 90, p.y + 10, 76, 10.5, false, 1, 1, 1, 0.5);
 }
 
+void PaintToast(cairo_t* cr, const Rect& p) {
+    DrawMascot(cr, p.x + 26, p.y + p.h / 2, 32);
+    const double x = p.x + 50, w = p.w - 50 - 16;
+    Text(cr, g_toastTitle, x, p.y + 7, w, 11.5, true, 1, 1, 1, 0.65);
+    Text(cr, g_toastText, x, p.y + 24, w, 13.5, true);
+}
+
 // Where the pill is in the window this frame.
 Rect PillRect() {
     return {(kCanvasW - g_w) / 2, kTopGap, g_w, g_h};
@@ -535,13 +577,13 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
         p.w += bump * 2;
     }
 
-    // The surface, with a soft shadow.
+    // The surface, with a soft shadow. The open island gets rounder corners.
+    const double radius = std::min(p.h / 2, p.h > 150 ? 32.0 : 22.0);
     for (int i = 3; i >= 1; --i) {
-        RoundRect(cr, p.x - i, p.y - i + 2, p.w + 2 * i, p.h + 2 * i, p.h / 2 + i);
+        RoundRect(cr, p.x - i, p.y - i + 2, p.w + 2 * i, p.h + 2 * i, radius + i);
         cairo_set_source_rgba(cr, 0, 0, 0, 0.07);
         cairo_fill(cr);
     }
-    const double radius = std::min(p.h / 2, 22.0);
     RoundRect(cr, p.x, p.y, p.w, p.h, radius);
     cairo_set_source_rgba(cr, 0.035, 0.035, 0.045, g_opacity);
     cairo_fill_preserve(cr);
@@ -560,6 +602,11 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
             case Kind::Media: PaintMedia(cr, p); break;
             case Kind::Agent: PaintAgent(cr, p); break;
             case Kind::AgentCard: PaintCard(cr, p); break;
+            case Kind::Studio:
+                PaintStudio(cr, p, std::clamp((g_h - 120.0) / (bb::studio::kIslandH - 120.0), 0.0, 1.0));
+                break;
+            case Kind::RichCard: PaintRichCard(cr, p); break;
+            case Kind::Toast: PaintToast(cr, p); break;
         }
     }
     cairo_restore(cr);
@@ -568,7 +615,8 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
     UpdateInputRegion(scaled, radius * g_scale);
 
     // Fast frames while something moves; the mascot's idle motion is fine at ~8 fps.
-    const bool fast = resizing || since < 0.45 || kind == Kind::Media || kind == Kind::AgentCard ||
+    const bool fast = resizing || since < 0.45 || kind == Kind::Media || kind == Kind::AgentCard || kind == Kind::Studio ||
+                      kind == Kind::RichCard ||
                       mascot::NeedsFastFrames(g_mood, now, g_moodSince) || g_hover;
     ScheduleFrame(fast);
     return TRUE;
@@ -651,6 +699,7 @@ void LoadArt(const std::string& url) {
 void OnMediaChanged() {
     g_track = bb::mpris::Current();
     LoadArt(g_track.active ? g_track.artUrl : std::string());
+    bb::llyrics::OnTrack(g_track);
     Redraw();
 }
 
@@ -692,6 +741,7 @@ void Do(const Hit& h) {
         case Action::Answer: bb::agents::Decide(g_agent.requestId, bb::AgentDecision::Allow, h.index); break;
         case Action::Settings: OpenSettings(); break;
         case Action::None: break;
+        default: StudioDo(h); break;
     }
 }
 
@@ -703,8 +753,12 @@ gboolean OnButtonPress(GtkWidget*, GdkEventButton* e, gpointer) {
     }
     if (e->button != 1) return TRUE;
     const int i = HitAt(e->x, e->y);
-    if (i >= 0) Do(g_hits[i]);
-    else if (CurrentKind() == Kind::Clock) g_pokeUntil = Now() + 1.2;  // a poke
+    const Kind kind = CurrentKind();
+    if (kind == Kind::Toast && i < 0) g_toastUntil = 0;  // a click puts it away
+    else if (i >= 0) Do(g_hits[i]);
+    // Expand on hover off: a click on the island opens it, another closes it.
+    else if (!g_expandOnHover && kind != Kind::AgentCard && kind != Kind::RichCard) g_pinned = !g_pinned;
+    else if (kind == Kind::Clock) g_pokeUntil = Now() + 1.2;  // a poke
     Redraw();
     return TRUE;
 }
@@ -723,13 +777,42 @@ gboolean OnMotion(GtkWidget*, GdkEventMotion* e, gpointer) {
 gboolean OnCrossing(GtkWidget*, GdkEventCrossing* e, gpointer) {
     // Moving onto a child area isn't leaving the island.
     if (e->detail == GDK_NOTIFY_INFERIOR) return FALSE;
-    g_hover = e->type == GDK_ENTER_NOTIFY;
+    const bool entering = e->type == GDK_ENTER_NOTIFY;
+    if (entering && !g_hover) {
+        g_hoverSince = Now();
+        // Over a working agent, the frame opens on the Agent page.
+        if (g_agentsOn && g_agent.phase != AgentPhase::None) StudioShowAgentPage();
+        // Studio opens after kOpenDelay; make sure a frame comes then.
+        g_timeout_add(static_cast<guint>(kOpenDelay * 1000) + 10, [](gpointer) -> gboolean { Redraw(); return G_SOURCE_REMOVE; }, nullptr);
+    }
+    g_hover = entering;
     if (!g_hover) {
         g_hoverHit = -1;
         g_mouseX = g_mouseY = -1;
     }
     Redraw();
     return FALSE;
+}
+
+gboolean OnScroll(GtkWidget*, GdkEventScroll* e, gpointer) {
+    double delta = 0;
+    switch (e->direction) {
+        case GDK_SCROLL_UP:
+        case GDK_SCROLL_LEFT: delta = -1; break;
+        case GDK_SCROLL_DOWN:
+        case GDK_SCROLL_RIGHT: delta = 1; break;
+        case GDK_SCROLL_SMOOTH: delta = std::fabs(e->delta_x) > std::fabs(e->delta_y) ? e->delta_x : e->delta_y; break;
+    }
+    const Kind k = CurrentKind();
+    if (k == Kind::Studio || k == Kind::RichCard) StudioScroll(delta);
+    Redraw();
+    return TRUE;
+}
+
+gboolean OnKey(GtkWidget*, GdkEventKey* e, gpointer) {
+    const bool used = ComposeKey(e);
+    if (used) Redraw();
+    return used;
 }
 
 // ── Menu (the tray menu's items; there's no tray on Linux yet) ──────────────
@@ -775,6 +858,14 @@ void ShowMenu(GdkEvent* event) {
             bb::hooks::InstallClaudeHooks(&report);
             Wh_Log(L"%ls", report.c_str());
         }));
+    // Lyrics on the small island, as on Windows' right-click menu.
+    GtkWidget* lyrics = gtk_check_menu_item_new_with_label("Lyrics on the island");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(lyrics), bb::llyrics::PillOn());
+    g_signal_connect(lyrics, "toggled", G_CALLBACK(+[](GtkCheckMenuItem* it, gpointer) {
+        const std::wstring on = L"true";
+        bb::settings::Set(L"Bunbun.PillLyrics", gtk_check_menu_item_get_active(it) ? &on : nullptr);
+    }), nullptr);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), lyrics);
     item("Open data folder", G_CALLBACK(+[](GtkMenuItem*, gpointer) {
         bb::plat::MakeDirs(bb::plat::ConfigDir());
         bb::plat::OpenWithDefault(bb::plat::ConfigDir());
@@ -870,7 +961,17 @@ void InstallStableHook() {
     if (bb::plat::WriteFileAtomic(dst, data)) chmod(dst.c_str(), 0755);
 }
 
-}  // namespace
+void ShowToast(const std::string& title, const std::string& text, double seconds) {
+    g_toastTitle = title;
+    g_toastText = text;
+    g_toastUntil = Now() + seconds;
+    g_nudgeAt = Now();
+    Redraw();
+}
+
+}  // namespace bb::lisland
+
+using namespace bb::lisland;
 
 // ── Entry points used by shared code ────────────────────────────────────────
 
@@ -884,6 +985,30 @@ void IslandSetAgentView(const AgentView& view, bool nudge) {
         g_agentInboxNudge = g_agentInboxNudge || nudge;
     }
     g_idle_add(ApplyAgentView, nullptr);
+}
+
+int IslandCapturePages() {
+    struct Job {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+        int count = 0;
+    };
+    auto job = std::make_shared<Job>();
+    g_idle_add([](gpointer p) -> gboolean {
+        auto* j = static_cast<std::shared_ptr<Job>*>(p);
+        const int count = StudioCapturePages();
+        {
+            std::lock_guard lock((*j)->m);
+            (*j)->count = count;
+            (*j)->done = true;
+        }
+        (*j)->cv.notify_all();
+        delete j;
+        return G_SOURCE_REMOVE;
+    }, new std::shared_ptr<Job>(job));
+    std::unique_lock lock(job->m);
+    return job->cv.wait_for(lock, std::chrono::seconds(5), [&] { return job->done; }) ? job->count : -1;
 }
 
 int main(int argc, char** argv) {
@@ -975,12 +1100,19 @@ int main(int argc, char** argv) {
         }
     }
     gtk_widget_add_events(g_window, GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK | GDK_ENTER_NOTIFY_MASK |
-                                        GDK_LEAVE_NOTIFY_MASK);
+                                        GDK_LEAVE_NOTIFY_MASK | GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK |
+                                        GDK_KEY_PRESS_MASK | GDK_FOCUS_CHANGE_MASK);
     g_signal_connect(g_window, "draw", G_CALLBACK(OnDraw), nullptr);
     g_signal_connect(g_window, "button-press-event", G_CALLBACK(OnButtonPress), nullptr);
     g_signal_connect(g_window, "motion-notify-event", G_CALLBACK(OnMotion), nullptr);
     g_signal_connect(g_window, "enter-notify-event", G_CALLBACK(OnCrossing), nullptr);
     g_signal_connect(g_window, "leave-notify-event", G_CALLBACK(OnCrossing), nullptr);
+    g_signal_connect(g_window, "scroll-event", G_CALLBACK(OnScroll), nullptr);
+    g_signal_connect(g_window, "key-press-event", G_CALLBACK(OnKey), nullptr);
+    g_signal_connect(g_window, "focus-out-event", G_CALLBACK(+[](GtkWidget*, GdkEvent*, gpointer) -> gboolean {
+        ComposeFocusOut();
+        return FALSE;
+    }), nullptr);
     g_signal_connect(g_window, "destroy", G_CALLBACK(gtk_main_quit), nullptr);
     PlaceWindow();
     gtk_widget_show_all(g_window);
@@ -994,7 +1126,9 @@ int main(int argc, char** argv) {
         g_unix_signal_add(sig, [](gpointer) -> gboolean { gtk_main_quit(); return G_SOURCE_REMOVE; }, nullptr);
 
     g_lastDrawAt = Now();
+    bb::llyrics::Start([] { Redraw(); });
     bb::mpris::Start(OnMediaChanged);
+    bb::lsrc::Start([] { Redraw(); });
     if (!bb::agents::Start()) fprintf(stderr, "Bunbun: the agent socket is in use; agents won't show.\n");
     // The clock needs a redraw when the minute (or second) turns over. Every
     // frame path also passes through here, so no draw for a few seconds means
@@ -1004,6 +1138,9 @@ int main(int argc, char** argv) {
             g_lastDrawAt = Now();
             Remap();
         }
+        // Reminders that came due, and the end of a focus timer.
+        for (const std::wstring& text : bb::lsrc::TakeDueReminders()) ShowToast("Reminder", bb::plat::Utf8(text), 10);
+        if (bb::lsrc::FocusTakeFinished()) ShowToast("Focus", "Time's up \xE2\x80\x94 take a break", 10);
         gtk_widget_queue_draw(g_window);
         return G_SOURCE_CONTINUE;
     }, nullptr);

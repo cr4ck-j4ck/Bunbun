@@ -862,8 +862,16 @@ std::string HandleCommand(const std::string& cmd, const Value& msg) {
     return json::Serialize(out);
 }
 #else
-// The settings app's live preview is Windows-only for now.
-std::string HandleCommand(const std::string&) { return "{\"shown\":false}"; }
+// The settings app asks for page pictures (Island pages); its live preview is
+// Windows-only for now.
+std::string HandleCommand(const std::string& command) {
+    if (command == "capture_pages") {
+        Value out = Value::Object();
+        out["count"] = Value::Number(std::max(0, IslandCapturePages()));
+        return json::Serialize(out);
+    }
+    return "{\"shown\":false}";
+}
 #endif
 
 #ifdef _WIN32

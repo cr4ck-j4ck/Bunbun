@@ -10,6 +10,11 @@ double IslandNow();
 // Replaces the agent pill's contents. Any thread.
 void IslandSetAgentView(const bb::AgentView& view, bool nudge);
 
+// Saves pictures of the island's pages for the settings app (Island pages) and
+// returns how many; -1 if the island didn't answer. Any thread; waits for the
+// GTK main loop.
+int IslandCapturePages();
+
 // Settings by "Section.Key" ("Bunbun.ShellApprovals"): true/false read as 1/0.
 int Wh_GetIntSetting(const wchar_t* name, ...);
 
