@@ -12,6 +12,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "../common/json.h"
 #include "../common/pipe.h"
@@ -80,8 +81,46 @@ bool ValidAgentName(const std::string& n) {
 }
 
 // Keeps what the island displays, drops what it never needs.
+// The last few lines a shell tool printed, for the island's agent page.
+Value OutputTail(const Value* response) {
+    std::string text;
+    if (response) {
+        if (response->isString()) text = response->str;
+        else for (const char* k : {"stdout", "stderr", "output"}) {
+            const std::string part = response->getString(k);
+            if (!part.empty()) text += (text.empty() ? "" : "\n") + part;
+        }
+    }
+    std::vector<std::string> lines;
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(start, end - start);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (!line.empty()) lines.push_back(line);
+        start = end + 1;
+    }
+    Value tail = Value::Array();
+    for (size_t i = lines.size() > 3 ? lines.size() - 3 : 0; i < lines.size(); ++i) {
+        std::string line = lines[i];
+        Truncate(&line, 120);
+        tail.push(Value::String(line));
+    }
+    return tail;
+}
+
 void Slim(Value* payload, const std::string& event) {
     payload->erase("transcript_path");
+    {
+        const std::string t = payload->getString("tool_name");
+        if ((event == "PostToolUse" || event == "PostToolUseFailure") &&
+            (t == "Bash" || t == "PowerShell" || t == "run_command")) {
+            const Value* response = payload->find("tool_response");
+            if (!response) response = payload->find("tool_output");
+            (*payload)["bunbun_output"] = OutputTail(response);
+        }
+    }
     payload->erase("tool_response");
     payload->erase("tool_output");
 
@@ -139,10 +178,11 @@ DWORD WINAPI ReadReply(void* p) {
     return 0;
 }
 
-std::string PermissionReply(const std::string& behavior, const Value* updatedInput) {
+std::string PermissionReply(const std::string& behavior, const Value* updatedInput,
+                            const std::string& message = "Denied from Bunbun") {
     Value decision = Value::Object();
     decision["behavior"] = Value::String(behavior);
-    if (behavior == "deny") decision["message"] = Value::String("Denied from Bunbun");
+    if (behavior == "deny") decision["message"] = Value::String(message);
     if (updatedInput) decision["updatedInput"] = *updatedInput;
     Value out = Value::Object();
     Value& hso = out["hookSpecificOutput"];
@@ -163,7 +203,11 @@ bool AnswersFit(const Value& input, const Value& answers) {
             for (const Value& o : opts->arr) if (o.getString("label") == s) return true;
             return false;
         };
-        if (a->isString()) { if (!isLabel(a->str)) return false; }
+        if (a->isString()) {
+            // An option, several options joined by ", ", or the user's own words (Other).
+            if (a->str.empty() || a->str.size() > 4000) return false;
+            (void)isLabel;
+        }
         else if (a->isArray() && !a->arr.empty()) { for (const Value& e : a->arr) if (!e.isString() || !isLabel(e.str)) return false; }
         else return false;
     }
@@ -358,6 +402,14 @@ std::string Reply(Dialect d, const std::string& agent, const std::string& rawEve
             {
                 Value reply;
                 const Value* answers = nullptr;
+                // Plan mode: {"deny":"<what to change>"} sends the plan back with the
+                // user's feedback, so Claude keeps planning.
+                if (bb::json::Parse(decision, &reply) && reply.isObject() && reply.find("deny")) {
+                    const std::string note = reply.getString("deny");
+                    return PermissionReply("deny", nullptr,
+                                           note.empty() ? "The user wants changes to the plan before you start. Ask what to change."
+                                                        : "The user wants changes to the plan: " + note);
+                }
                 if (bb::json::Parse(decision, &reply) && (answers = reply.find("answers")) && originalInput.isObject() &&
                     AnswersFit(originalInput, *answers)) {
                     Value updated = originalInput;
@@ -372,11 +424,80 @@ std::string Reply(Dialect d, const std::string& agent, const std::string& rawEve
 
 }  // namespace
 
+// Claude Code's statusLine command: forwards the rate limits and context use to
+// the island, and prints the line Claude Code shows under its prompt.
+// Claude Code Stop hook with asyncRewake: runs in the background after Claude
+// stops and waits (up to 30 min) for the user to answer from the island. Exit
+// code 2 hands the answer to Claude as the user's next message; exit 0 means
+// nothing to send (answered in the terminal, island closed, or the wait ended).
+int ReplyWaitMode() {
+    Value data;
+    if (!bb::json::Parse(ReadStdin(), &data) || !data.isObject()) return 0;
+    const std::string session = data.getString("session_id");
+    if (session.empty()) return 0;
+    Value msg = Value::Object();
+    msg["hook_event_name"] = Value::String("ReplyWait");
+    msg["session_id"] = Value::String(session);
+    msg["cwd"] = Value::String(data.getString("cwd"));
+
+    HANDLE pipe = ConnectToIsland();
+    if (pipe == INVALID_HANDLE_VALUE) return 0;
+    if (!bb::pipe::WriteAll(pipe, bb::json::Serialize(msg) + "\n")) { CloseHandle(pipe); return 0; }
+    ReplyWait wait{pipe};
+    HANDLE reader = CreateThread(nullptr, 0, ReadReply, &wait, 0, nullptr);
+    const bool done = reader && WaitForSingleObject(reader, 30 * 60 * 1000 + 5000) == WAIT_OBJECT_0;
+    if (reader) CloseHandle(reader);
+    CloseHandle(pipe);
+    if (!done || !wait.ok) return 0;
+    Value reply;
+    if (!bb::json::Parse(wait.line, &reply) || !reply.isObject()) return 0;
+    const std::string text = reply.getString("reply");
+    if (text.empty()) return 0;
+    const std::string line = "The user replied from the Bunbun island: " + text + "\n";
+    DWORD n = 0;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line.data(), static_cast<DWORD>(line.size()), &n, nullptr);
+    return 2;
+}
+
+int StatusLine() {
+    Value data;
+    if (!bb::json::Parse(ReadStdin(), &data) || !data.isObject()) return 0;
+    Value msg = Value::Object();
+    msg["hook_event_name"] = Value::String("StatusLine");
+    if (const Value* v = data.find("rate_limits")) msg["rate_limits"] = *v;
+    if (const Value* v = data.find("context_window")) msg["context_window"] = *v;
+
+    HANDLE pipe = ConnectToIsland();
+    if (pipe != INVALID_HANDLE_VALUE) {
+        bb::pipe::WriteAll(pipe, bb::json::Serialize(msg) + "\n");
+        CloseHandle(pipe);
+    }
+
+    auto pct = [](const Value* obj, const char* key) -> int {
+        const Value* v = obj ? obj->find(key) : nullptr;
+        return v && v->isNumber() ? static_cast<int>(v->num + 0.5) : -1;
+    };
+    const Value* model = data.find("model");
+    std::string line = model ? model->getString("display_name") : std::string();
+    const Value* limits = data.find("rate_limits");
+    const int five = pct(limits ? limits->find("five_hour") : nullptr, "used_percentage");
+    const int week = pct(limits ? limits->find("seven_day") : nullptr, "used_percentage");
+    const int ctx = pct(data.find("context_window"), "used_percentage");
+    auto add = [&](const std::string& part) { line += (line.empty() ? "" : " \xC2\xB7 ") + part; };
+    if (five >= 0) add("5h " + std::to_string(five) + "%");
+    if (week >= 0) add("week " + std::to_string(week) + "%");
+    if (ctx >= 0) add("context " + std::to_string(ctx) + "%");
+    WriteStdout(line + "\n");
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     std::string agent;
     std::string rawEvent;
     for (int i = 1; i < argc; ++i) {
         std::string a = Utf8(argv[i]);
+        if (a == "--statusline") return StatusLine();
+        if (a == "--reply") return ReplyWaitMode();
         if (a == "--agent" && i + 1 < argc) agent = Utf8(argv[++i]);
         else if (!a.empty() && a[0] != '-') rawEvent = a;
     }

@@ -107,6 +107,9 @@
   - AutoHideFullscreen: true
     $name: Hide on full screen
     $description: Automatically hide the island when playing a video or app in full screen mode.
+  - FullscreenTuck: false
+    $name: Tuck instead of hiding
+    $description: In full screen, fold the island into a thin line instead of hiding it. Point at the line to bring the island back; it unfolds by itself when you leave full screen, and when an agent needs you.
   - UnhideOnHover: true
     $name: Unhide on hover
     $description: Allow the hidden island to reappear when you hover your mouse over it.
@@ -351,7 +354,7 @@
     $description: Shows the weather on the right side of the pill. Turn off to only show the clock.
   - WeatherCity: ""
     $name: Weather City (Optional)
-    $description: Enter your city (e.g. London). Leave blank to use auto IP geolocation.
+    $description: A city (e.g. London) to always show. Leave blank to show the weather where this PC is, from Windows' location service.
   - WeatherFahrenheit: false
     $name: Use Fahrenheit
     $description: Display weather temperature and wind speed in imperial units.
@@ -390,6 +393,9 @@
       - '10': 10 MB
       - '25': 25 MB (default)
       - '100': 100 MB
+  - LyricsNetEase: true
+    $name: Also search NetEase
+    $description: When LRCLIB has no synced lyrics for a song, also look on NetEase Cloud Music, which has many Chinese, Japanese and Korean songs. This sends the song title and artist to music.163.com. Only a match with the same title, artist and length is shown.
   - Language: auto
     $name: Language
     $description: Language for the island's own text labels. Auto follows your Windows display language.
@@ -557,6 +563,174 @@
       - google: Google
       - bing: Bing
       - duckduckgo: DuckDuckGo
+  - Layout: studio
+    $name: Island layout
+    $description: Studio (the default) frames the open island with a header (page name, date and time) and an icon tab bar with a volume slider, puts big Agent, Music and Focus tiles on the first page, and tints the music page with the album's colour. Classic is the original island without the frame.
+    $options:
+      - classic: Classic
+      - studio: Studio
+  - TuckHotkey: true
+    $name: Tuck away (Ctrl+Alt+H)
+    $description: Ctrl+Alt+H, or Tuck away in the right-click menu, hides the island to a thin line at the top of the screen, coloured by what's going on. Point at the line for a moment to bring the island back. It comes back by itself when an agent needs you.
+  - AgentTab: true
+    $name: Agent page
+    $description: An Agent page in the scroll loop with a live timer, Read / Edit / Test / Done progress, the last command and its output, tasks done today, recent tasks, and your Claude Code usage limits (connect Claude Code to see them).
+  - ClipboardHistory: true
+    $name: Clipboard history
+    $description: A Clipboard page with the last 8 texts you copied, kept in memory only. Click one to copy it again.
+  - QuickNote: true
+    $name: Quick note
+    $description: A Note page with one note kept on this PC (note.txt next to settings.ini). Lines that start with [ ] get a checkbox you can tick on the island; Edit opens the note in Notepad.
+  - PokeReactions: true
+    $name: Poke reactions and hello
+    $description: Poke the mascot three times quickly and it gets cross; six times and it gets dizzy. It also says hello when Bunbun starts.
+  - MusicSwipe: true
+    $name: Swipe for the next song
+    $description: Swipe sideways on the small music pill, or scroll sideways on a touchpad, to skip to the next or previous song.
+  - IdleFace: mascot
+    $name: Idle face
+    $description: What sits on the idle island. Mascot is your character; Eyes is just two eyes that follow your pointer and blink. Pick their colour in Eye colour.
+    $options:
+      - mascot: Mascot
+      - eyes: Eyes
+  - EyeColor: mint
+    $name: Eye colour
+    $description: The eyes' resting colour when Idle face is Eyes. While an agent works they turn orange and pulse; green when it's done; red on an error.
+    $options:
+      - mint: Mint
+      - white: White
+      - blue: Blue
+      - pink: Pink
+      - purple: Purple
+      - yellow: Yellow
+  - ShowClaude: true
+    $name: Show Claude Code
+    $description: Claude Code sessions, approval cards and usage on the island. Off ignores Claude Code completely; it asks in its own window as if Bunbun weren't there.
+  - ShowAntigravity: true
+    $name: Show Antigravity
+    $description: Antigravity sessions, approval cards and quota on the island. Off ignores Antigravity completely.
+  - ShowCursor: true
+    $name: Show Cursor
+    $description: Cursor agent and Composer sessions and approval cards on the island. Off ignores Cursor completely.
+  - ShowCopilot: true
+    $name: Show VS Code / Copilot
+    $description: VS Code agent mode and Copilot CLI sessions and approval cards on the island. Off ignores them completely.
+  - ShowCodex: true
+    $name: Show Codex
+    $description: OpenAI Codex sessions on the island (hooks you set up yourself). Off ignores Codex completely.
+  - ShowOtherAgents: true
+    $name: Show other tools
+    $description: Any other tool that sends events with bunbun-hook --agent <name>.
+  - AgentPill: true
+    $name: Pill while an agent works
+    $description: The small pill showing what your agent is doing right now (Runs, Edits, Reads...). Turn it off for a quieter island; it still asks you when an agent needs approval or an answer, and the Agent page keeps track.
+  - PillLyrics: false
+    $name: Lyrics on the small island
+    $description: While music plays, the closed island shows the current lyric line instead of the song title. Also in the right-click menu under Lyrics.
+  - MainAgent: auto
+    $name: Main agent
+    $description: Which agent the Home tile and the usage ring in the header follow. Auto follows the one you used last.
+    $options:
+      - auto: Auto (the one you used last)
+      - claude: Claude Code
+      - antigravity: Antigravity
+      - cursor: Cursor
+      - copilot: VS Code / Copilot
+      - codex: Codex
+  - UsageLimits: true
+    $name: Show Claude Code usage limits
+    $description: Your Claude Code 5-hour and weekly limits and context use, sent by its statusLine when Claude Code is connected. Shown as a ring in the Studio header, on the Claude tile, and as bars on the Agent page.
+  - AntigravityQuota: true
+    $name: Show Antigravity quota
+    $description: How much of Antigravity's model quota you've used, from the status Antigravity keeps on this PC (refreshed when Antigravity syncs). Shows the model with the least left, its reset time, on the Agent page, and in the header and Claude tile when Claude Code has no numbers.
+  - EyeStatusColors: false
+    $name: Eyes show agent status
+    $description: When on, the eyes turn orange and pulse while a coding agent works, go green when it's done and red on an error, and change shape with it. Off keeps them your chosen colour.
+  - IdleStripItems: time-weather
+    $name: Beside the face
+    $description: What the small idle island shows next to the mascot or eyes. Nothing leaves just the face, like a little creature living in the notch.
+    $options:
+      - time-weather: Time and weather
+      - time: Time only
+      - weather: Weather only
+      - nothing: Nothing (just the face)
+  - HomeTile1: auto
+    $name: First Home tile
+    $description: Automatic shows your main agent, or the weather when no agent is on. Pick it in Settings, Island pages.
+    $options:
+      - auto: Automatic
+      - agent: Agent
+      - music: Music
+      - focus: Focus timer
+      - weather: Weather
+      - calendar: Calendar
+      - battery: Battery
+      - system: System
+  - HomeTile2: auto
+    $name: Second Home tile
+    $description: Automatic shows music. Pick it in Settings, Island pages.
+    $options:
+      - auto: Automatic
+      - agent: Agent
+      - music: Music
+      - focus: Focus timer
+      - weather: Weather
+      - calendar: Calendar
+      - battery: Battery
+      - system: System
+  - HomeTile3: auto
+    $name: Third Home tile
+    $description: Automatic shows the focus timer. Pick it in Settings, Island pages.
+    $options:
+      - auto: Automatic
+      - agent: Agent
+      - music: Music
+      - focus: Focus timer
+      - weather: Weather
+      - calendar: Calendar
+      - battery: Battery
+      - system: System
+  - HomeLinks: ""
+    $name: Your links on Home
+    $description: Up to four shortcuts under the Home tiles, as Name|address separated by semicolons, for example GitHub|https://github.com; Notes|C:\Users\you\Notes. Addresses can be websites, files, folders or programs.
+  - PageOrder: ""
+    $name: Page order
+    $description: The order of the island's pages after Home (or the player), as page keys separated by commas, for example weather,calendar,focus. Pages left out keep their usual place after these. Easiest to set in Settings, Island pages.
+  - AppsPage: true
+    $name: All apps page
+    $description: A page with every page of the island, the colour picker and Settings in one grid, with a badge when an agent is waiting for you.
+  - BluetoothLowWarning: true
+    $name: Low battery warning for Bluetooth devices
+    $description: A heads-up on the island when connected headphones, a mouse or a keyboard drop to 20% or below. Checked every 5 minutes, at most once a day per device.
+  - Sounds: true
+    $name: Sounds
+    $description: Soft chimes when a coding agent finishes, asks you something or stops with an error.
+  - SoundOpenClose: false
+    $name: Open and close sounds
+    $description: A quick blip when the island opens and closes.
+  - SoundVolume: 40
+    $name: Sound volume (%)
+    $description: How loud Bunbun's chimes are, on top of your Windows volume.
+  - MirrorPage: false
+    $name: Mirror page
+    $description: A camera preview page for a quick look before a call. The camera only turns on when you press Turn on camera, and off when you leave the page. Nothing is saved.
+  - FocusPage: true
+    $name: Focus page
+    $description: A Focus page in the scroll loop with an hours and minutes picker (scroll or click the numbers), 5 / 15 / 25 / 50 minute chips, +5 min, pause and stop.
+  - FocusGuard: false
+    $name: Focus guard
+    $description: While a focus timer runs, a gentle note on the island when one of your distracting apps or sites comes to the front.
+  - FocusGuardApps: "youtube, instagram, netflix, reddit, tiktok, twitter, x.com, facebook, steam, discord"
+    $name: Distracting apps and sites
+    $description: Comma-separated words matched against the front window's title and program name.
+  - MusicApp: auto
+    $name: Music app
+    $description: What the Music tile opens. Auto brings the app that's playing to the front. With an app picked, the tile brings it forward when it's the one playing and opens it otherwise (YouTube Music opens in your browser).
+    $options:
+      - auto: Auto (whatever is playing)
+      - spotify: Spotify
+      - youtube-music: YouTube Music
+      - apple-music: Apple Music
   $name: Bunbun
 */
 // ==/BunbunSettings==

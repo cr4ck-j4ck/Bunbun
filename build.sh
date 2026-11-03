@@ -60,7 +60,8 @@ for p in "${pids[@]}"; do wait "$p" || failed=1; done
     res/bunbun.rc -O coff -o build/obj/bunbun_res.o
 
 LIBS=(-lole32 -loleaut32 -luuid -lshcore -lshlwapi -ld2d1 -ldwrite -ldwmapi -lgdi32 -luser32 -lshell32 -lruntimeobject
-      -lwindowscodecs -lsetupapi -lwinhttp -lpdh -liphlpapi -lwlanapi -lwinmm -ladvapi32 -lcomctl32)
+      -lwindowscodecs -lsetupapi -lwinhttp -lpdh -liphlpapi -lwlanapi -lwinmm -ladvapi32 -lcomctl32
+      -lmfuuid)
 echo "  LD  build/bunbun.exe"
 "$CXX" "${LDOPT[@]}" -municode -mwindows -static -o build/bunbun.exe \
     build/obj/main.o build/obj/island_core.o build/obj/wh_shim.o build/obj/agent_bridge.o \

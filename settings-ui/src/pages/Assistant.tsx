@@ -26,10 +26,11 @@ function aiSummary(ai: AiStatus) {
 // Every agent connects the same way and gets the same island experience:
 // session, live steps, diffs, approval cards, and a hop when it finishes.
 const AGENTS = [
-  { id: "claude", name: "Claude Code", cmd: "Claude", approvals: "Cards whenever Claude Code would ask for permission, and its questions." },
-  { id: "antigravity", name: "Antigravity (IDE, app & CLI)", cmd: "Antigravity", approvals: "Cards for run_command when Ask before shell commands is on." },
-  { id: "cursor", name: "Cursor (Agent & Composer)", cmd: "Cursor", approvals: "Cards for shell commands when Ask before shell commands is on." },
-  { id: "copilot", name: "VS Code / GitHub Copilot", cmd: "Copilot", approvals: "Cards whenever Copilot would ask for permission." },
+  { id: "claude", name: "Claude Code", cmd: "Claude", show: "Bunbun.ShowClaude", approvals: "Cards whenever Claude Code would ask for permission, and its questions." },
+  { id: "antigravity", name: "Antigravity (IDE, app & CLI)", cmd: "Antigravity", show: "Bunbun.ShowAntigravity", approvals: "Cards for run_command when Ask before shell commands is on." },
+  { id: "cursor", name: "Cursor (Agent & Composer)", cmd: "Cursor", show: "Bunbun.ShowCursor", approvals: "Cards for shell commands when Ask before shell commands is on." },
+  { id: "copilot", name: "VS Code / GitHub Copilot", cmd: "Copilot", show: "Bunbun.ShowCopilot", approvals: "Cards whenever Copilot would ask for permission." },
+  { id: "codex", name: "Codex", cmd: "Codex", show: "Bunbun.ShowCodex", approvals: "Progress on the island; Codex asks for permission in its own window." },
 ] as const;
 
 // Commits on blur / Enter, and only a single letter, digit or "SPACE". Saving on
@@ -155,10 +156,18 @@ Your other settings stay as they are, and a backup is made first.`);
               <button className={`btn small ${connected ? "" : "primary"}`} disabled={!!busy || !status} onClick={() => toggle(a)}>
                 {connected ? <><Unlink2 size={14} /> Disconnect</> : <><Link2 size={14} /> Connect</>}
               </button>
+              <span title="Show this agent on the island" style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--muted)", fontSize: 12 }}>
+                On island <Toggle on={s.bool(a.show)} onChange={(v) => s.set(a.show, v)} />
+              </span>
             </Row>
           );
         })}
+        <Setting k="Bunbun.ShowOtherAgents" />
+        <Setting k="Bunbun.AgentPill" />
+        <Setting k="Bunbun.MainAgent" />
         <Setting k="Bunbun.ShellApprovals" />
+        <Setting k="Bunbun.UsageLimits" />
+        <Setting k="Bunbun.AntigravityQuota" />
         <Row label="Other agents and scripts" description="Any tool with command hooks can pipe Claude Code-style JSON events into Bunbun. Use --agent <name> to label it.">
           <button className="btn small" onClick={() => {
             navigator.clipboard.writeText(String(status?.hookCmdCli ?? "bunbun-hook.exe --agent cli"));

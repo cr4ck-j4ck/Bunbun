@@ -13,11 +13,15 @@ void IslandReloadSettings();
 // nudge = play the little bump that marks a new event.
 void IslandSetAgentView(const bb::AgentView& view, bool nudge);
 
+// Shows "Bunbun <version> is ready" on the island; a click opens `url`. Thread-safe.
+void IslandAnnounceUpdate(const wchar_t* version, const wchar_t* url);
+
 // The island clock (seconds); AgentView::phaseSince uses it.
 double IslandNow();
 
 // Opens the Ask Bun box (the Quick Lookup panel), as its hotkey (Ctrl+Alt+B) does.
 void IslandOpenAsk();
+void IslandSubmitAsk(const std::wstring& query);
 
 // False when the Ask Bun hotkey could not be registered (another app owns it).
 bool IslandAskHotkeyActive();
@@ -26,3 +30,7 @@ bool IslandAskHotkeyActive();
 // rect / work area of its display. False when nothing is shown. Any thread.
 #include <string>
 bool IslandSnapshotPng(std::string* png, RECT* screen, RECT* monitor, RECT* work);
+// Bunbun: steps the open island through its pages and saves a snapshot of each to
+// %LOCALAPPDATA%\Bunbun\previews\<page>.png (in the background). Returns how many
+// pages it will capture, 0 when a capture is already running.
+int IslandCapturePages();

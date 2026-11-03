@@ -1,5 +1,7 @@
-// ── Lyrics (LRCLIB, https://lrclib.net) ──────────────────────────────────────
-// User-Agent sent to LRCLIB.
+// ── Lyrics (LRCLIB, https://lrclib.net; NetEase as an optional fallback) ─────
+#include "lyrics_text.h"
+
+// User-Agent sent to LRCLIB and NetEase.
 constexpr wchar_t kLyricsUserAgent[] =
     BUNBUN_USER_AGENT;
 
@@ -170,30 +172,52 @@ std::vector<LyricsLine> ParseSyncedLyrics(const std::wstring& text) {
         size_t end = text.find(L'\n', start);
         if (end == std::wstring::npos) end = text.size();
         std::wstring line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
 
-        if (line.size() >= 3 && line[0] == L'[') {
-            const size_t closeBracket = line.find(L']');
-            if (closeBracket != std::wstring::npos) {
-                int minutes = 0, seconds = 0, hundredths = 0;
-                const std::wstring ts = line.substr(1, closeBracket - 1);
-                if (swscanf_s(ts.c_str(), L"%d:%d.%d", &minutes, &seconds, &hundredths) >= 2) {
-                    std::wstring lyricText = line.substr(closeBracket + 1);
-                    while (!lyricText.empty() && lyricText.front() == L' ') {
-                        lyricText.erase(lyricText.begin());
-                    }
-                    LyricsLine ll;
-                    ll.timeMs = static_cast<int64_t>(minutes) * 60000 +
-                               static_cast<int64_t>(seconds) * 1000 +
-                               static_cast<int64_t>(hundredths) * 10;
-                    ll.text = std::move(lyricText);
-                    lines.push_back(std::move(ll));
-                }
+        // Bunbun: a line can carry several timestamps ("[00:12.30][01:40.10]chorus"),
+        // and the fraction can have 1-3 digits: .5 = 500 ms, .12 = 120 ms, .123 = 123 ms.
+        // Tags that aren't times ([ar:...], [offset:...]) are skipped.
+        std::vector<int64_t> times;
+        size_t pos = 0;
+        while (pos < line.size() && line[pos] == L'[') {
+            const size_t close = line.find(L']', pos);
+            if (close == std::wstring::npos) break;
+            const std::wstring ts = line.substr(pos + 1, close - pos - 1);
+            int minutes = 0, seconds = 0;
+            wchar_t fraction[8] = {};
+            const int got = swscanf_s(ts.c_str(), L"%d:%d.%7[0-9]", &minutes, &seconds, fraction,
+                                      static_cast<unsigned>(ARRAYSIZE(fraction)));
+            if (got < 2) break;
+            int64_t ms = static_cast<int64_t>(minutes) * 60000 + static_cast<int64_t>(seconds) * 1000;
+            if (got >= 3) {
+                int64_t frac = 0;
+                int digits = 0;
+                for (const wchar_t* d = fraction; *d && digits < 3; ++d, ++digits) frac = frac * 10 + (*d - L'0');
+                while (digits < 3) { frac *= 10; ++digits; }
+                ms += frac;
+            }
+            times.push_back(ms);
+            pos = close + 1;
+        }
+        if (!times.empty()) {
+            std::wstring lyricText = line.substr(pos);
+            while (!lyricText.empty() && lyricText.front() == L' ') {
+                lyricText.erase(lyricText.begin());
+            }
+            for (const int64_t t : times) {
+                LyricsLine ll;
+                ll.timeMs = t;
+                ll.text = lyricText;
+                lines.push_back(std::move(ll));
             }
         }
 
         if (end == text.size()) break;
         start = end + 1;
     }
+    // Repeated lines (several timestamps) are listed out of order; play order wins.
+    std::stable_sort(lines.begin(), lines.end(),
+                     [](const LyricsLine& a, const LyricsLine& b) { return a.timeMs < b.timeMs; });
     return lines;
 }
 
@@ -236,7 +260,20 @@ constexpr int kLooseDurationToleranceSec = 3;          // browsers disagree by a
 constexpr uint64_t kMaxEntryBytes = 1024 * 1024;       // anything bigger is treated as corrupt
 constexpr double kCleanupMinIntervalSec = 60.0;
 
-enum class Status { Found, NotFound };
+// Which sources answered a lookup. A cached miss only counts if it was made with
+// at least the sources in use now: turning NetEase on retries songs LRCLIB alone
+// had nothing for.
+constexpr int kSourceLrclib = 1;
+constexpr int kSourceNetEase = 2;
+// Raise this when the lookup gets smarter (new source, better title cleaning):
+// cached misses from older lookups are then retried once.
+constexpr int kLookupVersion = 2;
+// Sources the lyrics thread is using right now (lyrics thread only).
+int g_currentSources = kSourceLrclib;
+
+// Found: lyrics. NotFound: every source answered, none matched. Instrumental: a
+// source said the track has no vocals.
+enum class Status { Found, NotFound, Instrumental };
 
 struct Keys {
     std::wstring loose;      // normalized artist|title
@@ -251,6 +288,8 @@ struct Entry {
     bool synced = false;
     int64_t savedAt = 0;     // unix seconds
     int durationSec = 0;
+    int lookup = 0;          // kLookupVersion that produced a miss
+    int sources = 0;         // kSource* bits that answered
     std::wstring looseKey;
     std::wstring fullKey;
     uint64_t looseHash = 0;
@@ -351,7 +390,12 @@ bool DurationCompatible(int a, int b) {
 
 bool EntryExpired(const Entry& e, int64_t nowUnix) {
     if (e.savedAt <= 0 || e.savedAt > nowUnix + 86400) return true;  // missing or future-dated
-    return (nowUnix - e.savedAt) > (e.status == Status::Found ? kFoundTtlSec : kNotFoundTtlSec);
+    if (e.status == Status::NotFound) {
+        // A miss from an older or narrower lookup is worth one more try.
+        if (e.lookup < kLookupVersion || (g_currentSources & ~e.sources) != 0) return true;
+        return (nowUnix - e.savedAt) > kNotFoundTtlSec;
+    }
+    return (nowUnix - e.savedAt) > kFoundTtlSec;
 }
 
 void CountersAdjust(int dCount, int64_t dBytes) {
@@ -420,7 +464,7 @@ const Entry* FindInMemory(const Keys& k, int64_t nowUnix) {
         }
         if (e.looseKey == k.loose && DurationCompatible(e.durationSec, k.durationSec)) {
             const int delta = (e.durationSec > 0 && k.durationSec > 0) ? std::abs(e.durationSec - k.durationSec) : 0;
-            const int score = delta + (e.status == Status::NotFound ? 1000 : 0);
+            const int score = delta + (e.status != Status::Found ? 1000 : 0);  // prefer real lyrics
             if (score < looseScore) {
                 looseScore = score;
                 looseIdx = i;
@@ -475,23 +519,36 @@ std::wstring SingleLine(std::wstring s) {
 }
 
 // File layout (UTF-8):
-//   DIWLC 1            <- magic + format version (anything else = miss + delete)
+//   DIWLC 2            <- magic + format version (anything else = miss + delete)
 //   saved=<unix>       <- (PeekHeader relies on saved/status being lines 2 and 3)
-//   status=found|notfound
+//   status=found|notfound|instrumental
 //   synced=1|0
 //   dur=<sec>
+//   lookup=<kLookupVersion> / sources=<kSource* bits>   (what produced a miss)
 //   lkey=<normalized artist|title>
 //   fkey=<normalized artist|title|album|dur>
 //   title=... / artist=...   (informational only)
 //   ---
 //   body: synced -> "<timeMs>\t<text>\n" per line, plain -> "<text>\n" per line
+// Version 1 files (found lyrics only) are still read; a version 1 "notfound"
+// is from a build that had fewer sources and is dropped.
+const char* StatusName(Status s) {
+    switch (s) {
+        case Status::Found: return "found";
+        case Status::Instrumental: return "instrumental";
+        default: return "notfound";
+    }
+}
+
 std::string SerializeEntry(const Entry& e, const std::wstring& title, const std::wstring& artist) {
     std::string out;
-    out += "DIWLC 1\n";
+    out += "DIWLC 2\n";
     out += "saved=" + std::to_string(e.savedAt) + "\n";
-    out += (e.status == Status::Found) ? "status=found\n" : "status=notfound\n";
+    out += std::string("status=") + StatusName(e.status) + "\n";
     out += e.synced ? "synced=1\n" : "synced=0\n";
     out += "dur=" + std::to_string(e.durationSec) + "\n";
+    out += "lookup=" + std::to_string(e.lookup) + "\n";
+    out += "sources=" + std::to_string(e.sources) + "\n";
     out += "lkey=" + WideToUtf8(e.looseKey) + "\n";
     out += "fkey=" + WideToUtf8(e.fullKey) + "\n";
     out += "title=" + WideToUtf8(SingleLine(title)) + "\n";
@@ -530,7 +587,8 @@ bool ParseEntry(const std::string& data, Entry* out) {
     };
 
     std::string line;
-    if (!nextLine(&line) || line != "DIWLC 1") return false;
+    if (!nextLine(&line) || (line != "DIWLC 1" && line != "DIWLC 2")) return false;
+    const bool v1 = (line == "DIWLC 1");
 
     Entry e;
     bool haveSaved = false, haveStatus = false, haveLoose = false, haveFull = false, headerEnded = false;
@@ -549,10 +607,15 @@ bool ParseEntry(const std::string& data, Entry* out) {
         } else if (key == "status") {
             if (val == "found") { e.status = Status::Found; haveStatus = true; }
             else if (val == "notfound") { e.status = Status::NotFound; haveStatus = true; }
+            else if (val == "instrumental") { e.status = Status::Instrumental; haveStatus = true; }
         } else if (key == "synced") {
             e.synced = (val == "1");
         } else if (key == "dur") {
             e.durationSec = static_cast<int>(strtol(val.c_str(), nullptr, 10));
+        } else if (key == "lookup") {
+            e.lookup = static_cast<int>(strtol(val.c_str(), nullptr, 10));
+        } else if (key == "sources") {
+            e.sources = static_cast<int>(strtol(val.c_str(), nullptr, 10));
         } else if (key == "lkey") {
             e.looseKey = Utf8ToWide(val);
             haveLoose = !e.looseKey.empty();
@@ -562,6 +625,7 @@ bool ParseEntry(const std::string& data, Entry* out) {
         }
     }
     if (!headerEnded || !haveSaved || !haveStatus || !haveLoose || !haveFull) return false;
+    if (v1 && e.status != Status::Found) return false;  // legacy "no lyrics": miss + delete
 
     if (e.status == Status::Found) {
         const std::wstring body = Utf8ToWide(data.substr(pos));
@@ -617,7 +681,6 @@ LoadResult LoadEntry(const std::wstring& path, int64_t nowUnix, Entry* out, uint
 
     Entry e;
     if (!readOk || !ParseEntry(data, &e)) return LoadResult::Invalid;
-    if (e.status != Status::Found) return LoadResult::Invalid;  // legacy "no lyrics" file: miss + delete
     if (EntryExpired(e, nowUnix)) return LoadResult::Expired;
     *out = std::move(e);
     return LoadResult::Ok;
@@ -682,7 +745,7 @@ bool LookupDisk(const Keys& k, int64_t nowUnix, Entry* out) {
         if (e.looseKey != k.loose || !DurationCompatible(e.durationSec, k.durationSec)) continue;
 
         const int delta = (e.durationSec > 0 && k.durationSec > 0) ? std::abs(e.durationSec - k.durationSec) : 0;
-        const int score = delta + (e.status == Status::NotFound ? 1000 : 0);  // prefer real lyrics
+        const int score = delta + (e.status != Status::Found ? 1000 : 0);  // prefer real lyrics
         if (score < bestScore) {
             bestScore = score;
             best = std::move(e);
@@ -726,7 +789,7 @@ void WriteEntryToDisk(const Entry& e, const std::wstring& title, const std::wstr
 }
 
 // Reads just enough of a file to know its saved-at stamp and status.
-bool PeekHeader(const std::wstring& path, int64_t* savedAt, bool* found) {
+bool PeekHeader(const std::wstring& path, int64_t* savedAt, Status* status) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -738,21 +801,26 @@ bool PeekHeader(const std::wstring& path, int64_t* savedAt, bool* found) {
     if (!ok || got < 24) return false;
     buf[got] = '\0';
 
-    static const char kMagicLine[] = "DIWLC 1\n";
-    if (strncmp(buf, kMagicLine, sizeof(kMagicLine) - 1) != 0) return false;
-    const char* p = buf + sizeof(kMagicLine) - 1;
+    static const char kMagicV1[] = "DIWLC 1\n";
+    static const char kMagicV2[] = "DIWLC 2\n";
+    const bool v1 = strncmp(buf, kMagicV1, sizeof(kMagicV1) - 1) == 0;
+    if (!v1 && strncmp(buf, kMagicV2, sizeof(kMagicV2) - 1) != 0) return false;
+    const char* p = buf + sizeof(kMagicV1) - 1;
     if (strncmp(p, "saved=", 6) != 0) return false;
     *savedAt = static_cast<int64_t>(strtoll(p + 6, nullptr, 10));
     const char* nl = strchr(p, '\n');
     if (!nl) return false;
     p = nl + 1;
     if (strncmp(p, "status=found", 12) == 0) {
-        *found = true;
+        *status = Status::Found;
     } else if (strncmp(p, "status=notfound", 15) == 0) {
-        *found = false;
+        *status = Status::NotFound;
+    } else if (strncmp(p, "status=instrumental", 19) == 0) {
+        *status = Status::Instrumental;
     } else {
         return false;
     }
+    if (v1 && *status != Status::Found) return false;  // legacy "no lyrics"
     return *savedAt > 0;
 }
 
@@ -786,11 +854,13 @@ void CleanupPass(uint64_t capBytes) {
                 if (!EndsWith(name, L".lrc")) continue;
 
                 int64_t savedAt = 0;
-                bool found = false;
-                bool drop = !PeekHeader(path, &savedAt, &found);
+                Status status = Status::Found;
+                bool drop = !PeekHeader(path, &savedAt, &status);
                 if (!drop) {
-                    // Not-found entries are no longer kept at all.
-                    drop = !found || savedAt > nowUnix + 86400 || (nowUnix - savedAt) > kFoundTtlSec;
+                    // Misses keep for days, lyrics and instrumentals for months. Lookup
+                    // version / source checks happen when an entry is actually read.
+                    const int64_t ttl = status == Status::NotFound ? kNotFoundTtlSec : kFoundTtlSec;
+                    drop = savedAt > nowUnix + 86400 || (nowUnix - savedAt) > ttl;
                 }
                 if (drop) {
                     DeleteFileW(path.c_str());
@@ -905,6 +975,7 @@ void FillSnapshot(const Entry& e, const std::wstring& title, const std::wstring&
         out->lines = LyricsLines(std::vector<LyricsLine>(e.lines));
     } else {
         out->notFound = true;
+        out->instrumental = (e.status == Status::Instrumental);
     }
 }
 
@@ -932,17 +1003,18 @@ bool Lookup(const Keys& k, bool diskOn, const std::wstring& title, const std::ws
     return true;
 }
 
-// Stores a definitive outcome. Memory always; disk only when enabled.
-void Store(const Keys& k, Status status, const LyricsSnapshot& snap, bool diskOn) {
-    // Only songs that actually have lyrics are ever cached. "Not found" results
-    // (YouTube videos, podcasts, obscure tracks) are never remembered.
-    if (status != Status::Found) return;
-
+// Stores a definitive outcome. Memory always; disk only when enabled. Misses are
+// stored too (every source answered and none matched), so replaying a podcast or
+// an obscure track doesn't hit the network again for kNotFoundTtlSec. Network
+// failures never get here: the caller retries those instead.
+void Store(const Keys& k, Status status, const LyricsSnapshot& snap, bool diskOn, int sources) {
     Entry e;
     e.status = status;
     e.synced = (status == Status::Found) && snap.synced;
     e.savedAt = UnixNow();
     e.durationSec = k.durationSec;
+    e.lookup = kLookupVersion;
+    e.sources = sources;
     e.looseKey = k.loose;
     e.fullKey = k.full;
     e.looseHash = k.looseHash;
@@ -956,100 +1028,11 @@ void Store(const Keys& k, Status status, const LyricsSnapshot& snap, bool diskOn
 }  // namespace LyricsCache
 
 // ── Lyrics lookup helpers ────────────────────────────────────────────────────
-std::wstring TrimLyricsText(const std::wstring& s) {
-    const size_t a = s.find_first_not_of(L" \t\r\n");
-    if (a == std::wstring::npos) return std::wstring();
-    const size_t b = s.find_last_not_of(L" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
-
-bool HasLyricsNoiseWord(const std::wstring& text) {
-    static const wchar_t* const kNoise[] = {
-        L"feat", L"ft.", L"featuring", L"with ", L"remaster", L"version", L"edit", L"mix",
-        L"live", L"from ", L"official", L"video", L"audio", L"lyric", L"explicit", L"deluxe",
-        L"bonus", L"mono", L"stereo", L"single", L"radio", L"soundtrack", L"anniversary"};
-    const std::wstring lower = ToLowerCopy(text);
-    for (const wchar_t* w : kNoise) {
-        if (lower.find(w) != std::wstring::npos) return true;
-    }
-    return false;
-}
-
-// "Song (feat. X) - Remastered 2011 | Channel" -> "Song"
-std::wstring CleanLyricsTitle(std::wstring title) {
-    for (size_t i = 0; i < title.size();) {
-        const wchar_t open = title[i];
-        if (open == L'(' || open == L'[') {
-            const wchar_t close = (open == L'(') ? L')' : L']';
-            const size_t end = title.find(close, i + 1);
-            if (end != std::wstring::npos && HasLyricsNoiseWord(title.substr(i + 1, end - i - 1))) {
-                size_t from = i;
-                while (from > 0 && title[from - 1] == L' ') --from;
-                title.erase(from, end - from + 1);
-                i = from;
-                continue;
-            }
-        }
-        ++i;
-    }
-    const size_t bar = title.find(L" | ");
-    if (bar != std::wstring::npos && bar > 0) title.resize(bar);
-    for (;;) {
-        const size_t dash = title.rfind(L" - ");
-        if (dash == std::wstring::npos || dash == 0) break;
-        if (!HasLyricsNoiseWord(title.substr(dash + 3))) break;
-        title.resize(dash);
-    }
-    return TrimLyricsText(title);
-}
-
-// "A, B" / "A feat. B" / "A - Topic" -> "A"
-std::wstring PrimaryLyricsArtist(std::wstring artist) {
-    artist = TrimLyricsText(artist);
-    auto endsWith = [](const std::wstring& lower, const wchar_t* suffix) {
-        const size_t n = wcslen(suffix);
-        return lower.size() > n && lower.compare(lower.size() - n, n, suffix) == 0;
-    };
-    std::wstring lower = ToLowerCopy(artist);
-    if (endsWith(lower, L" - topic")) artist.resize(artist.size() - 8);
-    else if (endsWith(lower, L"vevo")) artist.resize(artist.size() - 4);
-    lower = ToLowerCopy(artist);
-
-    static const wchar_t* const kSeps[] = {L",", L";", L"/", L" feat", L" ft.", L" ft ",
-                                           L" featuring ", L" x ", L" \u00d7 "};
-    size_t cut = std::wstring::npos;
-    for (const wchar_t* sep : kSeps) {
-        const size_t pos = lower.find(sep);
-        if (pos != std::wstring::npos && pos > 0) cut = std::min(cut, pos);
-    }
-    if (cut != std::wstring::npos) artist.resize(cut);
-    return TrimLyricsText(artist);
-}
-
-std::wstring NormalizeLyricsMatch(const std::wstring& in) {
-    std::wstring out;
-    bool space = false;
-    for (wchar_t c : in) {
-        if (iswalnum(c)) {
-            if (space && !out.empty()) out.push_back(L' ');
-            space = false;
-            out.push_back(static_cast<wchar_t>(towlower(c)));
-        } else {
-            space = true;
-        }
-    }
-    return out;
-}
-
-// 2 = same, 1 = one contains the other, 0 = unrelated
-int LyricsTextMatch(const std::wstring& a, const std::wstring& b) {
-    const std::wstring na = NormalizeLyricsMatch(a);
-    const std::wstring nb = NormalizeLyricsMatch(b);
-    if (na.empty() || nb.empty()) return 0;
-    if (na == nb) return 2;
-    if (na.find(nb) != std::wstring::npos || nb.find(na) != std::wstring::npos) return 1;
-    return 0;
-}
+// Title cleaning, the "Artist - Song" split and matching live in lyrics_text.h
+// (pure, unit-tested). These names are what the rest of this file uses.
+std::wstring CleanLyricsTitle(const std::wstring& title) { return LyricsText::CleanTitle(title); }
+std::wstring PrimaryLyricsArtist(const std::wstring& artist) { return LyricsText::PrimaryArtist(artist); }
+int LyricsTextMatch(const std::wstring& a, const std::wstring& b) { return LyricsText::TextMatch(a, b); }
 
 bool ExtractJsonNumberField(const std::string& json, const char* key, double* out) {
     const std::string k = std::string("\"") + key + "\":";
@@ -1062,9 +1045,94 @@ bool ExtractJsonNumberField(const std::string& json, const char* key, double* ou
     return true;
 }
 
+// End (one past) of the JSON value starting at `v`: a string, an object or array
+// (nesting and strings respected), or a bare number / true / false / null.
+size_t JsonValueEnd(const std::string& s, size_t v) {
+    if (v >= s.size()) return std::string::npos;
+    if (s[v] == '"') {
+        bool esc = false;
+        for (size_t i = v + 1; i < s.size(); ++i) {
+            if (esc) esc = false;
+            else if (s[i] == '\\') esc = true;
+            else if (s[i] == '"') return i + 1;
+        }
+        return std::string::npos;
+    }
+    if (s[v] == '{' || s[v] == '[') {
+        int depth = 0;
+        bool inString = false, esc = false;
+        for (size_t i = v; i < s.size(); ++i) {
+            const char c = s[i];
+            if (inString) {
+                if (esc) esc = false;
+                else if (c == '\\') esc = true;
+                else if (c == '"') inString = false;
+                continue;
+            }
+            if (c == '"') inString = true;
+            else if (c == '{' || c == '[') ++depth;
+            else if (c == '}' || c == ']') {
+                if (--depth == 0) return i + 1;
+            }
+        }
+        return std::string::npos;
+    }
+    size_t i = v;
+    while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != ']' && s[i] != ' ' &&
+           s[i] != '\r' && s[i] != '\n' && s[i] != '\t') {
+        ++i;
+    }
+    return i;
+}
+
+// Raw text of `key`'s value in the JSON object `obj`, looking only at the
+// object's own members. NetEase nests objects that reuse "id" and "name"
+// (album, privilege) ahead of the song's own, so a plain find() picks the wrong one.
+bool JsonMemberRaw(const std::string& obj, const char* key, std::string* raw) {
+    const size_t keyLen = strlen(key);
+    size_t i = obj.find('{');
+    if (i == std::string::npos) return false;
+    int depth = 0;
+    for (; i < obj.size(); ++i) {
+        const char c = obj[i];
+        if (c == '"') {
+            const size_t end = JsonValueEnd(obj, i);  // one past the closing quote
+            if (end == std::string::npos) return false;
+            if (depth == 1) {
+                size_t k = end;
+                while (k < obj.size() && (obj[k] == ' ' || obj[k] == '\r' || obj[k] == '\n' || obj[k] == '\t')) ++k;
+                if (k < obj.size() && obj[k] == ':' && end - i - 2 == keyLen &&
+                    obj.compare(i + 1, keyLen, key) == 0) {
+                    size_t v = k + 1;
+                    while (v < obj.size() && (obj[v] == ' ' || obj[v] == '\r' || obj[v] == '\n' || obj[v] == '\t')) ++v;
+                    const size_t vEnd = JsonValueEnd(obj, v);
+                    if (vEnd == std::string::npos || vEnd <= v) return false;
+                    *raw = obj.substr(v, vEnd - v);
+                    return true;
+                }
+            }
+            i = end - 1;
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            ++depth;
+        } else if (c == '}' || c == ']') {
+            if (--depth <= 0) return false;
+        }
+    }
+    return false;
+}
+
+// A raw JSON string value ("...") decoded to text; empty for anything else.
+std::wstring JsonRawString(const std::string& raw) {
+    if (raw.size() < 2 || raw.front() != '"' || raw.back() != '"') return std::wstring();
+    return JsonStringUnescape(raw.substr(1, raw.size() - 2));
+}
+
 struct LyricsPick {
     bool found = false;
     bool synced = false;
+    bool instrumental = false;  // a source matched the track and said it has no vocals
     int score = -1;
     std::vector<LyricsLine> lines;
 };
@@ -1085,9 +1153,29 @@ void ConsiderLyricsBody(const std::string& body, const std::wstring& wantTitle,
     }
 
     for (const std::string& c : candidates) {
-        if (c.find("\"instrumental\":true") != std::string::npos) continue;
+        std::string nameRaw, artistRaw;
+        ExtractJsonStringField(c, "trackName", &nameRaw);
+        ExtractJsonStringField(c, "artistName", &artistRaw);
+        const std::wstring candTitle = JsonStringUnescape(nameRaw);
+        const std::wstring candArtist = JsonStringUnescape(artistRaw);
 
-        std::string syncedRaw, plainRaw, nameRaw, artistRaw;
+        int durDiff = -1;
+        double candDur = 0.0;
+        if (wantDurationSec > 0 && ExtractJsonNumberField(c, "duration", &candDur) && candDur > 0.0) {
+            durDiff = std::abs(static_cast<int>(candDur + 0.5) - wantDurationSec);
+        }
+
+        // An instrumental entry only counts when it is clearly this recording.
+        if (c.find("\"instrumental\":true") != std::string::npos) {
+            const bool sameTrack = trusted ||
+                (LyricsTextMatch(candTitle, wantTitle) == 2 &&
+                 (wantArtist.empty() || LyricsTextMatch(candArtist, wantArtist) > 0) &&
+                 durDiff >= 0 && durDiff <= 3);
+            if (sameTrack) best->instrumental = true;
+            continue;
+        }
+
+        std::string syncedRaw, plainRaw;
         const bool hasSynced = ExtractJsonStringField(c, "syncedLyrics", &syncedRaw) && !syncedRaw.empty();
         const bool hasPlain = ExtractJsonStringField(c, "plainLyrics", &plainRaw) && !plainRaw.empty();
         if (!hasSynced && !hasPlain) continue;
@@ -1102,17 +1190,6 @@ void ConsiderLyricsBody(const std::string& body, const std::wstring& wantTitle,
             lines = ParsePlainLyrics(JsonStringUnescape(plainRaw));
         }
         if (lines.empty()) continue;
-
-        ExtractJsonStringField(c, "trackName", &nameRaw);
-        ExtractJsonStringField(c, "artistName", &artistRaw);
-        const std::wstring candTitle = JsonStringUnescape(nameRaw);
-        const std::wstring candArtist = JsonStringUnescape(artistRaw);
-
-        int durDiff = -1;
-        double candDur = 0.0;
-        if (wantDurationSec > 0 && ExtractJsonNumberField(c, "duration", &candDur) && candDur > 0.0) {
-            durDiff = std::abs(static_cast<int>(candDur + 0.5) - wantDurationSec);
-        }
 
         int score = 0;
         if (!trusted) {
@@ -1135,30 +1212,31 @@ void ConsiderLyricsBody(const std::string& body, const std::wstring& wantTitle,
     }
 }
 
+// GET with one quick retry on a transport failure.
+HttpResult LyricsRequest(const wchar_t* host, const std::wstring& path) {
+    HttpResult r = HttpGetEx(host, path.c_str(), true, kLyricsUserAgent);
+    if (!r.IsDefinitive()) {
+        if (WaitForSingleObject(g_stopEvent, 400) != WAIT_TIMEOUT) return r;
+        r = HttpGetEx(host, path.c_str(), true, kLyricsUserAgent);
+    }
+    return r;
+}
+
+std::wstring LyricsUrlEncode(const std::wstring& s) { return AsciiToWide(UrlEncodeComponent(s)); }
+
 // Tries exact lookups first, then tolerant searches. Returns true if usable lyrics
 // were found. *definitive becomes false when a request failed (timeout / 429 / 5xx),
 // meaning "no lyrics" can't be trusted and the caller should retry later.
+// `query` is the cleaned title / artist (YouTube "Artist - Song" already split).
 bool FetchLyricsFromLrclib(const std::wstring& title, const std::wstring& artist,
                            const std::wstring& album, int durationSec,
-                           LyricsPick* pick, bool* definitive) {
+                           const LyricsText::Query& query, LyricsPick* pick, bool* definitive) {
     *definitive = true;
 
-    const std::wstring cleanTitle = CleanLyricsTitle(title);
-    const std::wstring mainArtist = PrimaryLyricsArtist(artist);
-    const std::wstring searchTitle = cleanTitle.empty() ? title : cleanTitle;
-    const std::wstring searchArtist = mainArtist.empty() ? artist : mainArtist;
+    const std::wstring searchTitle = query.title.empty() ? title : query.title;
+    const std::wstring searchArtist = query.artist.empty() ? artist : query.artist;
+    auto enc = &LyricsUrlEncode;
 
-    auto enc = [](const std::wstring& s) { return AsciiToWide(UrlEncodeComponent(s)); };
-
-    // One quick retry on a transport failure before giving up on this request.
-    auto request = [&](const std::wstring& path) -> HttpResult {
-        HttpResult r = HttpGetEx(L"lrclib.net", path.c_str(), true, kLyricsUserAgent);
-        if (!r.IsDefinitive()) {
-            if (WaitForSingleObject(g_stopEvent, 400) != WAIT_TIMEOUT) return r;
-            r = HttpGetEx(L"lrclib.net", path.c_str(), true, kLyricsUserAgent);
-        }
-        return r;
-    };
     auto handle = [&](const HttpResult& r, bool trusted) -> bool {
         if (!r.IsDefinitive()) {
             *definitive = false;
@@ -1169,36 +1247,186 @@ bool FetchLyricsFromLrclib(const std::wstring& title, const std::wstring& artist
         }
         return true;
     };
-    auto haveSynced = [&]() { return pick->found && pick->synced; };
+    // Stop once there are synced lyrics, or the exact lookup said "instrumental".
+    auto done = [&]() { return (pick->found && pick->synced) || (!pick->found && pick->instrumental); };
 
     // 1) exact lookup with the metadata exactly as reported
     {
         std::wstring path = L"/api/get?track_name=" + enc(title) + L"&artist_name=" + enc(artist);
         if (!album.empty()) path += L"&album_name=" + enc(album);
         if (durationSec > 0) path += L"&duration=" + std::to_wstring(durationSec);
-        if (!handle(request(path), true)) return pick->found;
+        if (!handle(LyricsRequest(L"lrclib.net", path), true)) return pick->found;
     }
 
     // 2) exact lookup with a cleaned title and the main artist only
-    if (!haveSynced() && (searchTitle != title || searchArtist != artist)) {
+    if (!done() && (searchTitle != title || searchArtist != artist)) {
         std::wstring path = L"/api/get?track_name=" + enc(searchTitle) + L"&artist_name=" + enc(searchArtist);
         if (durationSec > 0) path += L"&duration=" + std::to_wstring(durationSec);
-        if (!handle(request(path), true)) return pick->found;
+        if (!handle(LyricsRequest(L"lrclib.net", path), true)) return pick->found;
     }
 
     // 3) tolerant free-text search, results scored and filtered
-    if (!haveSynced()) {
+    if (!done()) {
         const std::wstring path = L"/api/search?q=" + enc(searchTitle + L" " + searchArtist);
-        if (!handle(request(path), false)) return pick->found;
+        if (!handle(LyricsRequest(L"lrclib.net", path), false)) return pick->found;
     }
 
     // 4) title-only search (artist spelled differently, or wrong artist in metadata)
-    if (!haveSynced()) {
+    if (!done()) {
         const std::wstring path = L"/api/search?track_name=" + enc(searchTitle);
-        if (!handle(request(path), false)) return pick->found;
+        if (!handle(LyricsRequest(L"lrclib.net", path), false)) return pick->found;
     }
 
     return pick->found;
+}
+
+// ── NetEase fallback (music.163.com) ─────────────────────────────────────────
+// Only asked when LRCLIB has no synced lyrics and Modules.LyricsNetEase is on.
+// Strict on purpose: the song name must match after cleaning, one of the
+// artists must match, and the length must be within 3 s, because a wrong
+// match shows confidently wrong lyrics.
+constexpr int kNetEaseDurationToleranceSec = 3;
+constexpr int64_t kNetEaseCreditWindowMs = 40000;  // credit lines sit at the very top
+
+// NetEase answers HTTP 200 even when it refuses ("code":-460 when it thinks it
+// is being scraped), so the JSON code decides whether the answer is real.
+bool NetEaseAnswered(const HttpResult& r) {
+    if (!r.ok || r.status != 200 || r.body.empty()) return false;
+    std::string code;
+    return JsonMemberRaw(r.body, "code", &code) && strtol(code.c_str(), nullptr, 10) == 200;
+}
+
+bool FetchLyricsFromNetEase(const LyricsText::Query& query, int durationSec, LyricsPick* pick,
+                            bool* definitive) {
+    *definitive = true;
+    if (query.title.empty()) return false;
+    const wchar_t* kHost = L"music.163.com";
+
+    // 1) search
+    std::string songId;
+    {
+        std::wstring q = query.title;
+        if (!query.artist.empty()) q += L" " + query.artist;
+        const HttpResult r =
+            LyricsRequest(kHost, L"/api/cloudsearch/pc?s=" + LyricsUrlEncode(q) + L"&type=1&limit=5");
+        if (!NetEaseAnswered(r)) {
+            *definitive = false;
+            return false;
+        }
+        std::string result, songs;
+        if (!JsonMemberRaw(r.body, "result", &result) || !JsonMemberRaw(result, "songs", &songs)) {
+            return false;  // answered, nothing found
+        }
+
+        int bestDelta = 1 << 30;
+        for (const std::string& song : SplitJsonObjectArray(songs)) {
+            std::string idRaw, nameRaw, dtRaw, arRaw;
+            if (!JsonMemberRaw(song, "id", &idRaw) || !JsonMemberRaw(song, "name", &nameRaw)) continue;
+            if (idRaw.empty() || idRaw[0] < '0' || idRaw[0] > '9') continue;
+
+            const std::wstring name = JsonRawString(nameRaw);
+            std::wstring cleanName = LyricsText::CleanTitle(name);
+            if (cleanName.empty()) cleanName = name;
+            if (LyricsText::TextMatch(cleanName, query.title) != 2) continue;
+
+            int artistMatch = query.artist.empty() ? 1 : 0;
+            if (JsonMemberRaw(song, "ar", &arRaw)) {
+                for (const std::string& a : SplitJsonObjectArray(arRaw)) {
+                    std::string arName;
+                    if (!JsonMemberRaw(a, "name", &arName)) continue;
+                    artistMatch = std::max(artistMatch, LyricsText::TextMatch(JsonRawString(arName), query.artist));
+                }
+            }
+            if (artistMatch == 0) continue;
+
+            int delta = 0;
+            const double dtMs = JsonMemberRaw(song, "dt", &dtRaw) ? strtod(dtRaw.c_str(), nullptr) : 0.0;
+            if (durationSec > 0) {
+                if (dtMs <= 0.0) continue;
+                delta = std::abs(static_cast<int>(dtMs / 1000.0 + 0.5) - durationSec);
+                if (delta > kNetEaseDurationToleranceSec) continue;
+            } else if (artistMatch < 2) {
+                continue;  // no length to check against: only an exact artist will do
+            }
+            if (delta < bestDelta) {
+                bestDelta = delta;
+                songId = idRaw;
+            }
+        }
+        if (songId.empty()) return false;
+    }
+
+    // 2) lyrics for the chosen song
+    const HttpResult r = LyricsRequest(kHost, L"/api/song/lyric?id=" + AsciiToWide(songId) + L"&lv=1");
+    if (!NetEaseAnswered(r)) {
+        *definitive = false;
+        return false;
+    }
+    std::string pure;
+    if (JsonMemberRaw(r.body, "pureMusic", &pure) && pure == "true") {
+        pick->instrumental = true;
+        return false;
+    }
+    std::string lrc, lyric;
+    if (!JsonMemberRaw(r.body, "lrc", &lrc) || !JsonMemberRaw(lrc, "lyric", &lyric)) return false;
+    const std::wstring text = JsonRawString(lyric);
+    if (text.empty()) return false;
+
+    std::vector<LyricsLine> lines = ParseSyncedLyrics(text);
+    bool synced = !lines.empty();
+    if (!synced) lines = ParsePlainLyrics(text);
+    // Drop "作词 : X" / "Composer: Y" credits at the top; they aren't sung.
+    lines.erase(std::remove_if(lines.begin(), lines.end(),
+                               [&](const LyricsLine& l) {
+                                   return (!synced || l.timeMs < kNetEaseCreditWindowMs) &&
+                                          LyricsText::IsCreditLine(l.text);
+                               }),
+                lines.end());
+
+    size_t sung = 0, pureMusic = 0;
+    for (const LyricsLine& l : lines) {
+        if (LyricsText::Trim(l.text).empty()) continue;
+        ++sung;
+        if (LyricsText::IsPureMusicText(l.text)) ++pureMusic;
+    }
+    if (sung == 0) return false;
+    if (pureMusic == sung) {  // "纯音乐，请欣赏": pure music, no lyrics
+        pick->instrumental = true;
+        return false;
+    }
+
+    pick->found = true;
+    pick->synced = synced;
+    pick->score = 0;
+    pick->lines = std::move(lines);
+    return true;
+}
+
+// ── Instrumental gaps ────────────────────────────────────────────────────────
+// A line stays on screen until the next one starts, which in a long solo means
+// the last sung line lingers for half a minute. When the next line is far away,
+// the current one fades to the note glyph a few seconds in; after the last line,
+// a little sooner. Returns 0 (show the line) .. 1 (show the note).
+constexpr int64_t kLyricsGapMinMs = 14000;       // only gaps longer than this
+constexpr int64_t kLyricsGapHoldMs = 9000;       // line stays this long first
+constexpr int64_t kLyricsLastLineHoldMs = 8000;  // after the final line
+constexpr float kLyricsGapFadeMs = 600.0f;
+
+int64_t LyricsGapHoldMs(const LyricsLines& lines, int idx) {
+    if (idx < 0 || idx >= static_cast<int>(lines.size())) return -1;
+    if (lines[idx].text.empty()) return -1;  // already the note glyph
+    if (idx + 1 < static_cast<int>(lines.size())) {
+        return (lines[idx + 1].timeMs - lines[idx].timeMs > kLyricsGapMinMs) ? kLyricsGapHoldMs : -1;
+    }
+    return kLyricsLastLineHoldMs;
+}
+
+float LyricsGapNoteMix(const LyricsLines& lines, int idx, int64_t posMs) {
+    const int64_t hold = LyricsGapHoldMs(lines, idx);
+    if (hold < 0) return 0.0f;
+    const float past = static_cast<float>(posMs - lines[idx].timeMs - hold);
+    if (past <= 0.0f) return 0.0f;
+    return std::min(1.0f, past / kLyricsGapFadeMs);
 }
 
 DWORD WINAPI LyricsThreadProc(void*) {
@@ -1212,6 +1440,7 @@ DWORD WINAPI LyricsThreadProc(void*) {
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         bool lyricsEnabled = true;
         bool diskCacheOn = false;
+        bool netEaseOn = false;
         uint64_t diskCapBytes = 0;
         {
             std::lock_guard lock(g_settingsMutex);
@@ -1219,14 +1448,17 @@ DWORD WINAPI LyricsThreadProc(void*) {
                              g_settings.mediaTabLyrics) && g_settings.media;
             diskCacheOn = g_settings.lyricsCache && g_settings.lyricsCacheMaxMB > 0;
             diskCapBytes = static_cast<uint64_t>(std::max(0, g_settings.lyricsCacheMaxMB)) * 1024ull * 1024ull;
+            netEaseOn = g_settings.lyricsNetEase;
         }
+        LyricsCache::g_currentSources =
+            LyricsCache::kSourceLrclib | (netEaseOn ? LyricsCache::kSourceNetEase : 0);
         LyricsCache::IterationGuard cacheGuard(diskCacheOn, diskCapBytes);
-        const bool lyricsViewVisible =
-            (NowSeconds() - g_lastLyricsViewTime.load(std::memory_order_relaxed)) < 3.0;
-        if (!lyricsEnabled || !lyricsViewVisible) {
+        if (!lyricsEnabled) {
             WaitForSingleObject(g_stopEvent, 1000);
             continue;
         }
+        const bool lyricsViewVisible =
+            (NowSeconds() - g_lastLyricsViewTime.load(std::memory_order_relaxed)) < 3.0;
 
         bool available = false;
         std::wstring title, artist, album;
@@ -1256,12 +1488,15 @@ DWORD WINAPI LyricsThreadProc(void*) {
 
         const bool sameTrack = (title == lastTitle && artist == lastArtist);
         if (sameTrack) {
-            // Already handled. Only continue if a failed fetch is due for a retry.
-            if (retryAtSec <= 0.0 || NowSeconds() < retryAtSec) {
+            // Already handled. Only continue if a failed fetch is due for a retry,
+            // and only while a lyrics view is on screen.
+            if (!lyricsViewVisible || retryAtSec <= 0.0 || NowSeconds() < retryAtSec) {
                 WaitForSingleObject(g_stopEvent, 1000);
                 continue;
             }
         } else {
+            // A new track is fetched right away, whether or not a lyrics view is
+            // open, so opening one shows lyrics at once. The cache absorbs repeats.
             failCount = 0;
             // Title / artist / duration don't always update together. Let them settle.
             if (WaitForSingleObject(g_stopEvent, 1500) != WAIT_TIMEOUT) break;
@@ -1294,11 +1529,28 @@ DWORD WINAPI LyricsThreadProc(void*) {
         }
 
         const int durationSec = endTicks > 0 ? static_cast<int>(endTicks / 10000000.0 + 0.5) : 0;
-        Wh_Log(L"Lyrics: requesting %s - %s (attempt %d)", artist.c_str(), title.c_str(), failCount + 1);
+        const LyricsText::Query query = LyricsText::PrepareQuery(title, artist);
+        Wh_Log(L"Lyrics: requesting %s - %s as %s - %s (attempt %d)", artist.c_str(), title.c_str(),
+               query.artist.c_str(), query.title.c_str(), failCount + 1);
 
         LyricsPick pick;
         bool definitive = true;
-        FetchLyricsFromLrclib(title, artist, album, durationSec, &pick, &definitive);
+        int sources = LyricsCache::kSourceLrclib;
+        FetchLyricsFromLrclib(title, artist, album, durationSec, query, &pick, &definitive);
+
+        if (netEaseOn && !(pick.found && pick.synced) && !(pick.instrumental && !pick.found)) {
+            LyricsPick ne;
+            bool neDefinitive = true;
+            FetchLyricsFromNetEase(query, durationSec, &ne, &neDefinitive);
+            if (ne.found && (ne.synced || !pick.found)) {
+                Wh_Log(L"Lyrics: NetEase had them for %s - %s", artist.c_str(), title.c_str());
+                pick = std::move(ne);
+            } else if (!pick.found && ne.instrumental) {
+                pick.instrumental = true;
+            }
+            if (neDefinitive) sources |= LyricsCache::kSourceNetEase;
+            definitive = definitive && neDefinitive;
+        }
 
         LyricsSnapshot snap;
         snap.matchedTitle = title;
@@ -1309,13 +1561,24 @@ DWORD WINAPI LyricsThreadProc(void*) {
             snap.synced = pick.synced;
             snap.lines = LyricsLines(std::move(pick.lines));
             failCount = 0;
-            LyricsCache::Store(cacheKeys, LyricsCache::Status::Found, snap, diskCacheOn);
-        } else if (definitive) {
-            snap.notFound = true;   // LRCLIB really has nothing for this track
+            // Plain lyrics while a source was unreachable: show them, but don't
+            // remember them, so a later play can still find synced ones.
+            if (pick.synced || definitive) {
+                LyricsCache::Store(cacheKeys, LyricsCache::Status::Found, snap, diskCacheOn, sources);
+            }
+        } else if (pick.instrumental) {
+            snap.notFound = true;
+            snap.instrumental = true;
             failCount = 0;
+            LyricsCache::Store(cacheKeys, LyricsCache::Status::Instrumental, snap, diskCacheOn, sources);
+            Wh_Log(L"Lyrics: instrumental: %s - %s", artist.c_str(), title.c_str());
+        } else if (definitive) {
+            snap.notFound = true;   // every source answered and none had this track
+            failCount = 0;
+            LyricsCache::Store(cacheKeys, LyricsCache::Status::NotFound, snap, diskCacheOn, sources);
             Wh_Log(L"Lyrics: genuinely no lyrics for %s - %s", artist.c_str(), title.c_str());
         } else {
-            // Network / 429 / 5xx: NOT "not found". Back off and retry.
+            // Network / 429 / 5xx: NOT "not found". Back off and retry; never cached.
             ++failCount;
             static const double kBackoff[] = {4.0, 10.0, 30.0, 60.0};
             retryAtSec = NowSeconds() + kBackoff[std::min<size_t>(failCount - 1, 3)];

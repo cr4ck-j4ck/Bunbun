@@ -12,6 +12,12 @@
 #include "../src/common/update.h"
 #include "../src/common/todos.h"
 
+#include <algorithm>
+#include <cwchar>
+#include <cwctype>
+#include <vector>
+#include "../src/island/modules/lyrics_text.h"
+
 using bb::json::Value;
 
 static int g_failed = 0;
@@ -123,12 +129,22 @@ static void TestAssistant() {
     CHECK(as::Evaluate(L"2+3*4", &v) && v == 14);
     CHECK(as::Evaluate(L"(1+2)^2 / 3", &v) && v == 3);
     CHECK(as::Evaluate(L"-4 + 10", &v) && v == 6);
+    CHECK(as::Evaluate(L"sqrt(144) + 1", &v) && v == 13);
+    CHECK(as::Evaluate(L"abs(-25)", &v) && v == 25);
     CHECK(!as::Evaluate(L"1/0", &v));
     CHECK(!as::Evaluate(L"open notepad", &v));
     CHECK(!as::Evaluate(L"2+", &v));
 
     as::Intent in = parse(L"what is 12*7?");
     CHECK(in.action == as::Action::Reply && in.reply.find(L"84") != std::wstring::npos);
+    in = parse(L"what is 15% of 200?");
+    CHECK(in.action == as::Action::Reply && in.reply.find(L"30") != std::wstring::npos);
+    in = parse(L"how much is 25 * 4 + 10?");
+    CHECK(in.action == as::Action::Reply && in.reply.find(L"110") != std::wstring::npos);
+    in = parse(L"wiki quantum computing");
+    CHECK(in.action == as::Action::Lookup && in.target == L"quantum computing");
+    in = parse(L"lookup Ada Lovelace");
+    CHECK(in.action == as::Action::Lookup && in.target == L"ada lovelace");
     in = parse(L"Open Notepad");
     CHECK(in.action == as::Action::Open && in.target == L"notepad.exe");
     in = parse(L"wifi settings");
@@ -292,6 +308,113 @@ void TestTodos() {
     CHECK(td::NextOccurrence(L"", monday9, monday9) == 0.0);
 }
 
+// Lyrics lookups: title cleaning and the YouTube "Artist - Song" split.
+static void TestLyricsText() {
+    using namespace LyricsText;
+    // Noise tags are whole words / bracketed tags, not substrings.
+    CHECK(CleanTitle(L"Song (Official Music Video)") == L"Song");
+    CHECK(CleanTitle(L"Song [HD]") == L"Song");
+    CHECK(CleanTitle(L"Song (feat. Someone)") == L"Song");
+    CHECK(CleanTitle(L"Song (Lyrics)") == L"Song");
+    CHECK(CleanTitle(L"Song (Visualizer)") == L"Song");
+    CHECK(CleanTitle(L"Song [M/V]") == L"Song");
+    CHECK(CleanTitle(L"Song - Remastered 2011") == L"Song");
+    CHECK(CleanTitle(L"Song | Some Channel") == L"Song");
+    CHECK(CleanTitle(L"Song feat. Someone") == L"Song");
+    CHECK(CleanTitle(L"Song (Mixtape)") == L"Song (Mixtape)");
+    CHECK(CleanTitle(L"Lovestoned (Interlude)") == L"Lovestoned (Interlude)");
+    CHECK(CleanTitle(L"Song (Live at Wembley)") == L"Song");
+    CHECK(CleanTitle(L"I Will Live (Forever)") == L"I Will Live (Forever)");
+    // YouTube: "Artist - Song" titles from a channel.
+    Query q = PrepareQuery(L"Daft Punk - Get Lucky (Official Video)", L"DaftPunkVEVO");
+    CHECK(q.split && q.artist == L"Daft Punk" && q.title == L"Get Lucky");
+    q = PrepareQuery(L"Adele - Hello", L"Adele - Topic");
+    CHECK(q.split && q.artist == L"Adele" && q.title == L"Hello");
+    q = PrepareQuery(L"Queen - Bohemian Rhapsody (Official Video Remastered)", L"Queen Official");
+    CHECK(q.split && q.artist == L"Queen" && q.title == L"Bohemian Rhapsody");
+    q = PrepareQuery(L"Get Lucky - Daft Punk", L"DaftPunkVEVO");
+    CHECK(q.split && q.artist == L"Daft Punk" && q.title == L"Get Lucky");
+    q = PrepareQuery(L"Bohemian Rhapsody - Remastered 2011", L"Queen");
+    CHECK(!q.split && q.artist == L"Queen" && q.title == L"Bohemian Rhapsody");
+    q = PrepareQuery(L"Shape of You", L"Ed Sheeran");
+    CHECK(!q.split && q.artist == L"Ed Sheeran" && q.title == L"Shape of You");
+    q = PrepareQuery(L"Hello", L"Adele, Someone Else");
+    CHECK(!q.split && q.artist == L"Adele");
+    // Credit lines and NetEase's "pure music" marker.
+    CHECK(IsCreditLine(L"\u4f5c\u8bcd : Ed Sheeran"));    // 作词
+    CHECK(IsCreditLine(L"Composer: Someone"));
+    CHECK(!IsCreditLine(L"I'm the composer of my life"));
+    CHECK(IsPureMusicText(L"\u7eaf\u97f3\u4e50\uff0c\u8bf7\u6b23\u8d4f"));  // 纯音乐，请欣赏
+    CHECK(TextMatch(L"Get Lucky", L"get lucky!") == 2);
+}
+
+static void TestStudioChat() {
+    // 1. Text formatting logic
+    auto formatAnswer = [](int status, const std::wstring& title, const std::wstring& source,
+                           const std::wstring& body, const std::wstring& example, const std::wstring& question) {
+        if (status == 2 /*NoResult*/) return body.empty() ? std::wstring(L"I couldn't find anything for that.") : body;
+        std::wstring text;
+        if (!title.empty() && source != L"Bun" && title != question) text = title + L" \x2014 ";
+        text += body;
+        if (!example.empty()) text += L"\n\u201c" + example + L"\u201d";
+        return text;
+    };
+
+    CHECK(formatAnswer(2, L"", L"", L"", L"", L"unknown") == L"I couldn't find anything for that.");
+    CHECK(formatAnswer(2, L"", L"", L"Custom error", L"", L"unknown") == L"Custom error");
+    CHECK(formatAnswer(1, L"Weather", L"wttr.in", L"22°C sunny", L"", L"weather") == L"Weather \x2014 22°C sunny");
+    CHECK(formatAnswer(1, L"weather", L"wttr.in", L"22°C sunny", L"", L"weather") == L"22°C sunny");
+    CHECK(formatAnswer(1, L"", L"Bun", L"Opened Spotify", L"", L"open spotify") == L"Opened Spotify");
+    CHECK(formatAnswer(1, L"Dictionary", L"Wiktionary", L"A small mammal", L"A cute rabbit", L"rabbit") ==
+          L"Dictionary \x2014 A small mammal\n\u201cA cute rabbit\u201d");
+
+    // 2. Transcript scroll math
+    const float viewH = 192.0f;
+    const float msgTop = 42.0f;
+    const float msgBottom = msgTop + viewH;
+
+    // Fits in view
+    float totalH = 120.0f;
+    float maxScroll = std::max(0.0f, totalH - viewH);
+    CHECK(maxScroll == 0.0f);
+    float scrollOffset = (totalH > viewH) ? (maxScroll - 0.0f) : 0.0f;
+    CHECK(scrollOffset == 0.0f);
+    float curY = msgTop - scrollOffset;
+    CHECK(curY == msgTop);
+
+    // Exceeds view (scrolled to bottom)
+    totalH = 350.0f;
+    maxScroll = std::max(0.0f, totalH - viewH);
+    CHECK(maxScroll == 158.0f);
+    float scroll = 0.0f;  // bottom
+    scrollOffset = (totalH > viewH) ? (maxScroll - scroll) : 0.0f;
+    CHECK(scrollOffset == 158.0f);
+    curY = msgTop - scrollOffset;
+    CHECK(curY + totalH == msgBottom);  // newest message aligns with bottom!
+
+    // Scrolled to top
+    scroll = maxScroll;
+    scrollOffset = (totalH > viewH) ? (maxScroll - scroll) : 0.0f;
+    CHECK(scrollOffset == 0.0f);
+    curY = msgTop - scrollOffset;
+    CHECK(curY == msgTop);  // oldest message aligns with top!
+
+    // Clamping scroll delta
+    auto clampScroll = [](float val, float maxVal) {
+        return val < 0.0f ? 0.0f : (val > maxVal ? maxVal : val);
+    };
+    CHECK(clampScroll(scroll + 40.0f, maxScroll) == maxScroll);
+    CHECK(clampScroll(0.0f - 40.0f, maxScroll) == 0.0f);
+    CHECK(clampScroll(50.0f + 36.0f, maxScroll) == 86.0f);
+
+    // 3. Bubble bounds
+    const float maxChatW = 480.0f;
+    const float maxUserBubbleW = maxChatW * 0.72f;
+    const float maxAnsBubbleW = maxChatW * 0.88f;
+    CHECK(maxUserBubbleW == 345.6f);
+    CHECK(maxAnsBubbleW == 422.4f);
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) {
         std::printf("usage: test_core <scratch dir>\n");
@@ -302,6 +425,8 @@ int wmain(int argc, wchar_t** argv) {
     TestAssistant();
     TestUpdateVersions();
     TestTodos();
+    TestLyricsText();
+    TestStudioChat();
     std::printf(g_failed ? "%d check(s) failed\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;
 }

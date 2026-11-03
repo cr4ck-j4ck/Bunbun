@@ -123,6 +123,7 @@ export function Animations() {
         <Setting k="Behavior.ExpandOnHover" />
         <Setting k="Behavior.AutoHideIdleSeconds" />
         <Setting k="Behavior.AutoHideFullscreen" />
+        {s.bool("Behavior.AutoHideFullscreen") && <Setting k="Behavior.FullscreenTuck" />}
         <Setting k="Behavior.UnhideOnHover" />
         <Setting k="Behavior.AlwaysOnTop" />
       </Section>

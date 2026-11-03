@@ -106,6 +106,7 @@ void OnUpdateNews(UpdateNews* news, bool manual) {
         if (manual || Wh_GetIntValue(L"UpdateNotified", 0) != packed) {
             Wh_SetIntValue(L"UpdateNotified", packed);
             g_balloonIsUpdate = true;
+            IslandAnnounceUpdate(g_updateVersion.c_str(), g_updateUrl.c_str());  // on the island too
             Balloon((L"Bunbun " + g_updateVersion + L" is available").c_str(),
                     (L"You have " + std::wstring(WH_MOD_VERSION) + L". Click to open the download page.").c_str());
         }

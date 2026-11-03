@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     int threads = std::clamp(static_cast<int>(si.dwNumberOfProcessors) / 2, 1, 8);  // physical cores, roughly
-    int nctx = 4096;
+    int nctx = 2048;
     for (int i = 1; i + 1 < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--model") model = argv[++i];
@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: bunbun-brain --model <file.gguf> [--threads N] [--ctx N]\n");
         return 2;
     }
-    SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);  // never slow the desktop down
+    // Run with normal priority for interactive desktop responsiveness
     llama_log_set(QuietLog, nullptr);
     llama_backend_init();
     Brain b;

@@ -53,6 +53,7 @@ export function Overview({ go }: { go: (page: string) => void }) {
               </button>
             )}
             <button className="btn" onClick={() => go("mascot")}>Customize Bun</button>
+            <button className="btn" onClick={() => go("pages")}>Choose pages</button>
             <button className="btn" onClick={() => go("appearance")}>Island style</button>
           </div>
         </div>

@@ -17,6 +17,8 @@ using namespace bb::mascot;
 
 int wmain(int argc, wchar_t** argv) {
     const bool venom = argc > 2 && wcscmp(argv[2], L"--venom") == 0;  // Spidey's row in his Venom suit
+    // --celebrate: every character's Happy mood at twelve moments through the celebration.
+    const bool celebrate = argc > 2 && wcscmp(argv[2], L"--celebrate") == 0;
     // --pack <name>: a skin pack instead: every mood at four moments, then idle looking around.
     const std::wstring pack = argc > 3 && wcscmp(argv[2], L"--pack") == 0 ? argv[3] : L"";
     // --pack <name> <cell>: draw it that many pixels per cell (default 120), to check small sizes.
@@ -62,6 +64,12 @@ int wmain(int argc, wchar_t** argv) {
                 continue;
             }
             st.character = chars[r];
+            if (celebrate) {
+                const double since = 0.05 + c * 0.2;  // 0.05 s to 2.25 s
+                DrawStyled(rt.Get(), st, D2D1::Point2F(c * cell + cell * 0.5f, r * cell + cell * 0.45f), cell * 0.8f, Mood::Happy,
+                           10.0 + since, 10.0, D2D1::Point2F(0, 0));
+                continue;
+            }
             if (venom && st.character == Character::Spiderman) { st.hasColor = true; st.color = D2D1::ColorF(0x17161C); }
             const float x = c * cell + cell * 0.5f, y = r * cell + cell * 0.45f;
             // t = 0.3 s into the mood: mid-hop for Happy, mid-nod for Music.

@@ -496,9 +496,9 @@ std::wstring MeetingCountdown(double startsAt, double epochNow) {
     return buf;
 }
 
-// The calendar tab sits right after the primary (media / clock) tab.
+// Where the calendar tab sits; the page order is user-set (Bunbun.PageOrder).
 int CalendarTabIndex(const Settings& settings) {
-    return 1 + MediaTabIndex(settings);
+    return DashboardPageIndex(StudioPage::Calendar, settings);
 }
 
 // The "Up next" panel's Join button on the calendar tab, in content pixels. The

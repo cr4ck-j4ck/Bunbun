@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <ctime>
 #include <deque>
 #include <functional>
 #include <map>
@@ -202,7 +203,31 @@ struct Session {
     int added = -1, removed = -1;
     double updatedAt = 0;
     double phaseSince = 0;
+    // Studio agent page.
+    double turnStart = 0, turnSeconds = 0;
+    int stage = -1;
+    std::wstring prompt, command;
+    std::vector<std::wstring> output;
+    bool commandFailed = false;
+    std::wstring diffOld, diffNew;  // the last edit's snippets
 };
+
+// Read / edit / run-or-test, for the page's four-step progress. -1 = doesn't move it.
+int StageFor(const std::string& tool) {
+    static const std::map<std::string, int> kStages = {
+        {"Read", 0}, {"Glob", 0}, {"Grep", 0}, {"WebFetch", 0}, {"WebSearch", 0},
+        {"view_file", 0}, {"grep_search", 0}, {"list_dir", 0}, {"read_url_content", 0}, {"search_web", 0},
+        {"Edit", 1}, {"MultiEdit", 1}, {"Write", 1}, {"NotebookEdit", 1},
+        {"replace_file_content", 1}, {"multi_replace_file_content", 1}, {"write_to_file", 1},
+        {"Bash", 2}, {"PowerShell", 2}, {"run_command", 2},
+    };
+    auto it = kStages.find(tool);
+    return it != kStages.end() ? it->second : -1;
+}
+
+bool IsShellTool(const std::string& tool) {
+    return tool == "Bash" || tool == "PowerShell" || tool == "run_command";
+}
 
 struct Pending {
     uint64_t id = 0;
@@ -212,11 +237,26 @@ struct Pending {
     bool question = false;
     std::string questionText;              // AskUserQuestion: the question, verbatim
     std::vector<std::string> optionLabels; // and its option labels, verbatim
+    std::wstring plan;                     // ExitPlanMode: the plan to approve
+    std::vector<AgentView::Question> questions;  // AskUserQuestion: every question
     // Resolution, written under g_mutex.
     bool resolved = false;
     AgentDecision decision = AgentDecision::Terminal;
     int answerIndex = -1;
+    std::string rawReply;                  // DecideRaw: the hook's reply line, as is
 };
+
+// A finished Claude Code session listening for your next message (bunbun-hook
+// --reply, an asyncRewake Stop hook). It waits up to kReplyWait; typing in the
+// terminal, a new prompt or the session ending withdraws it.
+struct ReplyWaiter {
+    uint64_t id = 0;
+    std::string sessionKey;
+    bool done = false;
+    std::wstring text;
+};
+std::vector<std::shared_ptr<ReplyWaiter>> g_replyWaiters;  // guarded by g_mutex
+constexpr auto kReplyWait = std::chrono::minutes(30);
 
 std::mutex g_mutex;
 std::condition_variable g_decided;
@@ -225,6 +265,62 @@ std::deque<std::shared_ptr<Pending>> g_pending;  // FIFO, front is on screen
 std::atomic<uint64_t> g_nextId{1};
 uint64_t g_generation = 0;
 uint64_t g_lastPublishedKey = 0;
+
+// Finished turns (newest first), today's count and the statusLine usage. Global,
+// not per session: the island shows them even when nothing is running.
+std::deque<AgentView::HistoryItem> g_history;
+int g_jobsToday = 0;
+int g_jobsDay = -1;  // day of year g_jobsToday counts
+float g_usage5h = -1, g_usage7d = -1, g_contextPct = -1;
+long long g_usage5hResets = 0;
+double g_usageAt = 0;
+
+int DayOfYear() {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    return t.wYear * 400 + t.wMonth * 32 + t.wDay;
+}
+
+void FillGlobalsLocked(AgentView* v) {
+    if (g_jobsDay != DayOfYear()) { g_jobsDay = DayOfYear(); g_jobsToday = 0; }
+    v->jobsToday = g_jobsToday;
+    v->history.assign(g_history.begin(), g_history.end());
+    v->usage5h = g_usage5h;
+    v->usage7d = g_usage7d;
+    v->contextPct = g_contextPct;
+    v->usage5hResets = g_usage5hResets;
+    v->usageAt = g_usageAt;
+    // The most recent session still listening for a reply, whatever is on screen.
+    for (auto it = g_replyWaiters.rbegin(); it != g_replyWaiters.rend(); ++it) {
+        if ((*it)->done) continue;
+        v->replyId = (*it)->id;
+        if (auto s = g_sessions.find((*it)->sessionKey); s != g_sessions.end())
+            v->replyTo = s->second.project.empty() ? s->second.agent : s->second.agent + L" · " + s->second.project;
+        break;
+    }
+}
+
+void FillTurnLocked(AgentView* v, const Session& s) {
+    v->turnStart = s.turnStart;
+    v->turnSeconds = s.turnSeconds;
+    v->stage = s.stage;
+    v->prompt = s.prompt;
+    v->command = s.command;
+    v->output = s.output;
+    v->commandFailed = s.commandFailed;
+    if (v->diffOld.empty() && v->diffNew.empty()) {
+        v->diffOld = s.diffOld;
+        v->diffNew = s.diffNew;
+    }
+}
+
+// Percent from a statusLine object field ("used_percentage"), -1 when absent.
+float Percent(const Value* obj, const char* key) {
+    if (!obj) return -1;
+    const Value* v = obj->find(key);
+    if (!v || !v->isNumber()) return -1;
+    return static_cast<float>(std::clamp(v->num, 0.0, 100.0));
+}
 
 std::atomic<bool> g_running{false};
 std::thread g_serverThread;
@@ -238,6 +334,7 @@ bool IsBusy(AgentPhase p) { return p == AgentPhase::Thinking || p == AgentPhase:
 AgentView BuildViewLocked(double now, uint64_t* identity) {
     AgentView v;
     v.generation = ++g_generation;
+    FillGlobalsLocked(&v);
 
     if (!g_pending.empty()) {
         const Pending& p = *g_pending.front();
@@ -251,8 +348,11 @@ AgentView BuildViewLocked(double now, uint64_t* identity) {
         v.requestId = p.id;
         v.queued = static_cast<int>(g_pending.size()) - 1;
         for (const auto& o : p.optionLabels) v.options.push_back(Clip(Wide(o), 28));
+        v.plan = p.plan;
+        v.questions = p.questions;
         auto it = g_sessions.find(p.sessionKey);
         v.phaseSince = it != g_sessions.end() ? it->second.phaseSince : now;
+        if (it != g_sessions.end()) FillTurnLocked(&v, it->second);
         *identity = p.id << 4 | static_cast<uint64_t>(v.phase);
         return v;
     }
@@ -282,6 +382,7 @@ AgentView BuildViewLocked(double now, uint64_t* identity) {
     v.removed = best->removed;
     v.sessions = busy;
     v.phaseSince = best->phaseSince;
+    FillTurnLocked(&v, *best);
     *identity = (std::hash<std::wstring>{}(best->project) << 4) | static_cast<uint64_t>(v.phase);
     return v;
 }
@@ -298,6 +399,13 @@ void Publish() {
     }
     IslandSetAgentView(view, nudge);
     if (g_wake) SetEvent(g_wake);
+}
+
+void WithdrawRepliesLocked(const std::string& sessionKey) {
+    bool any = false;
+    for (auto& w : g_replyWaiters)
+        if (w->sessionKey == sessionKey && !w->done) { w->done = true; w->text.clear(); any = true; }
+    if (any) g_decided.notify_all();
 }
 
 void ResolveLocked(Pending& p, AgentDecision d, int answer) {
@@ -357,8 +465,33 @@ std::wstring ApprovalDetail(const std::string& tool, const Value* input) {
 
 // ── Event handling ──────────────────────────────────────────────────────────
 
+// The Bunbun.Show* setting that covers an agent id ("" is Claude Code).
+const wchar_t* ShowSettingFor(const std::string& id) {
+    if (id.empty() || id == "claude" || id == "claude-code" || id == "claude-desktop") return L"Bunbun.ShowClaude";
+    if (id.rfind("antigravity", 0) == 0 || id == "gemini") return L"Bunbun.ShowAntigravity";
+    if (id == "cursor") return L"Bunbun.ShowCursor";
+    if (id == "vscode" || id == "visual-studio-code" || id == "copilot") return L"Bunbun.ShowCopilot";
+    if (id == "codex") return L"Bunbun.ShowCodex";
+    return L"Bunbun.ShowOtherAgents";
+}
+
 // Returns the reply line for blocking requests ("" = no reply).
 std::string HandleEvent(const Value& msg) {
+    // An agent the user switched off is ignored completely: no session, no card,
+    // and a permission request gets no reply, so the agent asks in its own window.
+    if (Wh_GetIntSetting(ShowSettingFor(msg.getString("bunbun_agent"))) == 0) {
+        // Forget a session that was open before the switch, so it stops showing.
+        bool had = false;
+        {
+            std::lock_guard lock(g_mutex);
+            const std::string key = msg.getString("bunbun_agent") + ":" + msg.getString("session_id");
+            WithdrawLocked(key);
+            had = g_sessions.erase(key) > 0;
+        }
+        if (had) Publish();
+        return {};
+    }
+
     const std::string event = msg.getString("hook_event_name");
     const std::string agentId = msg.getString("bunbun_agent");
     const std::string sessionKey = agentId + ":" + msg.getString("session_id");
@@ -366,10 +499,55 @@ std::string HandleEvent(const Value& msg) {
     const Value* input = msg.find("tool_input");
     const double now = Now();
 
+    // Claude Code's statusLine (bunbun-hook --statusline): usage only, no session.
+    if (event == "StatusLine") {
+        {
+            std::lock_guard lock(g_mutex);
+            const Value* limits = msg.find("rate_limits");
+            const Value* five = limits ? limits->find("five_hour") : nullptr;
+            const Value* week = limits ? limits->find("seven_day") : nullptr;
+            if (const float p = Percent(five, "used_percentage"); p >= 0) g_usage5h = p;
+            if (const float p = Percent(week, "used_percentage"); p >= 0) g_usage7d = p;
+            if (five) {
+                const Value* r = five->find("resets_at");
+                if (r && r->isNumber()) g_usage5hResets = static_cast<long long>(r->num);
+            }
+            if (const float p = Percent(msg.find("context_window"), "used_percentage"); p >= 0) g_contextPct = p;
+            g_usageAt = now;
+        }
+        Publish();
+        return {};
+    }
+
+    // bunbun-hook --reply: hold until the user answers from the island (or moves on).
+    if (event == "ReplyWait") {
+        auto waiter = std::make_shared<ReplyWaiter>();
+        {
+            std::lock_guard lock(g_mutex);
+            WithdrawRepliesLocked(sessionKey);  // one listener per session
+            waiter->id = g_nextId++;
+            waiter->sessionKey = sessionKey;
+            g_replyWaiters.push_back(waiter);
+        }
+        Publish();
+        std::unique_lock lock(g_mutex);
+        g_decided.wait_for(lock, kReplyWait, [&] { return waiter->done || !g_running; });
+        g_replyWaiters.erase(std::remove(g_replyWaiters.begin(), g_replyWaiters.end(), waiter), g_replyWaiters.end());
+        const std::wstring text = waiter->text;
+        lock.unlock();
+        Publish();
+        if (text.empty()) return {};
+        Value reply = Value::Object();
+        reply["reply"] = Value::String(Utf8(text));
+        return json::Serialize(reply);
+    }
+
     std::shared_ptr<Pending> pending;
     {
         std::lock_guard lock(g_mutex);
         Session& s = g_sessions[sessionKey];
+        if (event == "UserPromptSubmit" || event == "SessionStart" || event == "SessionEnd" || event == "PreToolUse")
+            WithdrawRepliesLocked(sessionKey);  // answered in the terminal, or working again
         if (s.agent.empty()) {
             s.agent = AgentDisplayName(agentId);
             s.phaseSince = now;
@@ -390,9 +568,27 @@ std::string HandleEvent(const Value& msg) {
             setPhase(AgentPhase::Thinking);
             s.step = Clip(Wide(msg.getString("prompt")), 60);
             s.added = s.removed = -1;
+            s.turnStart = now;
+            s.stage = -1;
+            s.prompt = Clip(Wide(msg.getString("prompt")), 120);
+            s.command.clear();
+            s.output.clear();
+            s.commandFailed = false;
+            s.diffOld.clear();
+            s.diffNew.clear();
         } else if (event == "PreToolUse" || event == "beforeShellExecution") {
             setPhase(AgentPhase::Working);
             s.step = event == "beforeShellExecution" ? L"Runs command" : StepFor(tool, input);
+            if (s.turnStart <= 0) s.turnStart = now;
+            s.stage = std::max(s.stage, event == "beforeShellExecution" ? 2 : StageFor(tool));
+            if (IsShellTool(tool) || event == "beforeShellExecution") {
+                std::string cmd = input ? input->getString("command") : std::string();
+                if (cmd.empty() && input) cmd = input->getString("CommandLine");
+                if (cmd.empty()) cmd = msg.getString("command");
+                s.command = Clip(Wide(cmd), 160);
+                s.output.clear();
+                s.commandFailed = false;
+            }
         } else if (event == "PostToolUse" || event == "PostToolUseFailure" || event == "afterFileEdit") {
             WithdrawLocked(sessionKey);
             setPhase(AgentPhase::Working);
@@ -400,6 +596,20 @@ std::string HandleEvent(const Value& msg) {
             if (event == "PostToolUseFailure") s.step = StepFor(tool, input) + L" — failed";
             else if (event == "afterFileEdit") s.step = L"Edits file";
             else if (input && DiffCounts(tool, *input, &a, &r)) { s.added = a; s.removed = r; }
+            s.stage = std::max(s.stage, StageFor(tool));
+            if (input && StageFor(tool) == 1) {
+                std::string oldS = input->getString("old_string"), newS = input->getString("new_string");
+                if (oldS.empty() && newS.empty()) newS = input->getString("content");
+                s.diffOld = Clip(Wide(oldS), 110);
+                s.diffNew = Clip(Wide(newS), 110);
+            }
+            if (IsShellTool(tool)) {
+                // The hook keeps only the tail of the output (bunbun_output).
+                s.output.clear();
+                if (const Value* out = msg.find("bunbun_output"); out && out->isArray())
+                    for (const Value& line : out->arr) if (line.isString()) s.output.push_back(Clip(Wide(line.str), 90));
+                s.commandFailed = event == "PostToolUseFailure";
+            }
         } else if (event == "SubagentStart") {
             s.step = L"Starts a subagent";
         } else if (event == "Notification") {
@@ -412,13 +622,38 @@ std::string HandleEvent(const Value& msg) {
             }
         } else if (event == "Stop") {
             WithdrawLocked(sessionKey);
+            const bool wasBusy = IsBusy(s.phase);
             setPhase(AgentPhase::Finished);
             std::string last = msg.getString("last_assistant_message");
             s.step = last.empty() ? L"All done" : Clip(Wide(last), 80);
+            s.stage = 3;
+            if (wasBusy) {
+                s.turnSeconds = s.turnStart > 0 ? now - s.turnStart : 0;
+                if (g_jobsDay != DayOfYear()) { g_jobsDay = DayOfYear(); g_jobsToday = 0; }
+                ++g_jobsToday;
+                AgentView::HistoryItem h;
+                h.agent = s.agent;
+                h.project = s.project;
+                h.prompt = s.prompt.empty() ? s.step : s.prompt;
+                h.finishedAt = static_cast<long long>(time(nullptr));
+                h.seconds = static_cast<int>(s.turnSeconds);
+                g_history.push_front(std::move(h));
+                while (g_history.size() > 8) g_history.pop_back();
+            }
         } else if (event == "StopFailure") {
             WithdrawLocked(sessionKey);
             setPhase(AgentPhase::Error);
             s.step = L"Stopped with an error";
+            s.turnSeconds = s.turnStart > 0 ? now - s.turnStart : 0;
+            AgentView::HistoryItem h;
+            h.agent = s.agent;
+            h.project = s.project;
+            h.prompt = s.prompt;
+            h.finishedAt = static_cast<long long>(time(nullptr));
+            h.seconds = static_cast<int>(s.turnSeconds);
+            h.failed = true;
+            g_history.push_front(std::move(h));
+            while (g_history.size() > 8) g_history.pop_back();
         } else if (event == "SessionEnd") {
             WithdrawLocked(sessionKey);
             g_sessions.erase(sessionKey);
@@ -450,8 +685,27 @@ std::string HandleEvent(const Value& msg) {
                         pending->diffNew = Clip(Wide(newS), 110);
                     }
                 }
+                if (tool == "ExitPlanMode" && input) {
+                    pending->tool = L"Has a plan for you";
+                    pending->plan = Wide(input->getString("plan")).substr(0, 20000);
+                    pending->detail = L"Approve it, or tell Claude what to change.";
+                }
                 if ((tool == "AskUserQuestion" || tool == "ask_question") && input) {
                     pending->question = true;
+                    // Every question, for the island's step-through card (several
+                    // questions, multi-select and free text).
+                    if (const Value* all = input->find("questions"); all && all->isArray()) {
+                        for (const Value& q : all->arr) {
+                            AgentView::Question qq;
+                            qq.text = Wide(q.getString("question"));
+                            qq.header = Wide(q.getString("header"));
+                            qq.multi = q.getBool("multiSelect") || q.getBool("is_multi_select");
+                            if (const Value* opts = q.find("options"); opts && opts->isArray())
+                                for (const Value& o : opts->arr)
+                                    qq.options.push_back(Wide(o.isString() ? o.str : o.getString("label")));
+                            pending->questions.push_back(std::move(qq));
+                        }
+                    }
                     const Value* qs = input->find("questions");
                     // The island answers one single-select question with 2-4
                     // options; anything richer is answered in the terminal.
@@ -485,8 +739,11 @@ std::string HandleEvent(const Value& msg) {
     g_pending.erase(std::remove(g_pending.begin(), g_pending.end(), pending), g_pending.end());
     const AgentDecision d = pending->decision;
     const int answer = pending->answerIndex;
+    const std::string raw = pending->rawReply;
     lock.unlock();
     Publish();
+
+    if (!raw.empty()) return raw;  // DecideRaw: plan feedback, or answers to several questions
 
     if (pending->question) {
         if (d != AgentDecision::Allow || answer < 0 || answer >= (int)pending->optionLabels.size()) return {};
@@ -523,9 +780,9 @@ Value RectJson(const RECT& r) {
     return o;
 }
 
-// Commands from Bunbun's own settings app (same user only, like every pipe
-// client). Today just "snapshot": the island's live pixels for the preview.
-std::string HandleCommand(const std::string& cmd) {
+// Commands from Bunbun's own settings app or tools (same user only, like every pipe
+// client).
+std::string HandleCommand(const std::string& cmd, const Value& msg) {
     Value out = Value::Object();
     if (cmd == "snapshot") {
         std::string png;
@@ -537,6 +794,14 @@ std::string HandleCommand(const std::string& cmd) {
             out["monitor"] = RectJson(monitor);
             out["work"] = RectJson(work);
         }
+    } else if (cmd == "capture_pages") {
+        out["count"] = Value::Number(IslandCapturePages());
+    } else if (cmd == "ask") {
+        const std::string q = msg.getString("query");
+        if (!q.empty()) {
+            IslandSubmitAsk(Wide(q));
+            out["ok"] = Value::Bool(true);
+        }
     }
     return json::Serialize(out);
 }
@@ -547,7 +812,7 @@ void ServeConnection(HANDLE pipe) {
         Value msg;
         if (json::Parse(line, &msg) && msg.isObject()) {
             const std::string command = msg.getString("bunbun_command");
-            const std::string reply = command.empty() ? HandleEvent(msg) : HandleCommand(command);
+            const std::string reply = command.empty() ? HandleEvent(msg) : HandleCommand(command, msg);
             if (!reply.empty()) bb::pipe::WriteAll(pipe, reply + "\n");
             FlushFileBuffers(pipe);
         }
@@ -644,6 +909,27 @@ void Decide(uint64_t requestId, AgentDecision decision, int answerIndex) {
         std::lock_guard lock(g_mutex);
         for (auto& p : g_pending)
             if (p->id == requestId) ResolveLocked(*p, decision, answerIndex);
+    }
+    g_decided.notify_all();
+}
+
+void DecideRaw(uint64_t requestId, const std::string& replyLine) {
+    {
+        std::lock_guard lock(g_mutex);
+        for (auto& p : g_pending) {
+            if (p->id != requestId || p->resolved) continue;
+            p->rawReply = replyLine;
+            ResolveLocked(*p, AgentDecision::Allow, -1);
+        }
+    }
+    g_decided.notify_all();
+}
+
+void SendReply(uint64_t replyId, const std::wstring& text) {
+    {
+        std::lock_guard lock(g_mutex);
+        for (auto& w : g_replyWaiters)
+            if (w->id == replyId && !w->done) { w->done = true; w->text = text; }
     }
     g_decided.notify_all();
 }

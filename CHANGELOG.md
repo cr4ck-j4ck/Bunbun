@@ -5,6 +5,150 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Island pages** in Settings: a drawing of every page of the island, a switch for each, and drag
+  (or the arrows) to put them in any order. Home always comes first. The same screen picks what each
+  of the three Home cards shows and edits the links under them. **Show real pages** has the island
+  open each page for a moment and take its picture, so the screen shows your actual island instead
+  of sketches (saved in `%LOCALAPPDATA%\Bunbun\previews`). The pictures now update by themselves:
+  when the screen opens, a few seconds after you change something there, and whenever you look at a
+  page on the island. Pages the island hasn't shown yet use example pictures.
+- **Pill while an agent works** (Settings → Assistant & agents): turn off the small "Runs · …" pill
+  for a quieter island. Approvals, questions and plans still appear.
+- **Tuck instead of hiding** in full screen (Settings → Animations → When the island appears): the
+  island folds into a thin line while a video or game is full screen, and unfolds when you leave.
+- **Lyrics on the small island** is now a setting (Features → Lyrics) as well as a right-click option.
+  The pill now sizes itself to the song's longest line, a long line gets slightly smaller and then
+  an ellipsis instead of sliding off the left edge, and each new line rolls up more smoothly.
+- In the Studio layout, Home stays on the island while music plays (it comes first, then the
+  player), so the three cards no longer disappear when a song starts.
+
+### Changed
+- **Studio is now the default layout.** Classic is still in Settings → Island pages and in the
+  right-click menu.
+- The Studio island follows your accent colour (the album art in Auto mode) for page titles, tabs and
+  highlights. Each coding agent keeps its own colour (Claude orange, Antigravity blue, VS Code blue,
+  Cursor grey, Codex green), and the Home cards keep theirs; only the Music card follows the album.
+- Features is now a grid of switches grouped by what they do (Music, Lyrics, System pop-ups,
+  Notifications, Reminders & meetings, Page options…); click one to see its options. Settings for
+  whole pages moved to Island pages, and the sidebar is grouped into Island, Bun & agents, and App.
+
+### Fixed
+- The music bars sat as a row of dots: the refined bars read frequency bands that were only worked
+  out for the Orb and Plasma styles. They move with the music again.
+- Scrolling couldn't reach the last page (All apps) in the Studio layout while music played.
+- Hovering the gear and the eyedropper in the Studio header did nothing when other buttons had
+  appeared or gone since the last frame.
+- Home no longer has an Edit button; pick the cards in Settings → Island pages.
+- Changes in the settings app could stop saving altogether: the Home card settings were missing
+  from the list the app accepts, and one rejected setting made every later change fail too. All
+  settings are accepted now, a bad one no longer blocks the rest, and a banner says when changes
+  haven't reached the island.
+- In the Studio layout, the open tab's name disappeared when there were many tabs; the other icons
+  now shrink instead. Clicking the Music tile with nothing playing opened Windows Settings; it now
+  opens your music app (Spotify if installed, else YouTube Music).
+- Turning on the Mirror camera made the "is using your camera" alert cover the page, which turned
+  the camera off again. Bunbun no longer alerts about its own camera use (the dot still lights).
+- In the Studio layout, hovering and clicking the tab bar, the gear, the colour picker and other
+  buttons could do nothing while an agent was active: their positions were measured against the
+  wrong part of the island. They are now matched against where they are actually drawn.
+- Buttons on the Studio island now fade their highlight in and out, and icons lift a little under
+  the pointer.
+- Clicking the island to open the playing app could start a second copy when its window was
+  minimised or hidden in the tray, or when the player was a Store app or Firefox. Bunbun now finds
+  the app's window by its app ID too, and shows a window hidden in the tray again.
+- Scrolling the island past the last dashboard tab (To-do) did nothing for one notch, then jumped
+  to Calendar. The wheel now wraps straight back to the first tab.
+- Weather stopped showing whenever wttr.in was down, and each refresh waited minutes for it.
+  Weather now comes from Open-Meteo, in a second or two; with no city set, the location comes from
+  Windows' location service instead of your IP address. Ask Bun answers for any city you name.
+- Skin-pack celebrations play as drawn, without a hop on top, and quick frames no longer blur
+  into each other (the cross-fade takes at most a third of a frame).
+- Synced lyrics with three-digit timestamps (`[01:02.345]`) ran up to a second late, and lines with
+  several timestamps (repeated choruses) appeared only once. Both are read correctly now.
+- The agent pill missed updates that changed only the step's details (a command's output, for one).
+- Lyrics for YouTube videos titled "Artist - Song (Official Video)" are found much more often: the
+  artist is taken from the title when the uploader is a channel ("ArtistVEVO", "Artist - Topic"),
+  and only whole tags like (Official Video), [HD] or (Lyrics) are dropped, so "(Mixtape)" stays.
+- A song without lyrics no longer asks the lyrics sites again on every replay; the answer is
+  remembered for three days. Network failures are still retried, never remembered.
+
+### Added
+- **NetEase lyrics fallback.** When LRCLIB has no synced lyrics, Bunbun also looks on NetEase Cloud
+  Music (strong on Chinese, Japanese and Korean songs) and only accepts the same title, artist and
+  length. It sends the song title and artist to music.163.com; turn it off with **Also search
+  NetEase**. Credit lines ("作词 : …") at the top are dropped.
+- Instrumental tracks say **Instrumental** instead of "No lyrics found".
+- During a long instrumental break the last sung line fades to ♪ after a few seconds, in the
+  collapsed pill, the Lyrics tab and the music-page lyrics panel; the same after the final line.
+- Lyrics are fetched as soon as a new song starts, so opening the Lyrics tab shows them at once.
+- **Studio layout** (Settings → Bunbun → Island layout). The open island gets a header (page name,
+  date and time, a settings gear) and a tab bar with one icon per page and a volume slider. The
+  first page has big Agent, Music and Focus tiles, and the music page glows in the album's colour.
+  Classic stays the default and is unchanged.
+- **Ask Bun as a chat** in the Studio layout: your questions and Bun's answers stay on screen as a
+  short conversation, with suggestion chips, a New chat button, and your mascot in the input box.
+- **Agent page**: a live timer, Read / Edit / Test / Done progress, the last command and its
+  output, tasks done today, recent tasks, and your Claude Code usage (5-hour and weekly limits,
+  context; turn them off in Settings → Assistant & agents → Show Claude Code usage limits).
+  Connecting Claude Code now also adds a statusLine that sends those limits to Bunbun; an
+  existing statusLine of your own is left alone.
+- **Answer agents from the island**: Claude Code's plans show as "Claude has a plan" with the plan
+  text, **Approve** and **Change it…** (tell Claude what to change). Questions with several parts,
+  multi-select or your own words step through a card. When a task finishes, **Reply** sends Claude
+  your next message (connect Claude Code again to add the reply hook). The Agent page has a model
+  chip (Default / Opus / Sonnet / Haiku).
+- **Codex** can be connected in one click (progress on the island; Codex asks for permission itself).
+- **Focus page**: an hours and minutes picker (scroll or click the numbers), 5 / 15 / 25 / 50 minute
+  chips, "Done at", +5 min, pause and stop. Optional **focus guard** nudges you when a distracting
+  app or site comes to the front.
+- **Home**: pick what each tile shows (agent, music, focus, weather, calendar, battery, system) in
+  Settings or with **Edit** on Home, and add up to four **links** under the tiles. An **All apps**
+  page lists every page plus the colour picker and Settings, with badges.
+- **Mirror**: an optional camera preview page; the camera only runs while you have it on.
+- **Sounds**: soft chimes when an agent finishes, needs you or stops with an error, with a volume
+  setting, and optional open and close blips.
+- **Bluetooth battery warning** for connected devices at 20% or below, once a day.
+- Dropping files on the open island shows a "Let go, I'll catch it!" zone, then a card as the file
+  lands in your tray.
+- **Choose which agents the island shows**: an On island switch beside each agent's Connect button
+  (plus Codex and other tools), and a Main agent for the Home tile and the usage ring. A switched-off
+  agent is ignored completely and asks in its own window. With no agent on, there is no agent pill,
+  tab or ring, and the Home tile shows the weather instead.
+- **Antigravity quota**: how much of Antigravity's model quota you've used and when it resets, read
+  from the status Antigravity keeps on your PC (no sign-in, nothing sent anywhere). It shows on the
+  Agent page and stands in for Claude's ring when Claude Code has no numbers. Toggle it in Settings →
+  Assistant & agents → Show Antigravity quota.
+- **Clipboard page** with your last 8 copied texts (memory only), click to copy again, and a
+  **Note page** for one quick note with checkboxes (`note.txt` next to `settings.ini`).
+- **Tuck away**: Ctrl+Alt+H, or Tuck away in the right-click menu, folds the island to a thin
+  status-coloured line. Point at it to bring it back; it returns by itself when an agent needs you.
+- **Idle face**: show two glowing eyes instead of the mascot. They follow the pointer, blink (and
+  now and then wink), pulse orange while an agent works, turn green when it's done and red on an
+  error, and change shape with the mood. Pick their colour in **Eye colour**, and choose what sits
+  beside the face in **Beside the face**: time and weather, either one, or nothing at all.
+  **Eyes show agent status** (off by default) makes them pulse orange while an agent works.
+  All of these are on the settings app's Mascot page (Idle face), and the layout on Appearance.
+- The calendar page uses the Studio layout's extra width for an **Agenda**: your next meeting and
+  today's open to-dos with their times.
+- The music bars are fewer and fatter, follow the frequency bands instead of raw samples, rise
+  fast and fall slowly, and glow softly in the album's colour.
+- **Music app** setting (Spotify, YouTube Music, Apple Music) for what the Music tile opens.
+- Swipe sideways on the music pill, or scroll sideways on a touchpad, for the next or previous
+  song. Poke the mascot three times and it gets cross, six times and it gets dizzy; it says hello
+  when Bunbun starts.
+- **A cleaner right-click menu**: dark like the island, an icon on each item, quick actions first,
+  and Lyrics and Appearance (layout, idle face, shape, transparency, theme) in their own submenus.
+- **Colour picker**: the eyedropper in the Studio header, or Pick a colour on screen in the
+  right-click menu, freezes the screen under a magnifier. Click a pixel to copy its hex code, then
+  copy it as RGB or HSL from the card that appears. Arrow keys nudge one pixel (Shift: ten), Esc
+  closes.
+- New versions are announced on the island too; click the notice to open the download page.
+- The notch now flows out of the screen edge with small curved corners, and its bottom corners
+  open up as the island grows.
+- **A real celebration** when a task finishes: every mascot gets yellow sparks and a confetti burst
+  that flutters down around the head, on top of the hop.
+
 ## [0.2.0]
 
 ### Fixed

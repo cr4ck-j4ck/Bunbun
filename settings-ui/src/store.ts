@@ -77,8 +77,12 @@ export function useSettingsStore(): Store {
       values[k] = def !== undefined && v === def ? null : v;
     }
     setSaving(true);
-    call("setSettings", { values })
-      .then(() => setSaveError(""))
+    call<boolean | { skipped?: string[] }>("setSettings", { values })
+      .then((r) => {
+        // The host writes every key it knows and lists the ones it couldn't.
+        const skipped = r && typeof r === "object" ? r.skipped ?? [] : [];
+        setSaveError(skipped.length ? `Some settings couldn't be saved: ${skipped.join(", ")}` : "");
+      })
       .catch((e) => {
         // Keep the failed edits so the next change (or Retry) writes them again.
         queue.current = { ...batch, ...queue.current };

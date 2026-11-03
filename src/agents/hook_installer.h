@@ -36,6 +36,17 @@ bool CopilotHooksInstalled();
 bool InstallCopilotHooks(std::wstring* report);
 bool UninstallCopilotHooks(std::wstring* report);
 
+// %CODEX_HOME%\hooks.json, else %USERPROFILE%\.codex\hooks.json (progress only).
+std::wstring CodexHooksPath();
+bool CodexHooksInstalled();
+bool InstallCodexHooks(std::wstring* report);
+bool UninstallCodexHooks(std::wstring* report);
+
+// Claude Code's "model" in settings.json ("" = its default; "opus", "sonnet",
+// "haiku" or a full model id).
+std::string ClaudeModel();
+bool SetClaudeModel(const std::string& model, std::wstring* report);
+
 // Returns the full path to bunbun-hook.exe.
 std::wstring HookExePath();
 

@@ -383,7 +383,7 @@ std::string Base64Decode(const std::string& in) {
 }
 
 // Asks the running island for a snapshot. Empty when the island isn't running.
-bool RequestIslandSnapshot(Value* reply) {
+bool RequestIslandSnapshot(Value* reply, const char* command = "snapshot") {
     const std::wstring name = bb::pipe::Name();
     HANDLE h = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 20 && h == INVALID_HANDLE_VALUE; ++attempt) {
@@ -397,7 +397,8 @@ bool RequestIslandSnapshot(Value* reply) {
     if (h == INVALID_HANDLE_VALUE) return false;
     if (!bb::pipe::ServerIsSameUser(h)) { CloseHandle(h); return false; }
     std::string line;
-    const bool ok = bb::pipe::WriteAll(h, "{\"bunbun_command\":\"snapshot\"}\n") && bb::pipe::ReadLine(h, &line);
+    const bool ok = bb::pipe::WriteAll(h, std::string("{\"bunbun_command\":\"") + command + "\"}\n") &&
+                    bb::pipe::ReadLine(h, &line);
     CloseHandle(h);
     return ok && bb::json::Parse(line, reply) && reply->isObject();
 }
@@ -451,6 +452,38 @@ std::string EncodePng(IWICImagingFactory* wic, IWICBitmap* bmp) {
     ULONG read = 0;
     stream->Read(bytes.data(), static_cast<ULONG>(bytes.size()), &read);
     return "data:image/png;base64," + Base64(bytes.data(), read);
+}
+
+// Snapshots of each island page the island saved (IslandCapturePages), as data
+// URLs keyed by page, with when each was taken.
+Value PagePreviews(double since) {
+    std::wstring dir = bb::StatePath();
+    dir = dir.substr(0, dir.find_last_of(L'\\')) + L"\\previews\\";
+    Value out = Value::Object();
+    WIN32_FIND_DATAW fd;
+    HANDLE find = FindFirstFileW((dir + L"*.png").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return out;
+    do {
+        ULARGE_INTEGER t{};
+        t.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+        t.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        const double at = static_cast<double>((t.QuadPart - 116444736000000000ULL) / 10000ULL);  // ms since 1970
+        if (at <= since) continue;
+        HANDLE f = CreateFileW((dir + fd.cFileName).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        std::vector<BYTE> bytes(fd.nFileSizeLow);
+        DWORD read = 0;
+        ReadFile(f, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+        CloseHandle(f);
+        std::wstring key = fd.cFileName;
+        key = key.substr(0, key.size() - 4);
+        Value item = Value::Object();
+        item["src"] = Value::String("data:image/png;base64," + Base64(bytes.data(), read));
+        item["at"] = Value::Number(at);
+        out[Utf8(key)] = std::move(item);
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    return out;
 }
 
 Value CapturePreview(const Value& args) {
@@ -724,13 +757,29 @@ Value LocalAiCommand(const std::string& cmd) {
 Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
     if (cmd == "listTodos" || cmd == "saveTodo" || cmd == "deleteTodo" || cmd == "clearDoneTodos") return TodoCommand(cmd, args, err);
     if (cmd == "capturePreview") return CapturePreview(args);
+    if (cmd == "capturePages") {
+        Value reply;
+        Value out = Value::Object();
+        out["running"] = Value::Bool(RequestIslandSnapshot(&reply, "capture_pages"));
+        out["count"] = Value::Number(reply.isObject() ? reply.getNumber("count") : 0);
+        return out;
+    }
+    if (cmd == "getPagePreviews") return PagePreviews(args.getNumber("since"));
     if (cmd == "getSettings") return GetSettings();
     if (cmd == "setSettings") {
         const Value* values = args.find("values");
         if (!values || !values->isObject()) { *err = "values must be an object"; return {}; }
-        for (const auto& [k, v] : values->obj)
-            if (!WriteSetting(k, &v, err)) return {};
-        return Value::Bool(true);
+        // One bad key must not block the rest: the UI keeps retrying a failed batch,
+        // so a single unknown name used to stop every later change from saving.
+        Value skipped = Value::Array();
+        for (const auto& [k, v] : values->obj) {
+            std::string why;
+            if (!WriteSetting(k, &v, &why)) skipped.push(Value::String(k + ": " + why));
+        }
+        if (skipped.arr.empty()) return Value::Bool(true);
+        Value out = Value::Object();
+        out["skipped"] = std::move(skipped);
+        return out;
     }
     if (cmd == "resetSettings") {
         const Value* keys = args.find("keys");
@@ -773,6 +822,8 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         o["cursorSettingsPath"] = Str(bb::hooks::CursorSettingsPath());
         o["copilotConnected"] = Value::Bool(bb::hooks::CopilotHooksInstalled());
         o["copilotSettingsPath"] = Str(bb::hooks::CopilotHooksPath());
+        o["codexConnected"] = Value::Bool(bb::hooks::CodexHooksInstalled());
+        o["codexSettingsPath"] = Str(bb::hooks::CodexHooksPath());
         o["hookExePath"] = Str(bb::hooks::HookExePath());
         o["hookCmdVscode"] = Value::String(bb::hooks::HookCommandFor("vscode", ""));
         o["hookCmdAntigravity"] = Value::String(bb::hooks::HookCommandFor("antigravity", ""));
@@ -799,6 +850,14 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
     if (cmd == "connectCopilot" || cmd == "disconnectCopilot") {
         std::wstring report;
         const bool ok = cmd == "connectCopilot" ? bb::hooks::InstallCopilotHooks(&report) : bb::hooks::UninstallCopilotHooks(&report);
+        Value o = Value::Object();
+        o["ok"] = Value::Bool(ok);
+        o["report"] = Str(report);
+        return o;
+    }
+    if (cmd == "connectCodex" || cmd == "disconnectCodex") {
+        std::wstring report;
+        const bool ok = cmd == "connectCodex" ? bb::hooks::InstallCodexHooks(&report) : bb::hooks::UninstallCodexHooks(&report);
         Value o = Value::Object();
         o["ok"] = Value::Bool(ok);
         o["report"] = Str(report);

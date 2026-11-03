@@ -16,6 +16,7 @@
 #include "../assistant/assistant.h"
 #include "../common/todos.h"  // Bunbun: to-do file and repeats, shared with the settings app
 #include "../common/json.h"   // Bunbun: talking to the local AI helper
+#include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
 #include <windows.h>
 #include <unknwn.h>
 #include <dwmapi.h>
@@ -50,6 +51,8 @@
 #include <ws2ipdef.h>
 #include <iphlpapi.h>  // Bunbun: per-adapter byte counters (network speed, Ethernet state)
 #include <wlanapi.h>   // Bunbun: Wi-Fi radio, network name and signal for the Connectivity tab
+#include <propsys.h>   // Bunbun: a window's app ID, to find a player's window
+#include <appmodel.h>  // Bunbun: a process's app ID and package
 
 #include <algorithm>
 #include <array>
@@ -67,7 +70,12 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <future>
 #include <unordered_map>
+#include <unordered_set>  // Bunbun: connected Bluetooth devices
+#include <mfapi.h>        // Bunbun: Mirror page camera (mirror_module.inc)
+#include <mfidl.h>
+#include <mfreadwrite.h>
 #include <utility>
 #include <vector>
 #include <set>
@@ -95,6 +103,7 @@
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Devices.Radios.h>  // Bunbun: Bluetooth radio on/off
 #include <winrt/Windows.Devices.Power.h>   // Bunbun: battery report (charge rate, wear)
+#include <winrt/Windows.Devices.Geolocation.h>  // Bunbun: where "here" is, for the weather
 #else
 #define DYNAMIC_ISLAND_HAS_BLUETOOTH_WATCHER 0
 #endif
@@ -114,8 +123,10 @@ constexpr UINT WM_APP_MOUSE_WAKE = WM_APP + 0x446;
 // thread, so hotkey and backdrop changes are posted across and applied there.
 constexpr UINT WM_APP_APPLY_HOTKEY = WM_APP + 0x447;
 constexpr UINT WM_APP_APPLY_BACKDROP = WM_APP + 0x448;
+constexpr UINT WM_APP_SUBMIT_ASK = WM_APP + 0x4B2;
 constexpr int ID_HIDE_SHOW_HOTKEY = 1;
 constexpr int ID_LOOKUP_HOTKEY = 2;
+constexpr int ID_TUCK_HOTKEY = 3;  // Bunbun: Ctrl+Alt+H tucks the island away
 constexpr float kRenderPadX = 28.0f;
 constexpr float kRenderPadY = 22.0f;
 constexpr UINT kClipboardImageThumbMaxDim = 160;  // longer-side cap for the clipboard image thumbnail
@@ -645,13 +656,16 @@ struct Settings {
     bool lyricsNeighborLinesVisible = false;
     int lyricsOffsetMs = 0;      // Modules.LyricsOffsetMs, speakers / wired, ms
     int lyricsOffsetBtMs = 0;    // Modules.LyricsOffsetBluetoothMs, Bluetooth output, ms
-    bool collapsedLyrics = false;  // lyrics inside the collapsed media pill (right-click toggle)
+    bool collapsedLyrics = false;  // lyrics inside the collapsed media pill (Bunbun.PillLyrics)
+    bool agentPill = true;         // Bunbun: the working-agent pill (Bunbun.AgentPill); cards always show
     bool lyricsPinnedFirst = false;  // Lyrics tab is the first tab of the expanded media view (right-click toggle)
     bool lyricsCache = true;       // Modules.LyricsCache
     int lyricsCacheMaxMB = 25;     // Modules.LyricsCacheMaxMB; 0 = disk cache off
+    bool lyricsNetEase = true;     // Bunbun: Modules.LyricsNetEase, fallback when LRCLIB has nothing
     bool mediaTabLyrics = false;   // lyrics side panel in the expanded media tab
     int autoHideIdleSeconds = 0;
     bool autoHideFullscreen = true;
+    bool fullscreenTuck = false;  // Bunbun: tuck to a line in full screen instead of hiding
     bool borderMergedMode = false;
     bool unhideOnHover = true;
     bool alwaysOnTop = true;
@@ -735,6 +749,36 @@ struct Settings {
     bool bunbunAssistant = true;  // the Quick Lookup box asks Bun
     bool bunbunMascotOnIsland = true;  // Bun beside the clock / music pill
     bool mascotDnd = false;            // Bunbun: mascot do-not-disturb (snack), separate from Windows DND
+    // Bunbun: Studio layout and its pages (studio_module.inc)
+    bool studioLayout = true;
+    bool tuckHotkey = true;
+    bool agentTab = true;
+    bool clipboardHistory = true;
+    bool quickNote = true;
+    bool pokeReactions = true;
+    bool musicSwipe = true;
+    bool idleEyes = false;  // Bunbun: eyes instead of the mascot beside the clock
+    bool idleShowClock = true;    // Bunbun: Bunbun.IdleStripItems
+    bool focusPage = true;        // Bunbun: Focus page and guard (studio_module.inc)
+    bool appsPage = true;         // Bunbun: All apps page
+    int homeTile[3] = {-1, -1, -1};  // Bunbun: Home slots, -1 = automatic (HomeTile order)
+    bool bluetoothLowWarning = true;  // Bunbun: heads-up at 20% for connected BT devices
+    bool sounds = true;           // Bunbun: chimes (sounds_module.inc)
+    bool mirrorPage = false;      // Bunbun: camera preview page
+    bool soundOpenClose = false;
+    int soundVolume = 40;
+    std::wstring homeLinks;       // Bunbun: "Name|address; ..." under the Home tiles
+    std::wstring pageOrder;       // Bunbun: Bunbun.PageOrder, page keys in tab order (DashboardTabIds)
+    bool focusGuard = false;
+    std::wstring focusGuardApps;
+    bool idleShowWeather = true;
+    int eyeColor = 0;             // Bunbun: Bunbun.EyeColor, index into kEyeColors
+    bool eyeStatusColors = false; // Bunbun: eyes follow the agents' status
+    bool usageLimits = true;      // Bunbun: Claude Code usage ring and bars
+    bool antigravityQuota = true; // Bunbun: Antigravity model quota (AgQuota)
+    // Bunbun: which agents the island shows (AgentKind order) and which one leads.
+    bool showAgent[6] = {true, true, true, true, true, true};
+    int mainAgent = -1;           // -1 = auto, else an AgentKind
     // Mirrors on other displays (see Mirrors)
     bool displaysAll = false;
     bool mirrorPositionSame = true;
@@ -1012,6 +1056,7 @@ struct LyricsSnapshot {
     bool hasData = false;
     bool synced = false;
     bool notFound = false;
+    bool instrumental = false;  // Bunbun: with notFound; a source says the track has no vocals
     bool fetching = false;
     std::wstring matchedTitle;
     std::wstring matchedArtist;
@@ -1129,6 +1174,8 @@ struct AgentButton {
     D2D1_RECT_F rect{};
     bb::AgentDecision decision = bb::AgentDecision::Terminal;
     int answerIndex = -1;
+    int action = 0;  // Bunbun: 0 = decide; else an AgentAction (studio_module.inc)
+    int arg = 0;
 };
 std::vector<AgentButton> g_agentButtons;
 uint64_t g_agentButtonsRequest = 0;
@@ -1265,6 +1312,9 @@ std::atomic<int> g_idleTab = 0;
 std::atomic<double> g_lastMascotPokeTime{0.0};
 std::atomic<double> g_lastIslandInteractionTime{0.0};
 std::atomic<int> g_activityIndex = 0;
+// Bunbun: set when the wheel moves the ring, so the render loop follows it to
+// whatever stop it lands on (the first one included).
+std::atomic<bool> g_ringStepped{false};
 std::atomic<int> g_activeActivityCount = 1;
 // True while a media pill exists, i.e. while the Lyrics tab can be shown.
 // Set by the render loop; read by ActiveTabCount().
@@ -1311,7 +1361,7 @@ std::atomic<bool> g_scrubbing = false;           // true while press-dragging th
 std::atomic<float> g_scrubDragFraction = 0.0f;   // live 0..1 drag position while g_scrubbing is true
 std::atomic<double> g_lastLiveSeekTime = 0.0;    // throttle gate for live seeks while dragging
 std::atomic<bool> g_audioCaptureNeeded = false;  // gates the WASAPI loopback thread
-std::atomic<bool> g_spectrumBandsNeeded = false; // only Pulse Orb / Plasma Thread read the frequency bands
+std::atomic<bool> g_spectrumBandsNeeded = false; // Bars, Pulse Orb and Plasma Thread read the frequency bands
 std::atomic<bool> g_manuallyHidden = false;      // user-toggled hide, via menu or hotkey
 UINT g_registeredHotkeyModifiers = 0;            // modifiers currently registered with the OS
 UINT g_registeredHotkeyVk = 0;                   // vk currently registered with the OS
@@ -1368,6 +1418,9 @@ bool GameOverlayShown(bool enabled) {
     return (enabled || g_gameOverlayPinned.load()) && NowSeconds() >= g_gameOverlayPeekUntil.load(std::memory_order_relaxed);
 }
 std::atomic<bool> g_pinnedExpanded{false};
+std::atomic<bool> g_capturingPages{false};  // Bunbun: IslandCapturePages is stepping through the pages
+std::atomic<bool> g_dashboardOpen{false};    // Bunbun: the dashboard (not an activity) is open on screen
+void StartPassivePagePictures();             // Bunbun: end of file
 std::atomic<int> g_pillOpacityOverride{-1};
 
 constexpr GUID kSubTypeIeeeFloat = {
@@ -1526,15 +1579,19 @@ std::wstring FormatWithName(const wchar_t* format, const std::wstring& name) {
 // renderer, the scroll handler and the hit tests can all share this. That
 // arithmetic used to be copy-pasted in seven places, which is exactly how they
 // drifted out of sync.
+int StudioExtraTabCount(const Settings& s);  // Bunbun: Agent, Clipboard, Note (studio_module.inc)
+// Bunbun: every dashboard page. The tab order is user-set (Bunbun.PageOrder), so the
+// helpers below look a page up in DashboardTabIds instead of counting positions.
+enum class StudioPage { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror };
+int DashboardPageIndex(StudioPage page, const Settings& s);  // studio_module.inc; -1 when the page is off
+int DashboardPageIndexIn(int context, StudioPage page, const Settings& s);
+
+int DashboardTabCount(const Settings& s);  // Bunbun: studio_module.inc
+
 int ActiveTabCount(const Settings& settings) {
-    int count = 2;  // primary (media or clock) + calendar
-    if (settings.weather) ++count;
-    if (settings.hardwareMonitorModule) ++count;
-    if (settings.connectivityModule) ++count;  // Bunbun
-    if (settings.fileTrayModule) ++count;
-    if (settings.todoModule) ++count;  // Bunbun
-    if (settings.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed)) ++count;
-    return count;
+    // Bunbun: the same list the dashboard draws (DashboardTabIds), so scrolling can
+    // reach every page (Studio's media view has Home too, and the order is user-set).
+    return DashboardTabCount(settings);
 }
 
 int NormalizedTabIndex(const Settings& settings) {
@@ -1552,15 +1609,15 @@ int NormalizedTabIndex(const Settings& settings) {
 // order is: lyrics, media, calendar, ... so the media tab and every tab after it
 // sit one position later. Returns the media tab's index: 0 normally, 1 when pinned.
 int MediaTabIndex(const Settings& settings) {
-    return (settings.lyricsPinnedFirst && settings.lyrics &&
-            g_lyricsTabAvailable.load(std::memory_order_relaxed)) ? 1 : 0;
+    // Bunbun: looked up, since Studio puts Home before the player.
+    return std::max(0, DashboardPageIndexIn(0, StudioPage::Music, settings));
 }
 
 int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + MediaTabIndex(settings);
+    return DashboardPageIndex(StudioPage::Hardware, settings);  // Bunbun: user-set order
 }
 
 // Bunbun: the Connectivity tab sits right after the Hardware Monitor.
@@ -1568,16 +1625,14 @@ int ConnectivityTabIndex(const Settings& settings) {
     if (!settings.connectivityModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) +
-           MediaTabIndex(settings);
+    return DashboardPageIndex(StudioPage::Connectivity, settings);  // Bunbun: user-set order
 }
 
 int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) +
-           (settings.connectivityModule ? 1 : 0) + MediaTabIndex(settings);
+    return DashboardPageIndex(StudioPage::Tray, settings);  // Bunbun: user-set order
 }
 
 // Moves the dashboard one tab (+1 = next, -1 = previous). Clamped at both ends:
@@ -1601,6 +1656,7 @@ void StepActivityScroll(int direction, int totalActivities) {
     if (next < 0) next = totalActivities - 1;
     else if (next >= totalActivities) next = 0;
     g_activityIndex.store(next, std::memory_order_relaxed);
+    g_ringStepped.store(true, std::memory_order_relaxed);  // Bunbun
     g_layoutDirty = true;
 }
 
@@ -2494,6 +2550,55 @@ void LoadSettings() {
     next.bunbunAmbientFps = ClampInt(Wh_GetIntSetting(L"Bunbun.AmbientFps"), 15, 240);
     next.bunbunAssistant = Wh_GetIntSetting(L"Bunbun.Assistant") != 0;
     next.bunbunMascotOnIsland = Wh_GetIntSetting(L"Bunbun.MascotOnIsland") != 0;
+    next.studioLayout = EqualsNoCase(GetStringSettingCopy(L"Bunbun.Layout"), L"studio");  // Bunbun
+    next.tuckHotkey = Wh_GetIntSetting(L"Bunbun.TuckHotkey") != 0;
+    next.agentTab = Wh_GetIntSetting(L"Bunbun.AgentTab") != 0;
+    next.clipboardHistory = Wh_GetIntSetting(L"Bunbun.ClipboardHistory") != 0;
+    next.quickNote = Wh_GetIntSetting(L"Bunbun.QuickNote") != 0;
+    next.pokeReactions = Wh_GetIntSetting(L"Bunbun.PokeReactions") != 0;
+    next.musicSwipe = Wh_GetIntSetting(L"Bunbun.MusicSwipe") != 0;
+    next.idleEyes = EqualsNoCase(GetStringSettingCopy(L"Bunbun.IdleFace"), L"eyes");
+    next.eyeStatusColors = Wh_GetIntSetting(L"Bunbun.EyeStatusColors") != 0;
+    next.focusPage = Wh_GetIntSetting(L"Bunbun.FocusPage") != 0;
+    next.appsPage = Wh_GetIntSetting(L"Bunbun.AppsPage") != 0;
+    for (int i = 0; i < 3; ++i) {
+        static const wchar_t* kKeys[3] = {L"Bunbun.HomeTile1", L"Bunbun.HomeTile2", L"Bunbun.HomeTile3"};
+        static const wchar_t* kIds[] = {L"agent", L"music", L"focus", L"weather", L"calendar", L"battery", L"system"};
+        const std::wstring v = GetStringSettingCopy(kKeys[i]);
+        next.homeTile[i] = -1;
+        for (int k = 0; k < 7; ++k) if (EqualsNoCase(v, kIds[k])) next.homeTile[i] = k;
+    }
+    next.bluetoothLowWarning = Wh_GetIntSetting(L"Bunbun.BluetoothLowWarning") != 0;
+    next.sounds = Wh_GetIntSetting(L"Bunbun.Sounds") != 0;
+    next.mirrorPage = Wh_GetIntSetting(L"Bunbun.MirrorPage") != 0;
+    next.soundOpenClose = Wh_GetIntSetting(L"Bunbun.SoundOpenClose") != 0;
+    next.soundVolume = Wh_GetIntSetting(L"Bunbun.SoundVolume");
+    next.homeLinks = GetStringSettingCopy(L"Bunbun.HomeLinks");
+    next.pageOrder = GetStringSettingCopy(L"Bunbun.PageOrder");
+    next.focusGuard = Wh_GetIntSetting(L"Bunbun.FocusGuard") != 0;
+    next.focusGuardApps = GetStringSettingCopy(L"Bunbun.FocusGuardApps");
+    next.usageLimits = Wh_GetIntSetting(L"Bunbun.UsageLimits") != 0;
+    next.antigravityQuota = Wh_GetIntSetting(L"Bunbun.AntigravityQuota") != 0;
+    {
+        static const wchar_t* kShow[6] = {L"Bunbun.ShowClaude", L"Bunbun.ShowAntigravity", L"Bunbun.ShowCursor",
+                                          L"Bunbun.ShowCopilot", L"Bunbun.ShowCodex", L"Bunbun.ShowOtherAgents"};
+        static const wchar_t* kMain[6] = {L"claude", L"antigravity", L"cursor", L"copilot", L"codex", L"other"};
+        for (int i = 0; i < 6; ++i) next.showAgent[i] = Wh_GetIntSetting(kShow[i]) != 0;
+        const std::wstring main = GetStringSettingCopy(L"Bunbun.MainAgent");
+        next.mainAgent = -1;
+        for (int i = 0; i < 6; ++i) if (EqualsNoCase(main, kMain[i])) next.mainAgent = i;
+    }
+    {
+        std::wstring items = GetStringSettingCopy(L"Bunbun.IdleStripItems");
+        for (auto& c : items) c = towlower(c);
+        next.idleShowClock = items.empty() || items == L"time-weather" || items == L"time";
+        next.idleShowWeather = items.empty() || items == L"time-weather" || items == L"weather";
+        std::wstring eye = GetStringSettingCopy(L"Bunbun.EyeColor");
+        for (auto& c : eye) c = towlower(c);
+        const wchar_t* names[] = {L"mint", L"white", L"blue", L"pink", L"purple", L"yellow"};
+        next.eyeColor = 0;
+        for (int i = 0; i < 6; ++i) if (eye == names[i]) next.eyeColor = i;
+    }
     next.mascotDnd = Wh_GetIntSetting(L"Bunbun.MascotDnd") != 0;
     bb::mascot::SetStyle(bb::mascot::StyleFromSettings(
         GetStringSettingCopy(L"Bunbun.Character"), GetStringSettingCopy(L"Bunbun.MascotColor"),
@@ -2569,8 +2674,11 @@ void LoadSettings() {
     } else {
         next.spectrumStyle = SpectrumStyle::Bars;  // default
     }
+    // Bunbun: the refined Bars read the frequency bands too (DrawWaveform); without
+    // them every bar sat at its minimum, a row of dots.
     g_spectrumBandsNeeded.store(next.spectrumStyle == SpectrumStyle::Orb ||
-                                    next.spectrumStyle == SpectrumStyle::Plasma,
+                                    next.spectrumStyle == SpectrumStyle::Plasma ||
+                                    next.spectrumStyle == SpectrumStyle::Bars,
                                 std::memory_order_relaxed);
     next.expandedMediaAnim = Wh_GetIntSetting(L"Animations.ExpandedMediaTransitions") != 0;
     next.pillCoverAnim = Wh_GetIntSetting(L"Animations.PillCoverSpin") != 0;
@@ -2793,6 +2901,7 @@ void LoadSettings() {
                                      -kLyricsOffsetLimitMs, kLyricsOffsetLimitMs);
     PublishLyricsOffsets(next.lyricsOffsetMs, next.lyricsOffsetBtMs);
     next.lyricsCache = Wh_GetIntSetting(L"Modules.LyricsCache") != 0;
+    next.lyricsNetEase = Wh_GetIntSetting(L"Modules.LyricsNetEase") != 0;  // Bunbun
     {
         const std::wstring capStr = GetStringSettingCopy(L"Modules.LyricsCacheMaxMB");
         int capMb = 25;  // default, also used if the value is unparsable
@@ -2811,7 +2920,9 @@ void LoadSettings() {
     const int localExpandOnHover = Wh_GetIntValue(L"ExpandOnHoverOverride", -1);
     next.expandOnHover = localExpandOnHover >= 0 ? (localExpandOnHover != 0) : (Wh_GetIntSetting(L"Behavior.ExpandOnHover") != 0);
     // Right-click toggle; stored with Wh_SetIntValue so it survives restarts.
-    next.collapsedLyrics = Wh_GetIntValue(L"CollapsedLyrics", 0) != 0;
+    // Bunbun: a real setting now (Bunbun.PillLyrics); the old right-click state still counts.
+    next.collapsedLyrics = Wh_GetIntSetting(L"Bunbun.PillLyrics") != 0 || Wh_GetIntValue(L"CollapsedLyrics", 0) != 0;
+    next.agentPill = Wh_GetIntSetting(L"Bunbun.AgentPill") != 0;
     next.lyricsPinnedFirst = Wh_GetIntValue(L"LyricsPinnedFirst", 0) != 0;
     {
         // Right-click choice wins until the Mod Settings value is changed.
@@ -2976,6 +3087,7 @@ void LoadSettings() {
 
     next.borderMergedMode = Wh_GetIntSetting(L"Appearance.BorderMergedMode") != 0;
     next.autoHideFullscreen = Wh_GetIntSetting(L"Behavior.AutoHideFullscreen") != 0;
+    next.fullscreenTuck = Wh_GetIntSetting(L"Behavior.FullscreenTuck") != 0;
     next.hardwareMonitorModule = Wh_GetIntSetting(L"Modules.HardwareMonitorModule") != 0;
     next.connectivityModule = Wh_GetIntSetting(L"Modules.ConnectivityModule") != 0;  // Bunbun
     next.todoModule = Wh_GetIntSetting(L"Modules.TodoModule") != 0;                          // Bunbun
@@ -6097,6 +6209,9 @@ DWORD WINAPI BluetoothThreadProc(void*) {
     std::unordered_map<std::wstring, BluetoothTrackedDevice> deviceCache;
     std::mutex cacheMutex;
     std::vector<DeviceWatcher> watchers;
+    // Bunbun: which devices are connected right now (the cache keeps names of
+    // disconnected ones too), for the low-battery check below.
+    auto connected = std::make_shared<std::unordered_set<std::wstring>>();
 
     // Watching the "Connected" selector directly means a device APPEARING
     // in the watcher (Added) is a connect, and DISAPPEARING (Removed) is a
@@ -6111,8 +6226,12 @@ DWORD WINAPI BluetoothThreadProc(void*) {
                     *enumDone = true;
                 });
 
-            watcher.Added([&deviceCache, &cacheMutex, enumDone](
+            watcher.Added([&deviceCache, &cacheMutex, enumDone, connected](
                               DeviceWatcher const&, DeviceInformation const& info) {
+                {
+                    std::lock_guard lock(cacheMutex);
+                    connected->insert(std::wstring(info.Id().c_str()));  // Bunbun
+                }
                 // Devices reported before EnumerationCompleted are the
                 // watcher's initial snapshot (already connected when the mod
                 // started) — cache them silently so a later disconnect still
@@ -6130,8 +6249,12 @@ DWORD WINAPI BluetoothThreadProc(void*) {
                 HandleBluetoothConnected(info, deviceCache, cacheMutex);
             });
 
-            watcher.Removed([&deviceCache, &cacheMutex](
+            watcher.Removed([&deviceCache, &cacheMutex, connected](
                                 DeviceWatcher const&, DeviceInformationUpdate const& update) {
+                {
+                    std::lock_guard lock(cacheMutex);
+                    connected->erase(std::wstring(update.Id().c_str()));  // Bunbun
+                }
                 HandleBluetoothDisconnected(update.Id(), deviceCache, cacheMutex);
             });
 
@@ -6153,7 +6276,41 @@ DWORD WINAPI BluetoothThreadProc(void*) {
     // DeviceWatcher does its work via WinRT callbacks on background threads;
     // this thread just needs to stay alive to keep the watchers rooted
     // until shutdown is signaled.
+    // Bunbun: every 5 minutes, a heads-up for connected devices at 20% or below,
+    // once a day per device.
+    std::unordered_map<std::wstring, int> warnedDay;
+    int tick = 0;
     while (WaitForSingleObject(g_stopEvent, 1000) == WAIT_TIMEOUT) {
+        if (++tick % 300 != 30) continue;  // first check 30 s after start
+        if (!GetSettingsCopy().bluetoothLowWarning) continue;
+        std::vector<std::pair<std::wstring, std::wstring>> devices;
+        {
+            std::lock_guard lock(cacheMutex);
+            for (const auto& id : *connected) {
+                auto it = deviceCache.find(id);
+                devices.emplace_back(id, it != deviceCache.end() ? it->second.name : std::wstring(L"Bluetooth device"));
+            }
+        }
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        const int today = st.wYear * 400 + st.wMonth * 32 + st.wDay;
+        for (const auto& [id, name] : devices) {
+            const int pct = TryReadBluetoothBatteryPercent(winrt::hstring(id));
+            if (pct < 0 || pct > 20 || warnedDay[id] == today) continue;
+            warnedDay[id] = today;
+            {
+                std::lock_guard lock(g_stateMutex);
+                g_state.notification.active = true;
+                g_state.notification.app = L"Bluetooth";
+                g_state.notification.title = name + L" battery is low";
+                g_state.notification.body = std::to_wstring(pct) + L"% left \x00B7 charge it soon";
+                g_state.notification.icon = {};
+                g_state.notification.expiresAt = NowSeconds() + 5.0;
+            }
+            g_layoutDirty = true;
+            if (HWND hwnd = g_hwnd) PostMessageW(hwnd, WM_APP_NEW_EVENT, 0, 0);
+            Wh_Log(L"Bluetooth: %s battery low (%d%%).", name.c_str(), pct);
+        }
     }
 
     for (auto& watcher : watchers) {
@@ -6514,6 +6671,12 @@ DWORD WINAPI AudioThreadProc(void*) {
         }
 
         if (FAILED(hr)) {
+            // Bunbun: say why once, so flat music bars can be explained from the log.
+            static HRESULT s_lastLogged = S_OK;
+            if (hr != s_lastLogged) {
+                s_lastLogged = hr;
+                Wh_Log(L"Audio loopback capture failed (0x%08X); music bars stay flat.", static_cast<unsigned>(hr));
+            }
             if (mixFormat) {
                 CoTaskMemFree(mixFormat);
             }
@@ -6525,6 +6688,11 @@ DWORD WINAPI AudioThreadProc(void*) {
         // don't flag a stall before the first packet has even arrived.
         double lastPacketTime = NowSeconds();
         double nextWatchdogCheck = lastPacketTime + 1.0;
+        // Bunbun: what the capture actually hears, logged every 5 s (BUNBUN_LOG=1),
+        // so "the music bars are flat" can be told apart from "no sound reaches us".
+        float peakSinceLog = 0.0f;
+        int silentPackets = 0, loudPackets = 0;
+        double nextLevelLog = lastPacketTime + 5.0;
 
         while (WaitForSingleObject(g_stopEvent, 16) == WAIT_TIMEOUT) {
             if (!g_audioCaptureNeeded.load(std::memory_order_relaxed)) {
@@ -6547,8 +6715,11 @@ DWORD WINAPI AudioThreadProc(void*) {
 
                 lastPacketTime = NowSeconds();
 
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) ++silentPackets;
+                else ++loudPackets;
                 if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT)) {
                     amplitude = std::max(amplitude, SampleAudioAmplitude(data, frames, mixFormat));
+                    peakSinceLog = std::max(peakSinceLog, amplitude);
                     PushAudioChunks(data, frames, mixFormat);
                 } else {
                     PushWaveformSample(0.0f);
@@ -6580,6 +6751,12 @@ DWORD WINAPI AudioThreadProc(void*) {
             // that combination almost never happens unless the loopback
             // engine has stalled, so it won't fire during normal silence.
             const double now = NowSeconds();
+            if (now >= nextLevelLog) {
+                nextLevelLog = now + 5.0;
+                Wh_Log(L"Audio loopback: peak %.3f, %d sound / %d silent packets in 5 s.", peakSinceLog, loudPackets, silentPackets);
+                peakSinceLog = 0.0f;
+                silentPackets = loudPackets = 0;
+            }
             if (now >= nextWatchdogCheck) {
                 nextWatchdogCheck = now + 1.0;
                 bool mediaPlayingNow = false;
@@ -7824,10 +8001,17 @@ int AgentButtonAt(int x, int y) {
 }
 
 // Returns true when the click landed on an agent card button.
+void HandleAgentAction(int action, int arg);  // Bunbun: studio_module.inc
+bool HandleStudioWheel(HWND hwnd, LPARAM lParam, int step);  // Bunbun: studio_module.inc
+
 bool HandleAgentClick(int x, int y) {
     const int i = AgentButtonAt(x, y);
     if (i < 0) return false;
     const AgentButton b = g_agentButtons[static_cast<size_t>(i)];
+    if (b.action != 0) {  // Bunbun: plan feedback, reply, question steps
+        HandleAgentAction(b.action, b.arg);
+        return true;
+    }
     // Clear at once so a double click cannot answer the next queued request.
     g_agentButtons.clear();
     g_agentHoveredButton = -1;
@@ -7925,6 +8109,11 @@ void ApplyLookupHotkey() {
     }
 
     const Settings settings = GetSettingsCopy();
+    // Bunbun: the tuck hotkey rides along with the lookup one.
+    UnregisterHotKey(hwnd, ID_TUCK_HOTKEY);
+    if (settings.tuckHotkey && !RegisterHotKey(hwnd, ID_TUCK_HOTKEY, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'H')) {
+        Wh_Log(L"Failed to register the tuck hotkey Ctrl+Alt+H (error %lu); another app may own it.", GetLastError());
+    }
     if (!settings.quickLookup) {
         return;
     }
@@ -7960,6 +8149,7 @@ void SeekMediaToTicks(int64_t targetTicks);
 void PasteIntoFileTray(HWND hwnd);
 void SaveFileTray();
 void LoadFileTray();
+int AgentKindOf(const std::wstring& displayName);  // Bunbun: studio_module.inc
 
 void HandleStatusClickAtPoint(HWND hwnd, LPARAM lParam) {
     bb::AgentView agent;
@@ -7968,6 +8158,7 @@ void HandleStatusClickAtPoint(HWND hwnd, LPARAM lParam) {
     {
         std::lock_guard lock(g_stateMutex);
         if (g_settings.bunbunAgents && g_state.agent.phase != bb::AgentPhase::None &&
+            g_settings.showAgent[AgentKindOf(g_state.agent.agent)] &&  // Bunbun: per-agent switch
             (!g_state.agent.project.empty() || !g_state.agent.agent.empty())) {
             agent = g_state.agent;
             hasAgent = true;
@@ -8167,22 +8358,82 @@ void SendMediaTransportCommand(int cmd) {
     }).detach();
 }
 
+// Bunbun: finding the player's own window, so clicking the island brings it back
+// instead of launching it again. The media session names its app by an app ID,
+// which is an exe name for most desktop players ("Spotify.exe", "chrome") but a
+// hash for Firefox and "Package_hash!App" for Store apps (Spotify from the Store,
+// Apple Music), whose windows belong to ApplicationFrameHost. So a window counts
+// as the app's when its own app ID, its process's app ID or package, or its exe
+// matches. Windows hidden in the tray (closed to the notification area) count
+// too, after visible ones: they're shown again rather than started twice.
 struct WindowSearch {
     std::wstring targetTitle;
     std::wstring targetApp;
     HWND foundHwnd = nullptr;
-    HWND fallbackHwnd = nullptr;
+    HWND fallbackHwnd = nullptr;   // visible (or minimised) window of the app
+    HWND hiddenHwnd = nullptr;     // the app's main window, hidden in the tray
 };
 
-BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
-    if (!IsWindowVisible(hwnd)) {
-        return TRUE;
+std::wstring WindowAppId(HWND hwnd) {
+    // PKEY_AppUserModel_ID, spelled out so no extra import library is needed.
+    static const PROPERTYKEY kAppIdKey = {{0x9F4C2855, 0x9F79, 0x4B39, {0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3}}, 5};
+    std::wstring id;
+    IPropertyStore* store = nullptr;
+    if (SUCCEEDED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store))) && store) {
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        if (SUCCEEDED(store->GetValue(kAppIdKey, &v)) && v.vt == VT_LPWSTR && v.pwszVal) id = v.pwszVal;
+        PropVariantClear(&v);
+        store->Release();
     }
+    return id;
+}
 
+// The process's own app ID ("Package_hash!App") and package family, for Store apps.
+void ProcessAppIds(DWORD pid, std::wstring* appId, std::wstring* family) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return;
+    wchar_t buf[256] = {};  // app IDs are at most 130 characters
+    UINT32 len = ARRAYSIZE(buf);
+    if (GetApplicationUserModelId(process, &len, buf) == ERROR_SUCCESS) *appId = buf;
+    wchar_t fam[128] = {};  // family names are at most 64
+    len = ARRAYSIZE(fam);
+    if (GetPackageFamilyName(process, &len, fam) == ERROR_SUCCESS) *family = fam;
+    CloseHandle(process);
+}
+
+bool WindowBelongsToApp(HWND hwnd, const std::wstring& targetLowerIn) {
+    std::wstring target = targetLowerIn;
+    if (target.size() >= 2 && target.front() == L'"' && target.back() == L'"') target = target.substr(1, target.size() - 2);
+    if (target.empty()) return false;
+    if (ToLowerCopy(WindowAppId(hwnd)) == target) return true;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) return false;
+    std::wstring appId, family;
+    ProcessAppIds(pid, &appId, &family);
+    if (!appId.empty() && ToLowerCopy(appId) == target) return true;
+    // "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify": its package family is the part before "!".
+    const size_t bang = target.find(L'!');
+    if (!family.empty() && bang != std::wstring::npos && ToLowerCopy(family) == target.substr(0, bang)) return true;
+    std::wstring exePath;
+    if (!ProcessImageNameForPid(pid, &exePath)) return false;
+    const std::wstring exeLower = ToLowerCopy(exePath);
+    if (exeLower == target) return true;
+    const size_t slash = exeLower.find_last_of(L"\\/");
+    const std::wstring exeName = slash == std::wstring::npos ? exeLower : exeLower.substr(slash + 1);
+    return exeName == target || exeName == target + L".exe";
+}
+
+BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     auto* search = reinterpret_cast<WindowSearch*>(lParam);
-
+    // Only real app windows: top level, unowned, not tool windows, with a title.
+    if (GetWindow(hwnd, GW_OWNER) || (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) return TRUE;
     wchar_t title[512];
-    if (GetWindowTextW(hwnd, title, ARRAYSIZE(title)) > 0) {
+    const int titleLen = GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+    const bool visible = IsWindowVisible(hwnd) != FALSE;
+
+    if (visible && titleLen > 0 && !search->targetTitle.empty()) {
         std::wstring wTitle(title);
         // Case-insensitive check if window title contains currently playing media title
         auto it = std::search(
@@ -8190,44 +8441,22 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
             search->targetTitle.begin(), search->targetTitle.end(),
             [](wchar_t ch1, wchar_t ch2) { return towlower(ch1) == towlower(ch2); }
         );
-
         if (it != wTitle.end()) {
             search->foundHwnd = hwnd;
             return FALSE; // found exact title, stop enumerating
         }
     }
 
-    // Fallback: check if the window belongs to the target app (by process executable name)
-    if (!search->fallbackHwnd && !search->targetApp.empty()) {
-        DWORD pid = 0;
-        GetWindowThreadProcessId(hwnd, &pid);
-        if (pid != 0) {
-            std::wstring exePath;
-            if (ProcessImageNameForPid(pid, &exePath)) {
-                std::wstring targetLower = ToLowerCopy(search->targetApp);
-                std::wstring exeLower = ToLowerCopy(exePath);
-
-                // Remove quotes from target AppUserModelId if any
-                if (targetLower.size() >= 2 && targetLower.front() == L'"' && targetLower.back() == L'"') {
-                    targetLower = targetLower.substr(1, targetLower.size() - 2);
-                }
-
-                if (exeLower == targetLower) {
-                    search->fallbackHwnd = hwnd;
-                } else {
-                    std::wstring exeName = exeLower;
-                    size_t slashPos = exeName.find_last_of(L"\\/");
-                    if (slashPos != std::wstring::npos) {
-                        exeName = exeName.substr(slashPos + 1);
-                    }
-                    if (exeName == targetLower || exeName == targetLower + L".exe") {
-                        search->fallbackHwnd = hwnd;
-                    }
-                }
-            }
-        }
+    if (search->targetApp.empty() || titleLen == 0) return TRUE;
+    if (visible) {
+        if (!search->fallbackHwnd && WindowBelongsToApp(hwnd, ToLowerCopy(search->targetApp))) search->fallbackHwnd = hwnd;
+    } else if (!search->hiddenHwnd && (GetWindowLongW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION) {
+        // A hidden main window is big; hidden helper windows of the same app usually aren't.
+        RECT r{};
+        GetWindowRect(hwnd, &r);
+        if (r.right - r.left >= 200 && r.bottom - r.top >= 150 && WindowBelongsToApp(hwnd, ToLowerCopy(search->targetApp)))
+            search->hiddenHwnd = hwnd;
     }
-
     return TRUE;
 }
 
@@ -8386,7 +8615,8 @@ void OpenRelevantApp() {
         search.targetApp = app;
         EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&search));
 
-        HWND hwndToFocus = search.foundHwnd ? search.foundHwnd : search.fallbackHwnd;
+        // Bunbun: a window hidden in the tray is shown again rather than the app started twice.
+        HWND hwndToFocus = search.foundHwnd ? search.foundHwnd : search.fallbackHwnd ? search.fallbackHwnd : search.hiddenHwnd;
 
         if (hwndToFocus) {
             FocusWindow(hwndToFocus);
@@ -8523,6 +8753,10 @@ std::vector<MediaSourceMenuItem> AppendMediaSourceItems(HMENU menu) {
 
 // Bunbun: undo for Ask Bun's commands, and setting the screen brightness.
 #include "modules/bun_actions.inc"
+#include "modules/sounds_module.inc"  // Bunbun: little UI chimes
+#include "modules/mirror_module.inc"  // Bunbun: camera preview page
+#include "modules/color_picker_module.inc"  // Bunbun: pick a colour anywhere on screen
+#include "modules/studio_module.inc"  // Bunbun: Studio layout, extra pages, tuck away
 
 // ── Bunbun: Bun's local assistant ───────────────────────────────────────────
 // Parses with bb::assistant and carries the intent out. Runs on the window
@@ -8556,6 +8790,10 @@ QuickLookup::Result RunBun(const std::wstring& question) {
         case as::Action::Reply:
             r.body = in.reply;
             r.unknown = in.unknown;  // Bunbun: the local AI may answer instead
+            break;
+        case as::Action::Lookup:
+            r.lookupFetch = true;
+            r.lookupTopic = in.target;
             break;
         case as::Action::Open: {
             const std::wstring target = in.target.empty() ? as::FindStartMenuApp(in.label) : in.target;
@@ -8856,25 +9094,45 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
         timerRunning = g_state.timer.running;
     }
 
+    // Bunbun: a dark menu with icons, grouped: quick actions, the live bits (timer,
+    // music, tray), lyrics, appearance, settings. Command ids are unchanged except
+    // the new ones in the 44-59 range (see the switch below).
+    UseDarkMenus();
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 40, g_manuallyHidden.load() ? L"Show Island" : L"Hide Island");
-    AppendMenuW(menu, MF_STRING, 1, L"Dismiss");
+    auto add = [](HMENU m, UINT flags, UINT_PTR id, const wchar_t* text, wchar_t glyph = 0) {
+        AppendMenuW(m, flags, id, text);
+        if (glyph) SetMenuGlyph(m, GetMenuItemCount(m) - 1, glyph);
+    };
+    auto submenu = [&](HMENU parent, HMENU child, const wchar_t* text, wchar_t glyph) {
+        add(parent, MF_POPUP, reinterpret_cast<UINT_PTR>(child), text, glyph);
+    };
 
+    // ── Quick actions ──
+    add(menu, MF_STRING, 46, L"Pick a colour on screen", kGlyphEyedropper);
+    add(menu, MF_STRING, 47, g_tucked.load() ? L"Bring the island back" : L"Tuck away\tCtrl+Alt+H", kGlyphTuck);
+    add(menu, MF_STRING | (g_pinnedExpanded.load() ? MF_CHECKED : 0), 2, L"Keep open", kGlyphPin);
+    add(menu, MF_STRING, 1, L"Dismiss alerts", kGlyphDismiss);
+    add(menu, MF_STRING, 40, g_manuallyHidden.load() ? L"Show the island" : L"Hide the island", kGlyphHide);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    // ── Timer, music, tray ──
     HMENU timerMenu = CreatePopupMenu();
-    AppendMenuW(timerMenu, MF_STRING, 30, L"Start 25 min Focus");
-    AppendMenuW(timerMenu, MF_STRING, 31, L"Start 50 min Focus");
-    AppendMenuW(timerMenu, MF_STRING, 32, L"Start 5 min Break");
+    AppendMenuW(timerMenu, MF_STRING, 30, L"Focus for 25 min");
+    AppendMenuW(timerMenu, MF_STRING, 31, L"Focus for 50 min");
+    AppendMenuW(timerMenu, MF_STRING, 32, L"Break for 5 min");
     if (timerActive) {
-        AppendMenuW(timerMenu, MF_STRING, 33, timerRunning ? L"Pause Timer" : L"Resume Timer");
-        AppendMenuW(timerMenu, MF_STRING, 34, L"Stop Timer");
+        AppendMenuW(timerMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(timerMenu, MF_STRING, 33, timerRunning ? L"Pause" : L"Resume");
+        AppendMenuW(timerMenu, MF_STRING, 34, L"Stop");
     }
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(timerMenu), L"Focus Timer");
+    submenu(menu, timerMenu, timerActive ? (timerRunning ? L"Focus timer (running)" : L"Focus timer (paused)")
+                                         : L"Focus timer", kGlyphTimer);
 
     std::vector<MediaSourceMenuItem> mediaSourceItems;
     {
         HMENU sourceMenu = CreatePopupMenu();
         mediaSourceItems = AppendMediaSourceItems(sourceMenu);
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sourceMenu), Loc(L"Media source"));
+        submenu(menu, sourceMenu, Loc(L"Media source"), kGlyphMusic);
     }
     if (g_settings.fileTrayModule) {
         size_t trayCount = 0;
@@ -8889,62 +9147,20 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
             : L"Clear tray (" + std::to_wstring(trayCount) + L")";
         AppendMenuW(trayMenu, MF_STRING | (trayCount == 0 ? (MF_GRAYED | MF_DISABLED) : 0), 41,
                     clearLabel.c_str());
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(trayMenu), Loc(L"File Tray"));
+        submenu(menu, trayMenu, Loc(L"File Tray"), kGlyphTray);
     }
-    AppendMenuW(menu, MF_STRING, 2, L"Pin expanded");
-    AppendMenuW(menu, MF_STRING, 3, g_gameOverlayPinned.load() ? L"Hide game overlay" : L"Show game overlay");
-    {
-        // g_settings already reflects any right-click override, so it is the
-        // source of truth for which style is active.
-        const int currentShape = g_settings.notchStyle ? 2 : (g_settings.w11Style ? 1 : 0);
-        HMENU shapeMenu = CreatePopupMenu();
-        AppendMenuW(shapeMenu, MF_STRING, kShapeMenuIdBase, L"iPhone Pill");
-        AppendMenuW(shapeMenu, MF_STRING, kShapeMenuIdBase + 1, L"Windows 11 Flyout");
-        if (IsBottomPosition(g_settings.position)) {
-            AppendMenuW(shapeMenu, MF_STRING | MF_GRAYED | MF_DISABLED, kShapeMenuIdBase + 2,
-                        L"macOS Notch (unavailable at bottom)");
-        } else {
-            AppendMenuW(shapeMenu, MF_STRING, kShapeMenuIdBase + 2, L"macOS Notch");
-        }
-        CheckMenuRadioItem(shapeMenu, kShapeMenuIdBase, kShapeMenuIdBase + 2,
-                           kShapeMenuIdBase + static_cast<UINT>(currentShape), MF_BYCOMMAND);
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(shapeMenu), L"Shape style");
-    }
-    const int activeExpandOnHover = Wh_GetIntValue(L"ExpandOnHoverOverride", -1) >= 0
-                          ? Wh_GetIntValue(L"ExpandOnHoverOverride", 0)
-                          : (Wh_GetIntSetting(L"Behavior.ExpandOnHover") != 0);
-    AppendMenuW(menu, MF_STRING, 11, activeExpandOnHover ? L"Expand on Click" : L"Expand on Hover");
-    AppendMenuW(menu, MF_STRING | (Wh_GetIntValue(L"CollapsedLyrics", 0) ? MF_CHECKED : 0), 13,
-                L"Show lyrics on collapsed island");
-    AppendMenuW(menu,
-                MF_STRING | (Wh_GetIntValue(L"LyricsPinnedFirst", 0) ? MF_CHECKED : 0) |
-                    (g_settings.lyrics ? 0 : (MF_GRAYED | MF_DISABLED)),
-                14, L"Pin lyrics as first tab");
-    AppendMenuW(menu,
-                MF_STRING | (g_settings.mediaTabLyrics ? MF_CHECKED : 0),
-                15, L"Show lyrics in media tab");
-    {
-        bool cacheOn = false;
-        {
-            std::lock_guard lock(g_settingsMutex);
-            cacheOn = g_settings.lyricsCache && g_settings.lyricsCacheMaxMB > 0;
-        }
-        // Counters are maintained by the lyrics thread; nothing is scanned here.
-        std::wstring cacheLabel = L"Clear lyrics cache";
-        if (g_lyricsCacheCountsValid.load(std::memory_order_relaxed)) {
-            const int songs = g_lyricsCacheFileCount.load(std::memory_order_relaxed);
-            const uint64_t bytes = g_lyricsCacheBytes.load(std::memory_order_relaxed);
-            wchar_t detail[64] = {};
-            if (bytes >= 1048576ull) {
-                swprintf_s(detail, L" (%d songs, %.1f MB)", songs, static_cast<double>(bytes) / 1048576.0);
-            } else {
-                swprintf_s(detail, L" (%d songs, %llu KB)", songs,
-                           static_cast<unsigned long long>((bytes + 1023ull) / 1024ull));
-            }
-            cacheLabel += detail;
-        }
-        AppendMenuW(menu, MF_STRING | (cacheOn ? 0 : (MF_GRAYED | MF_DISABLED)), 43, cacheLabel.c_str());
 
+    // ── Lyrics ──
+    {
+        HMENU lyricsMenu = CreatePopupMenu();
+        AppendMenuW(lyricsMenu, MF_STRING | (g_settings.collapsedLyrics ? MF_CHECKED : 0), 13,
+                    L"On the small island");
+        AppendMenuW(lyricsMenu, MF_STRING | (g_settings.mediaTabLyrics ? MF_CHECKED : 0), 15, L"In the music page");
+        AppendMenuW(lyricsMenu,
+                    MF_STRING | (Wh_GetIntValue(L"LyricsPinnedFirst", 0) ? MF_CHECKED : 0) |
+                        (g_settings.lyrics ? 0 : (MF_GRAYED | MF_DISABLED)),
+                    14, L"Lyrics as the first page");
+        AppendMenuW(lyricsMenu, MF_SEPARATOR, 0, nullptr);
         {
             // Shows and adjusts whichever profile is active right now.
             const bool bt = g_defaultOutputIsBluetooth.load(std::memory_order_relaxed);
@@ -8965,33 +9181,92 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
             AppendMenuW(lyricsSyncMenu, MF_STRING, kLyricsSyncMenuIdBase + 6, L"Later -250 ms");
             AppendMenuW(lyricsSyncMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(lyricsSyncMenu, MF_STRING, kLyricsSyncMenuIdBase + 7, L"Reset this profile");
-            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(lyricsSyncMenu), L"Lyrics sync");
+            AppendMenuW(lyricsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(lyricsSyncMenu), header);
         }
+        bool cacheOn = false;
+        {
+            std::lock_guard lock(g_settingsMutex);
+            cacheOn = g_settings.lyricsCache && g_settings.lyricsCacheMaxMB > 0;
+        }
+        // Counters are maintained by the lyrics thread; nothing is scanned here.
+        std::wstring cacheLabel = L"Clear saved lyrics";
+        if (g_lyricsCacheCountsValid.load(std::memory_order_relaxed)) {
+            const int songs = g_lyricsCacheFileCount.load(std::memory_order_relaxed);
+            const uint64_t bytes = g_lyricsCacheBytes.load(std::memory_order_relaxed);
+            wchar_t detail[64] = {};
+            if (bytes >= 1048576ull) {
+                swprintf_s(detail, L" (%d songs, %.1f MB)", songs, static_cast<double>(bytes) / 1048576.0);
+            } else {
+                swprintf_s(detail, L" (%d songs, %llu KB)", songs,
+                           static_cast<unsigned long long>((bytes + 1023ull) / 1024ull));
+            }
+            cacheLabel += detail;
+        }
+        AppendMenuW(lyricsMenu, MF_STRING | (cacheOn ? 0 : (MF_GRAYED | MF_DISABLED)), 43, cacheLabel.c_str());
+        submenu(menu, lyricsMenu, L"Lyrics", kGlyphLyrics);
+    }
+
+    // ── Appearance ──
+    {
+        HMENU look = CreatePopupMenu();
+        AppendMenuW(look, MF_STRING, 48, L"Classic layout");
+        AppendMenuW(look, MF_STRING, 49, L"Studio layout");
+        CheckMenuRadioItem(look, 48, 49, g_settings.studioLayout ? 49 : 48, MF_BYCOMMAND);
+        AppendMenuW(look, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(look, MF_STRING, 53, L"Mascot when idle");
+        AppendMenuW(look, MF_STRING, 54, L"Eyes when idle");
+        CheckMenuRadioItem(look, 53, 54, g_settings.idleEyes ? 54 : 53, MF_BYCOMMAND);
+        AppendMenuW(look, MF_SEPARATOR, 0, nullptr);
+
+        // g_settings already reflects any right-click override, so it is the
+        // source of truth for which style is active.
+        const int currentShape = g_settings.notchStyle ? 2 : (g_settings.w11Style ? 1 : 0);
+        HMENU shapeMenu = CreatePopupMenu();
+        AppendMenuW(shapeMenu, MF_STRING, kShapeMenuIdBase, L"Pill");
+        AppendMenuW(shapeMenu, MF_STRING, kShapeMenuIdBase + 1, L"Windows 11 flyout");
+        if (IsBottomPosition(g_settings.position)) {
+            AppendMenuW(shapeMenu, MF_STRING | MF_GRAYED | MF_DISABLED, kShapeMenuIdBase + 2,
+                        L"Notch (not at the bottom)");
+        } else {
+            AppendMenuW(shapeMenu, MF_STRING, kShapeMenuIdBase + 2, L"Notch");
+        }
+        CheckMenuRadioItem(shapeMenu, kShapeMenuIdBase, kShapeMenuIdBase + 2,
+                           kShapeMenuIdBase + static_cast<UINT>(currentShape), MF_BYCOMMAND);
+        AppendMenuW(look, MF_POPUP, reinterpret_cast<UINT_PTR>(shapeMenu), L"Shape");
+
+        const int activeOpacity = g_pillOpacityOverride.load();
+        HMENU opacityMenu = CreatePopupMenu();
+        AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 100 ? MF_CHECKED : 0), 4, L"100% (opaque)");
+        AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 85 ? MF_CHECKED : 0), 5, L"85%");
+        AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 70 ? MF_CHECKED : 0), 6, L"70%");
+        AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 55 ? MF_CHECKED : 0), 7, L"55%");
+        AppendMenuW(opacityMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(opacityMenu, MF_STRING | (activeOpacity < 0 ? MF_CHECKED : 0), 8, L"Theme default");
+        AppendMenuW(look, MF_POPUP, reinterpret_cast<UINT_PTR>(opacityMenu), L"Transparency");
+
+        // Color theme presets. Built from kThemePalettes and nested in a submenu:
+        // nine palettes listed flat would dominate the menu.
+        const int activeTheme = Wh_GetIntValue(kThemeValueName, static_cast<int>(g_settings.themePreset));
+        HMENU themeMenu = CreatePopupMenu();
+        for (int i = 0; i < kCustomThemeIndex; ++i) {
+            AppendMenuW(themeMenu, MF_STRING | (activeTheme == i ? MF_CHECKED : 0),
+                        kThemeMenuIdBase + static_cast<UINT>(i), kThemePalettes[i].label);
+        }
+        AppendMenuW(themeMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(themeMenu, MF_STRING | (activeTheme >= kCustomThemeIndex ? MF_CHECKED : 0),
+                    kThemeMenuIdBase + static_cast<UINT>(kCustomThemeIndex), L"Custom colours");
+        AppendMenuW(look, MF_POPUP, reinterpret_cast<UINT_PTR>(themeMenu), L"Theme");
+        AppendMenuW(look, MF_SEPARATOR, 0, nullptr);
+
+        const int activeExpandOnHover = Wh_GetIntValue(L"ExpandOnHoverOverride", -1) >= 0
+                              ? Wh_GetIntValue(L"ExpandOnHoverOverride", 0)
+                              : (Wh_GetIntSetting(L"Behavior.ExpandOnHover") != 0);
+        AppendMenuW(look, MF_STRING | (activeExpandOnHover ? MF_CHECKED : 0), 11, L"Open on hover");
+        AppendMenuW(look, MF_STRING | (g_gameOverlayPinned.load() ? MF_CHECKED : 0), 3, L"Game overlay");
+        submenu(menu, look, L"Appearance", kGlyphAppearance);
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    const int activeOpacity = g_pillOpacityOverride.load();
-    HMENU opacityMenu = CreatePopupMenu();
-    AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 100 ? MF_CHECKED : 0), 4, L"100% (Opaque)");
-    AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 85 ? MF_CHECKED : 0), 5, L"85%");
-    AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 70 ? MF_CHECKED : 0), 6, L"70%");
-    AppendMenuW(opacityMenu, MF_STRING | (activeOpacity == 55 ? MF_CHECKED : 0), 7, L"55%");
-    AppendMenuW(opacityMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(opacityMenu, MF_STRING | (activeOpacity < 0 ? MF_CHECKED : 0), 8, L"Theme default");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(opacityMenu), L"Transparency");
-    // Color theme presets. Built from kThemePalettes and nested in a submenu:
-    // nine palettes listed flat would dominate the root menu.
-    const int activeTheme = Wh_GetIntValue(kThemeValueName, static_cast<int>(g_settings.themePreset));
-    HMENU themeMenu = CreatePopupMenu();
-    for (int i = 0; i < kCustomThemeIndex; ++i) {
-        AppendMenuW(themeMenu, MF_STRING | (activeTheme == i ? MF_CHECKED : 0),
-                    kThemeMenuIdBase + static_cast<UINT>(i), kThemePalettes[i].label);
-    }
-    AppendMenuW(themeMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(themeMenu, MF_STRING | (activeTheme >= kCustomThemeIndex ? MF_CHECKED : 0),
-                kThemeMenuIdBase + static_cast<UINT>(kCustomThemeIndex), L"Custom Colors");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(themeMenu), L"Theme");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 9, L"Settings");
+    add(menu, MF_STRING, 9, L"Settings\x2026", kGlyphSettings);
 
     SetForegroundWindow(hwnd);
     DwmBackdrop::EnsureBehind(hwnd);
@@ -9099,7 +9374,9 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
             break;
         }
         case 13: {
-            Wh_SetIntValue(L"CollapsedLyrics", Wh_GetIntValue(L"CollapsedLyrics", 0) ? 0 : 1);
+            // Bunbun: the same switch as Settings (Bunbun.PillLyrics); off removes the key.
+            WriteBunbunSetting(L"PillLyrics", g_settings.collapsedLyrics ? L"-" : L"true");
+            Wh_SetIntValue(L"CollapsedLyrics", 0);
             LoadSettings();
             g_layoutDirty = true;
             TriggerNudge();
@@ -9124,6 +9401,24 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
         }
         case 30:
             StartFocusTimer(25, false);
+            break;
+        case 46:  // Bunbun: colour picker
+            ColorPicker::Start();
+            break;
+        case 48:  // Bunbun: Classic layout (the default: remove the key)
+            WriteBunbunSetting(L"Layout", L"-");
+            break;
+        case 49:  // Bunbun: Studio layout
+            WriteBunbunSetting(L"Layout", L"studio");
+            break;
+        case 53:  // Bunbun: mascot when idle (the default)
+            WriteBunbunSetting(L"IdleFace", L"-");
+            break;
+        case 54:  // Bunbun: eyes when idle
+            WriteBunbunSetting(L"IdleFace", L"eyes");
+            break;
+        case 47:  // Bunbun: tuck away / bring back
+            SetTucked(!g_tucked.load());
             break;
         case 31:
             StartFocusTimer(50, false);
@@ -9330,6 +9625,10 @@ std::wstring WidestDigitForm(std::wstring text) {
 // ── Collapsed-pill lyrics ────────────────────────────────────────────────────
 // Width of the collapsed media pill while it carries a lyric line (content px).
 constexpr float kCollapsedLyricsWidth = 320.0f;
+// Bunbun: the lyric pill fits the song: wide enough for its longest line, between
+// 280 and 380 (content units). Set by DrawCollapsedLyrics, 0 until a song's lyrics
+// are measured.
+std::atomic<float> g_collapsedLyricsWidth{0.0f};
 // Bunbun: narrower when the pill only carries the song title (no lyrics).
 constexpr float kCollapsedTitleWidth = 260.0f;
 
@@ -9350,6 +9649,7 @@ struct CollapsedLyricLine {
     float width = 0.0f;
     float height = 0.0f;
     bool isTitle = false;  // true when this is the media-title fallback, not a lyric line
+    float builtFor = 0.0f; // Bunbun: the slot width a lyric line was fitted to
 };
 
 class Renderer {
@@ -9519,7 +9819,12 @@ class Renderer {
                 DrawIslandSurface(D2D1::RectF(cx - width * scale * 0.5f, cy - height * scale * 0.5f,
                                               cx + width * scale * 0.5f, cy + height * scale * 0.5f),
                                   primary.kind, settings);
-                DrawBunSlot(state, settings, primary, D2D1::RectF(left, top, left + g_bunSlotWidth, top + height), now);
+                // Bunbun: with nothing beside it (Bunbun.IdleStripItems = nothing), the
+                // face sits in the middle of the island, like a creature in the notch.
+                const bool faceOnly = primary.kind == IslandKind::Idle && !settings.idleShowClock &&
+                                      !(settings.weather && settings.idleShowWeather);
+                const float slotLeft = faceOnly ? left + (width - g_bunSlotWidth) * 0.5f : left;
+                DrawBunSlot(state, settings, primary, D2D1::RectF(slotLeft, top, slotLeft + g_bunSlotWidth, top + height), now);
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left + g_bunSlotWidth * 0.82f, top, left + width, top + height), scale, now, false);
             } else {
@@ -9675,10 +9980,11 @@ class Renderer {
         GetLocalTime(&local);
         const std::wstring clock = FormatIslandTime(local, settings.clockFollowSystem,
                                                     settings.use24HourClock, settings.showSeconds);
-        metrics.clockWidth =
-            MeasureTextWidthCached(WidestDigitForm(clock), fmt, idleClockWidthCache_);
+        // Bunbun: Bunbun.IdleStripItems can leave out the time and/or the weather.
+        metrics.clockWidth = settings.idleShowClock
+            ? MeasureTextWidthCached(WidestDigitForm(clock), fmt, idleClockWidthCache_) : 0.0f;
 
-        metrics.hasWeather = settings.weather;
+        metrics.hasWeather = settings.weather && settings.idleShowWeather;
         if (metrics.hasWeather) {
             // Mirrors the label DrawIdleDashboard builds, including the no-data
             // placeholder, so the reserved slot matches what gets drawn.
@@ -9701,8 +10007,9 @@ class Renderer {
 
         float total = IdleStripLayout::kPadX * 2.0f + metrics.clockWidth;
         if (metrics.hasWeather) {
-            total += IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth +
-                     metrics.weatherWidth;
+            total += metrics.clockWidth > 0.0f  // Bunbun: no divider without a clock
+                ? IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth + metrics.weatherWidth
+                : metrics.weatherWidth;
         }
         total += metrics.privacyReserve;
 
@@ -10379,7 +10686,7 @@ class Renderer {
     float DrawIslandSurface(D2D1_RECT_F rect, IslandKind kind, const Settings& settings) {
         float radius = settings.w11Style ? 8.0f * settings.sizeScale : (rect.bottom - rect.top) * 0.5f;
         if (settings.notchStyle) {
-            radius = 16.0f * settings.sizeScale;
+            radius = NotchBottomRadius((rect.bottom - rect.top) / settings.sizeScale) * settings.sizeScale;  // Bunbun
         } else if (!settings.w11Style) {
             radius = std::min(radius, 44.0f * settings.sizeScale);
         }
@@ -10402,6 +10709,14 @@ class Renderer {
         const float w = (rect.right - rect.left) * scale;
         const float h = (rect.bottom - rect.top) * scale;
         rect = D2D1::RectF(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
+
+        // Bunbun: tucked away, the island is only a thin status line.
+        if (ownSurface && g_tucked.load(std::memory_order_relaxed)) {
+            g_studioHits.clear();
+            DrawTuckLine(state, rect, now);
+            return;
+        }
+        if (ownSurface) g_studioHits.clear();  // Bunbun: the frame and pages re-publish them
 
         const float radius = ownSurface ? DrawIslandSurface(rect, activity.kind, settings) : 0.0f;
 
@@ -10436,9 +10751,13 @@ class Renderer {
         D2D1_RECT_F contentRect = unscaledRect;
         if (unH <= 55.0f) contentRect.right -= PrivacyDotsReserve(state, settings);
 
+        // Bunbun: the Studio frame takes a header and a tab bar off the open island.
+        const D2D1_RECT_F pageRect = ownSurface ? BeginStudioFrame(state, settings, activity.kind, unscaledRect, now)
+                                                : unscaledRect;
+
         switch (activity.kind) {
             case IslandKind::Media:
-                DrawMedia(state, unscaledRect, settings, now);
+                DrawMedia(state, pageRect, settings, now);
                 break;
             case IslandKind::Clipboard:
                 DrawClipboard(state, contentRect);
@@ -10477,7 +10796,8 @@ class Renderer {
                 DrawDoNotDisturb(state, contentRect);
                 break;
             case IslandKind::Lookup:
-                DrawLookup(state, contentRect, settings, now);
+                if (settings.studioLayout) DrawStudioChat(state, unscaledRect, settings, now);  // Bunbun
+                else DrawLookup(state, contentRect, settings, now);
                 break;
             case IslandKind::Reminder:
                 DrawReminderPill(state, contentRect, now);
@@ -10493,9 +10813,10 @@ class Renderer {
                 break;
             case IslandKind::Idle:
             default:
-                DrawIdleDashboard(state, unscaledRect, settings, now);
+                DrawIdleDashboard(state, pageRect, settings, now);
                 break;
         }
+        if (ownSurface) EndStudioFrame(state, settings, now);  // Bunbun
 
         // ── Apple-style privacy indicator dots ───────────────────────────────
         // Green dot = camera in use, Orange dot = mic in use.
@@ -10688,8 +11009,19 @@ class Renderer {
         float r = std::min({radius, (rect.right - rect.left) * 0.5f, (rect.bottom - rect.top) * 0.5f});
         if (r < 0.0f) r = 0.0f;
 
-        sink->BeginFigure(D2D1::Point2F(rect.left, rect.top), D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddLine(D2D1::Point2F(rect.right, rect.top));
+        // Bunbun: concave "ears" where the notch meets the screen edge, so it
+        // flows out of the bezel instead of starting with a hard corner. They sit
+        // just outside the body: a quadratic curve from the top edge, past the
+        // body's corner (the control point), down onto its side.
+        const float w = rect.right - rect.left, h = rect.bottom - rect.top;
+        const float ear = std::max(0.0f, std::min({10.0f * g_settings.sizeScale, h / 3.0f, w / 8.0f}));
+
+        sink->BeginFigure(D2D1::Point2F(rect.left - ear, rect.top), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(rect.right + ear, rect.top));
+        if (ear > 0.0f) {
+            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(rect.right, rect.top),
+                                                                 D2D1::Point2F(rect.right, rect.top + ear)));
+        }
         sink->AddLine(D2D1::Point2F(rect.right, rect.bottom - r));
         if (r > 0.0f) {
             sink->AddArc(D2D1::ArcSegment(
@@ -10703,6 +11035,11 @@ class Renderer {
                 D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
         } else {
             sink->AddLine(D2D1::Point2F(rect.left, rect.bottom));
+        }
+        if (ear > 0.0f) {  // Bunbun: the left ear, mirrored
+            sink->AddLine(D2D1::Point2F(rect.left, rect.top + ear));
+            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(rect.left, rect.top),
+                                                                 D2D1::Point2F(rect.left - ear, rect.top)));
         }
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
         sink->Close();
@@ -10958,9 +11295,12 @@ class Renderer {
         }
 
         // ── Month grid ───────────────────────────────────────────────────────
-        const float gridStart = rect.left + 134.0f * scale;
+        // Bunbun: on a wide page (the Studio layout), a roomier grid and an agenda
+        // column on the right instead of empty space.
+        const bool wideCalendar = (rect.right - rect.left) >= 440.0f * scale;
+        const float gridStart = rect.left + (wideCalendar ? 128.0f : 134.0f) * scale;
         const float gridTop = rect.top + 16.0f * scale;
-        const float colW = 28.0f * scale;
+        const float colW = (wideCalendar ? 30.0f : 28.0f) * scale;
         const float headerH = 18.0f * scale;
         const int firstDay = calendarCachedFirstDay_;
 
@@ -11041,6 +11381,11 @@ class Renderer {
 
         textBrush_->SetOpacity(0.96f);
         mutedBrush_->SetOpacity(0.75f);
+        if (wideCalendar) {  // Bunbun
+            const float agendaLeft = gridStart + 7.0f * colW + 14.0f * scale;
+            DrawCalendarAgenda(state, D2D1::RectF(agendaLeft, rect.top + 16.0f * scale, rect.right - 4.0f * scale,
+                                                  rect.bottom - 14.0f * scale), now);
+        }
     }
 
     // Wind direction is rendered as flow arrows, not bearing arrows -- a wind
@@ -12093,6 +12438,7 @@ class Renderer {
 #include "modules/bunbun_pills_draw.inc"
     // Bunbun: the To-do tab and the reminder pill.
 #include "modules/todos_draw.inc"
+#include "modules/studio_draw.inc"  // Bunbun: Studio frame, Home tiles, Agent / Clipboard / Note pages
 
         // Karaoke effect: a soft wave rides the wipe boundary across the active line.
     // The layout and per-cluster rects are cached (karaokeCache_) and only rebuilt
@@ -12340,7 +12686,9 @@ class Renderer {
 
         if (!state.lyrics.hasData || state.lyrics.lines.empty()) {
             mutedBrush_->SetOpacity(0.55f);
-            const wchar_t* msg = Loc(L"No lyrics found for this track.");
+            // Bunbun: instrumentals say so instead of "no lyrics".
+            const wchar_t* msg = state.lyrics.instrumental ? Loc(L"Instrumental")
+                                                           : Loc(L"No lyrics found for this track.");
             target_->DrawTextW(msg, static_cast<UINT32>(wcslen(msg)), textFormat_.Get(), bodyRect,
                                mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             mutedBrush_->SetOpacity(0.75f);
@@ -12369,6 +12717,9 @@ class Renderer {
                     break;
                 }
             }
+
+            // Bunbun: in a long instrumental break the active line fades to the note glyph.
+            const float gapNoteMix = LyricsGapNoteMix(state.lyrics.lines, currentIndex, posMs);
 
             // Fixed-duration ease-in-out scroll toward the active line.
             constexpr float kScrollAnimDurationSec = 0.55f;
@@ -12464,12 +12815,26 @@ class Renderer {
                 const float distance = static_cast<float>(idx) - lyricsScrollPos_;
                 const float y = centerY + distance * lineHeight;
 
-                const float edgeFade = EdgeFade(distance);
+                float edgeFade = EdgeFade(distance);
                 if (edgeFade <= 0.01f) continue;
 
                 D2D1_RECT_F lineRect = D2D1::RectF(
                     bodyRect.left, y - lineHeight * 0.5f,
                     bodyRect.right, y + lineHeight * 0.5f);
+
+                // Bunbun: instrumental break. Cross-fade the line into a note glyph,
+                // drawn where the active line sits.
+                if (idx == currentIndex && gapNoteMix > 0.0f) {
+                    if (activeFormat) {
+                        const D2D1_RECT_F noteRect = D2D1::RectF(
+                            lineRect.left, y - lineHeight * 0.66f, lineRect.right, y + lineHeight * 0.66f);
+                        textBrush_->SetOpacity(0.9f * gapNoteMix * edgeFade);
+                        target_->DrawTextW(L"♪", 1, activeFormat, noteRect, textBrush_.Get(),
+                                           D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    }
+                    edgeFade *= 1.0f - gapNoteMix;
+                    if (edgeFade <= 0.01f) continue;
+                }
 
                 const std::wstring& line = state.lyrics.lines[idx].text;
                 const wchar_t* toDraw = line.empty() ? L"\u266A" : line.c_str();
@@ -12504,6 +12869,9 @@ class Renderer {
                         } else if (state.media.endTicks > 0) {
                             lineEndMs = state.media.endTicks / 10000;
                         }
+                        // Bunbun: before a long break, finish the wipe before the line fades to a note.
+                        const int64_t gapHoldMs = LyricsGapHoldMs(state.lyrics.lines, idx);
+                        if (gapHoldMs > 0) lineEndMs = std::min(lineEndMs, lineStartMs + gapHoldMs);
                         const int64_t span = lineEndMs - lineStartMs;
                         karaokeProgress = span > 0
                             ? Clamp(static_cast<float>(posMs - lineStartMs) / static_cast<float>(span), 0.0f, 1.0f)
@@ -12923,9 +13291,10 @@ class Renderer {
                 rect.right - IdleStripLayout::kPadX * scale - privacyReserve;
 
             float blockWidth = idleMetrics.clockWidth;
+            const bool idleDivider = idleMetrics.hasWeather && idleMetrics.clockWidth > 0.0f;  // Bunbun
             if (idleMetrics.hasWeather) {
-                blockWidth += (IdleStripLayout::kSlotGap * 2.0f +
-                               IdleStripLayout::kDividerWidth) * scale +
+                blockWidth += (idleDivider ? (IdleStripLayout::kSlotGap * 2.0f +
+                                              IdleStripLayout::kDividerWidth) * scale : 0.0f) +
                               idleMetrics.weatherWidth;
             }
 
@@ -12939,13 +13308,22 @@ class Renderer {
             // widest-digit form, so the live string is centred inside a box it is
             // guaranteed to fit rather than drifting as the digits change.
             textBrush_->SetOpacity(0.96f);
-            const D2D1_RECT_F timeRect =
-                D2D1::RectF(slotX, rect.top, slotX + idleMetrics.clockWidth, rect.bottom);
-            target_->DrawTextW(timeBuf, static_cast<UINT32>(wcslen(timeBuf)), idleFmt,
-                               timeRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            if (idleMetrics.clockWidth > 0.0f) {  // Bunbun: the time can be left out
+                const D2D1_RECT_F timeRect =
+                    D2D1::RectF(slotX, rect.top, slotX + idleMetrics.clockWidth, rect.bottom);
+                target_->DrawTextW(timeBuf, static_cast<UINT32>(wcslen(timeBuf)), idleFmt,
+                                   timeRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
             slotX += idleMetrics.clockWidth;
 
-            if (idleMetrics.hasWeather) {
+            if (idleMetrics.hasWeather && !idleDivider) {
+                wchar_t weatherOnly[32] = {};
+                if (hasWeather) swprintf_s(weatherOnly, L"%s %.0f\x00B0", wIcon.c_str(), state.weather.temperature);
+                else wcscpy_s(weatherOnly, ARRAYSIZE(weatherOnly), L"🌡️ --\x00B0");
+                target_->DrawTextW(weatherOnly, static_cast<UINT32>(wcslen(weatherOnly)), idleFmt,
+                                   D2D1::RectF(slotX, rect.top, slotX + idleMetrics.weatherWidth, rect.bottom),
+                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+            } else if (idleMetrics.hasWeather) {
                 slotX += IdleStripLayout::kSlotGap * scale;
 
                 ComPtr<ID2D1SolidColorBrush> divider;
@@ -12987,14 +13365,9 @@ class Renderer {
             }
 
             // Expanded Mode. Order must match ActiveTabCount()/FileTrayTabIndex().
-            std::vector<int> activeTabs;
-            activeTabs.push_back(3); // Time (shown first when the island expands/on hover)
-            activeTabs.push_back(0); // Calendar
-            if (settings.weather) activeTabs.push_back(1);
-            if (settings.hardwareMonitorModule) activeTabs.push_back(2);
-            if (settings.connectivityModule) activeTabs.push_back(5);  // Bunbun
-            if (settings.fileTrayModule) activeTabs.push_back(4);
-            if (settings.todoModule) activeTabs.push_back(7);  // Bunbun: To-do
+            // Bunbun: one list for both views (DashboardTabIds), plus the Studio pages.
+            const std::vector<int> activeTabs = DashboardTabIds(1, settings);
+            g_dashboardContext.store(1, std::memory_order_relaxed);
 
             int maxTabs = static_cast<int>(activeTabs.size());
             int tabIdx = NormalizedTabIndex(settings);
@@ -13010,7 +13383,9 @@ class Renderer {
                                                      fullCx + fullW * 0.5f, rect.top + fullH);
 
             DrawTabTransition(1, tabIdx, activeTabs, fullRect, now, [&](int activeTabId) {
-                if (activeTabId == 3) DrawTimeDashboard(state, fullRect, settings, now, scale, local);
+                if (DrawStudioExtraPage(activeTabId, state, fullRect, settings, now)) return;  // Bunbun
+                if (activeTabId == 3 && settings.studioLayout) DrawStudioHome(state, fullRect, settings, now);  // Bunbun
+                else if (activeTabId == 3) DrawTimeDashboard(state, fullRect, settings, now, scale, local);
                 else if (activeTabId == 0) DrawCalendarDashboard(state, fullRect, settings, now, scale, local);
                 else if (activeTabId == 1) DrawWeatherDashboard(state, fullRect, settings, now, scale, hasWeather, wIcon, wText);
                 else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, fullRect, settings, scale);
@@ -13019,7 +13394,7 @@ class Renderer {
                 else if (activeTabId == 7) DrawTodoDashboard(state, fullRect, scale);  // Bunbun
             });
 
-            DrawTabPagination(fullRect, maxTabs);
+            if (!settings.studioLayout) DrawTabPagination(fullRect, maxTabs);  // Bunbun: Studio has a tab bar
 
             if (dashFadeLayer) {
                 target_->PopLayer();
@@ -13406,6 +13781,7 @@ class Renderer {
         g_mediaHitSeq.store(seq + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
 
+        publishedOrigin_ = D2D1::Point2F(rect.left, rect.top);  // Bunbun: Studio hit rects are relative to this
         g_mediaHitLeft.store(rect.left, std::memory_order_relaxed);
         g_mediaHitTop.store(rect.top, std::memory_order_relaxed);
         g_mediaHitRight.store(rect.right, std::memory_order_relaxed);
@@ -13426,12 +13802,20 @@ class Renderer {
     // art's top-left corner (visible from roughly 2x upwards).
     float ContentIslandRadius(float contentHeight) const {
         if (g_settings.notchStyle) {
-            return 16.0f;
+            return NotchBottomRadius(contentHeight);  // Bunbun: grows with the island
         }
         if (g_settings.w11Style) {
             return 8.0f;
         }
         return std::min(contentHeight * 0.5f, 44.0f);
+    }
+
+    // Bunbun: the notch's bottom corners. A small notch is fully round (half its
+    // height), and the corners open up to 30 as the island grows, so an open
+    // island reads as a soft card instead of a tight capsule.
+    static float NotchBottomRadius(float h) {
+        if (h <= 44.0f) return h * 0.5f;
+        return std::min(30.0f, 22.0f + (h - 44.0f) * 0.1f);
     }
 
     // Takes settings by reference from Render()'s private copy rather than
@@ -13560,18 +13944,10 @@ class Renderer {
             target_->PushLayer(D2D1::LayerParameters(rect, mask.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), expandedAlpha, nullptr, D2D1_LAYER_OPTIONS_NONE), layer);
 
             // Order must match ActiveTabCount()/FileTrayTabIndex().
-            std::vector<int> activeTabs;
             // Lyrics goes first when pinned; otherwise it stays last. Must match MediaTabIndex().
-            const bool lyricsFirst = settings.lyricsPinnedFirst && settings.lyrics;
-            if (lyricsFirst) activeTabs.push_back(5);  // Lyrics (pinned first)
-            activeTabs.push_back(0); // Media
-            activeTabs.push_back(1); // Calendar
-            if (settings.weather) activeTabs.push_back(2);
-            if (settings.hardwareMonitorModule) activeTabs.push_back(3);
-            if (settings.connectivityModule) activeTabs.push_back(6);  // Bunbun
-            if (settings.fileTrayModule) activeTabs.push_back(4);
-            if (settings.todoModule) activeTabs.push_back(7);  // Bunbun: To-do
-            if (settings.lyrics && !lyricsFirst) activeTabs.push_back(5);  // Lyrics (last)
+            // Bunbun: one list for both views (DashboardTabIds), plus the Studio pages.
+            const std::vector<int> activeTabs = DashboardTabIds(0, settings);
+            g_dashboardContext.store(0, std::memory_order_relaxed);
 
             // Same settings object as the list above, so the index can't be
             // normalised against a tab set that no longer matches.
@@ -13580,6 +13956,7 @@ class Renderer {
             if (tabIdx >= maxTabs) tabIdx = maxTabs - 1;
 
             auto drawTabContent = [&](int activeTabId) {
+            if (DrawStudioExtraPage(activeTabId, state, rect, settings, now)) return;  // Bunbun
             if (activeTabId == 0) {
                 // With side lyrics on, the player lives in the left part of the island and
                 // the rest of this branch (which uses `rect`) lays out exactly as before.
@@ -13840,7 +14217,7 @@ class Renderer {
             };  // end drawTabContent
 
             DrawTabTransition(0, tabIdx, activeTabs, rect, now, drawTabContent);
-            DrawTabPagination(rect, maxTabs);
+            if (!settings.studioLayout) DrawTabPagination(rect, maxTabs);  // Bunbun: Studio has a tab bar
 
             target_->PopLayer();
         }
@@ -13894,7 +14271,7 @@ class Renderer {
                     const float textRight = waveRect.left - 10.0f;
                     DrawCollapsedLyrics(state,
                                         D2D1::RectF(textLeft, rect.top + 4.0f, textRight, rect.bottom - 4.0f),
-                                        now, lyricsAlpha);
+                                        now, lyricsAlpha, rect.right - rect.left);
                 }
             }
 
@@ -14265,6 +14642,7 @@ class Renderer {
             immTrackKey_.clear();
             const wchar_t* msg = state.lyrics.fetching ? Loc(L"Fetching lyrics...")
                                  : (state.lyrics.hasData ? Loc(L"No synced lyrics")
+                                    : state.lyrics.instrumental ? Loc(L"Instrumental")  // Bunbun
                                                          : Loc(L"No lyrics found"));
             const float opacity = state.lyrics.fetching
                 ? 0.50f + 0.25f * std::sin(static_cast<float>(now * 2.0 * 3.14159265 * 0.6))
@@ -14544,7 +14922,9 @@ class Renderer {
             sideLyricPrev_ = CollapsedLyricLine{};
 
             const wchar_t* msg =
-                state.lyrics.fetching ? Loc(L"Fetching lyrics...") : Loc(L"No lyrics found");
+                state.lyrics.fetching ? Loc(L"Fetching lyrics...")
+                : state.lyrics.instrumental ? Loc(L"Instrumental")  // Bunbun
+                                            : Loc(L"No lyrics found");
             float opacity = 0.60f;
             if (state.lyrics.fetching) {
                 opacity = 0.50f + 0.25f * std::sin(static_cast<float>(now * 2.0 * 3.14159265 * 0.6));
@@ -14578,6 +14958,10 @@ class Renderer {
                 }
             }
             const int idx = lo - 1;  // -1 = before the first line
+            // Bunbun: a long instrumental break shows the note glyph; its own key so
+            // the usual slide animates the change.
+            const bool gapNote = LyricsGapNoteMix(lines, idx, posMs) > 0.0f;
+            const int showKey = gapNote ? -1000 - idx : idx;
 
             const float midTop = area.top + 46.0f;
             const float midH = std::max(20.0f, (area.bottom - 46.0f) - midTop);
@@ -14587,7 +14971,7 @@ class Renderer {
             const bool trackChanged = state.media.title != sideLyricTitle_ ||
                                       state.media.artist != sideLyricArtist_;
 
-            if (idx != sideLyricIdx_ || styleChanged || trackChanged || !sideLyricCur_.layout) {
+            if (showKey != sideLyricIdx_ || styleChanged || trackChanged || !sideLyricCur_.layout) {
                 if (styleChanged || trackChanged || !fresh || sideLyricIdx_ == -2) {
                     sideLyricPrev_ = CollapsedLyricLine{};
                     sideLyricAnimStart_ = now - 10.0;  // snap, no animation
@@ -14595,13 +14979,13 @@ class Renderer {
                     sideLyricPrev_ = std::move(sideLyricCur_);
                     sideLyricAnimStart_ = now;
                 }
-                sideLyricIdx_ = idx;
+                sideLyricIdx_ = showKey;  // Bunbun: idx, or a gap key
                 sideLyricTitle_ = state.media.title;
                 sideLyricArtist_ = state.media.artist;
                 sideLyricScale_ = settings.textScale;
                 sideLyricFamily_ = settings.fontFamily;
 
-                const std::wstring text = (idx >= 0 && !lines[idx].text.empty())
+                const std::wstring text = (!gapNote && idx >= 0 && !lines[idx].text.empty())
                                               ? lines[idx].text
                                               : std::wstring(L"\u266A");
                 BuildSideLyricLine(sideLyricCur_, text, textW, midH, settings);
@@ -14669,11 +15053,12 @@ class Renderer {
 
     // Builds the cached layout for one lyric line.
     void BuildCollapsedLyricLine(CollapsedLyricLine& out, const std::wstring& text,
-                                 IDWriteTextFormat* fmt) {
+                                 IDWriteTextFormat* fmt, float fitWidth = 0.0f) {
         out.text = text;
         out.layout.Reset();
         out.width = 0.0f;
         out.height = 0.0f;
+        out.builtFor = fitWidth;
         if (SUCCEEDED(dwriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
                                                        fmt, 4096.0f, 40.0f, &out.layout)) &&
             out.layout) {
@@ -14685,12 +15070,32 @@ class Renderer {
             out.layout->GetMetrics(&tm);
             out.width = tm.widthIncludingTrailingWhitespace;
             out.height = tm.height;
+            // Bunbun: a lyric too long for the slot gets a little smaller (down to 80 %),
+            // and only then an ellipsis, so the start of the line is never cut off.
+            if (fitWidth > 1.0f && out.width > fitWidth) {
+                const DWRITE_TEXT_RANGE all{0, static_cast<UINT32>(text.size())};
+                const float size = fmt->GetFontSize() * std::max(0.8f, fitWidth / out.width);
+                out.layout->SetFontSize(size, all);
+                out.layout->GetMetrics(&tm);
+                out.width = tm.widthIncludingTrailingWhitespace;
+                out.height = tm.height;
+                if (out.width > fitWidth) {
+                    ComPtr<IDWriteInlineObject> ellipsis;
+                    const DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+                    if (SUCCEEDED(dwriteFactory_->CreateEllipsisTrimmingSign(fmt, &ellipsis))) {
+                        out.layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        out.layout->SetMaxWidth(fitWidth);
+                        out.layout->SetTrimming(&trim, ellipsis.Get());
+                        out.width = fitWidth;
+                    }
+                }
+            }
         }
     }
 
     // Draws the current synced lyric line inside `area`. When the line changes,
     // the old one slides up and fades out while the new one rises in from below.
-    void DrawCollapsedLyrics(const SharedState& state, D2D1_RECT_F area, double now, float alpha) {
+    void DrawCollapsedLyrics(const SharedState& state, D2D1_RECT_F area, double now, float alpha, float pillW) {
         g_lastLyricsViewTime.store(now, std::memory_order_relaxed);
         IDWriteTextFormat* fmt = textFormat_.Get();
         if (!fmt || !dwriteFactory_ || alpha <= 0.01f) {
@@ -14739,12 +15144,41 @@ class Renderer {
             idx = lo - 1;
         }
 
+        // Bunbun: size the pill to this song's longest line (measured once per song).
+        if (lyricsUsable && (state.media.title != collapsedLyricWidthTitle_ || state.media.artist != collapsedLyricWidthArtist_)) {
+            collapsedLyricWidthTitle_ = state.media.title;
+            collapsedLyricWidthArtist_ = state.media.artist;
+            float widest = 0.0f;
+            for (const auto& l : lines.vec()) {
+                if (l.text.empty()) continue;
+                ComPtr<IDWriteTextLayout> m;
+                if (SUCCEEDED(dwriteFactory_->CreateTextLayout(l.text.c_str(), static_cast<UINT32>(l.text.size()), fmt,
+                                                               4096.0f, 40.0f, &m)) && m) {
+                    DWRITE_TEXT_METRICS tm{};
+                    m->GetMetrics(&tm);
+                    widest = std::max(widest, tm.widthIncludingTrailingWhitespace);
+                }
+            }
+            // Everything in the pill that isn't the text (cover, gaps, visualiser), in
+            // content units like the pill width.
+            const float scale = std::max(0.1f, g_settings.sizeScale);
+            const float chrome = pillW / scale - availW / scale;
+            g_collapsedLyricsWidth.store(Clamp(widest / scale + chrome + 6.0f, 280.0f, 380.0f), std::memory_order_relaxed);
+        } else if (!lyricsUsable && !collapsedLyricWidthTitle_.empty()) {
+            collapsedLyricWidthTitle_.clear();
+            collapsedLyricWidthArtist_.clear();
+            g_collapsedLyricsWidth.store(0.0f, std::memory_order_relaxed);
+        }
+
         // The media title is only a fallback for when there are no usable lyrics
         // (still loading, not found, unsynced). Once lyrics are usable, the intro
         // and instrumental gaps show the note glyph, as before.
         constexpr int kTitleKey = -3;  // distinct from idx == -1 (before the first line)
         const bool showTitle = !lyricsUsable;
-        const int showIdx = showTitle ? kTitleKey : idx;
+        // Bunbun: a long instrumental break fades the line to the note glyph. It gets
+        // its own key (below kTitleKey) so the usual slide animates the change.
+        const bool gapNote = !showTitle && LyricsGapNoteMix(lines, idx, posMs) > 0.0f;
+        const int showIdx = showTitle ? kTitleKey : (gapNote ? -1000 - idx : idx);
 
         std::wstring fallback = state.media.title;
         if (fallback.empty()) fallback = state.media.sourceName;
@@ -14769,21 +15203,27 @@ class Renderer {
 
             const std::wstring text = showTitle
                 ? fallback
-                : ((idx >= 0 && !lines[idx].text.empty()) ? lines[idx].text
+                : ((!gapNote && idx >= 0 && !lines[idx].text.empty()) ? lines[idx].text
                                                           : std::wstring(L"\u266A"));
-            BuildCollapsedLyricLine(collapsedLyricCur_, text, fmt);
+            BuildCollapsedLyricLine(collapsedLyricCur_, text, fmt, showTitle ? 0.0f : availW);
             collapsedLyricCur_.isTitle = showTitle;
+        } else if (!collapsedLyricCur_.isTitle && std::fabs(collapsedLyricCur_.builtFor - availW) > 0.5f) {
+            // The pill is still growing or shrinking: refit the line to the new slot.
+            const std::wstring text = collapsedLyricCur_.text;
+            BuildCollapsedLyricLine(collapsedLyricCur_, text, fmt, availW);
         }
         if (!collapsedLyricCur_.layout) {
             return;
         }
 
-        // Quick ease-out-cubic transition (~0.30s).
-        constexpr double kAnimSec = 0.30;
-        constexpr float kSlidePx = 13.0f;
+        // Bunbun: the new line rolls up from below as the old one rolls out the top,
+        // ease-out quart over 0.42 s, travelling most of the slot's height.
+        constexpr double kAnimSec = 0.42;
+        const float kSlidePx = std::max(13.0f, (area.bottom - area.top) * 0.8f);
         const float t = Clamp(static_cast<float>((now - collapsedLyricAnimStart_) / kAnimSec), 0.0f, 1.0f);
         const float inv = 1.0f - t;
-        const float e = 1.0f - inv * inv * inv;
+        const float e = 1.0f - inv * inv * inv * inv;
+        if (t < 1.0f) g_layoutDirty = true;
 
         const float cy = (area.top + area.bottom) * 0.5f;
         target_->PushAxisAlignedClip(area, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -16408,7 +16848,7 @@ class Renderer {
             case SpectrumStyle::Orb:    DrawSpectrumOrb(state, rect); break;
             case SpectrumStyle::Plasma: DrawSpectrumPlasma(state, rect); break;
             case SpectrumStyle::Led:    DrawSpectrumLed(state, rect, dt); break;
-            default:                    DrawWaveform(state, rect); break;
+            default:                    DrawWaveform(state, rect, dt); break;
         }
     }
 
@@ -17012,27 +17452,42 @@ class Renderer {
         target_->PopAxisAlignedClip();
     }
 
-    void DrawWaveform(const SharedState& state, D2D1_RECT_F rect) {
-        const float gap = 2.5f;
-        const float minBarWidth = 2.0f;
+    // Bunbun: the default music bars, refined. A few fat, fully rounded bars (40 %
+    // of each slot is gap) driven by the analyzer's log-spaced bands, low to high,
+    // so they follow the music rather than raw samples. Each bar rises quickly and
+    // falls slowly, glows softly in the album colour, and settles to a flat row when
+    // nothing is playing. The skip ripple is unchanged.
+    float waveLevel_[16] = {};
+
+    void DrawWaveform(const SharedState& state, D2D1_RECT_F rect, float dt) {
         const float availableW = rect.right - rect.left;
-        size_t count = std::max<size_t>(1, static_cast<size_t>((availableW + gap) / (minBarWidth + gap)));
-        count = std::min<size_t>(count, 32);
-
-        const float barWidth = (availableW - gap * (count - 1)) / count;
+        const float height = rect.bottom - rect.top;
+        if (availableW <= 2.0f || height <= 2.0f) return;
+        // About one bar per 7 px, between 4 and 16 bars.
+        const size_t count = static_cast<size_t>(Clamp(std::floor(availableW / 7.0f), 4.0f, 16.0f));
+        const float slot = availableW / static_cast<float>(count);
+        const float barWidth = std::max(2.0f, slot * 0.6f);
         const float centerY = (rect.top + rect.bottom) * 0.5f;
-        const float maxH = (rect.bottom - rect.top) * 0.86f;
+        const float maxH = height * 0.92f;
 
-        // Use a step size of 4 samples (approx 40ms) so bars aren't identical
-        const size_t step = 4;
+        // Per-frame rates of 50 % up and 16 % down at 60 fps, made frame-rate independent.
+        const float up = 1.0f - std::pow(0.50f, dt * 60.0f);
+        const float down = 1.0f - std::pow(0.84f, dt * 60.0f);
+        const bool playing = state.media.playing;
 
         const float t = specT_;
         for (size_t i = 0; i < count; ++i) {
-            const size_t offset = (count - i) * step;
-            const size_t source = (state.waveformWrite + state.waveform.size() - offset) %
-                                  state.waveform.size();
-            const float amp = Clamp(state.waveform[source], 0.03f, 1.0f);
-            float h = std::max(3.0f, amp * maxH);
+            // Bands are log-spaced already; skip the very top ones, which are mostly empty.
+            const float from = static_cast<float>(i) * (kSpectrumBands * 0.85f) / static_cast<float>(count);
+            const float to = static_cast<float>(i + 1) * (kSpectrumBands * 0.85f) / static_cast<float>(count);
+            // Higher bands carry less energy; lift them so the row isn't lopsided.
+            const float tilt = 1.0f + 0.9f * static_cast<float>(i) / static_cast<float>(count);
+            const float target = playing ? Clamp(SpecBandRange(state, from, to) * 1.6f * tilt, 0.0f, 1.0f) : 0.0f;
+            float& level = waveLevel_[i];
+            level += (target - level) * (target > level ? up : down);
+            if (std::fabs(target - level) > 0.004f) g_layoutDirty = true;
+
+            float h = std::max(barWidth, (0.10f + 0.90f * level) * maxH);
             float glow = 0.0f;
 
             // Track change: domino ripple. Each bar collapses to a dot, then springs
@@ -17051,14 +17506,21 @@ class Renderer {
                     scale = 1.0f - std::exp(-5.5f * v) * std::cos(9.5f * v);
                     glow = std::exp(-6.0f * v);
                 }
-                h = std::max(2.0f, h * Clamp(scale, 0.0f, 1.5f));
+                h = std::max(barWidth * 0.8f, h * Clamp(scale, 0.0f, 1.5f));
             }
 
-            const float x = rect.left + i * (barWidth + gap);
-            D2D1_RECT_F bar = D2D1::RectF(x, centerY - h * 0.5f, x + barWidth, centerY + h * 0.5f);
-            accentBrush_->SetOpacity(Clamp(0.45f + 0.5f * amp + 0.35f * glow, 0.0f, 1.0f));
-            target_->FillRoundedRectangle(D2D1::RoundedRect(bar, barWidth * 0.5f, barWidth * 0.5f),
-                                         accentBrush_.Get());
+            const float x = rect.left + slot * static_cast<float>(i) + (slot - barWidth) * 0.5f;
+            const D2D1_RECT_F bar = D2D1::RectF(x, centerY - h * 0.5f, x + barWidth, centerY + h * 0.5f);
+            const float r = barWidth * 0.5f;
+            // Glow: a slightly larger, faint copy behind the bar.
+            const float halo = std::max(1.2f, barWidth * 0.45f);
+            accentBrush_->SetOpacity(Clamp(0.10f + 0.22f * level + 0.25f * glow, 0.0f, 0.5f));
+            target_->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(bar.left - halo, bar.top - halo, bar.right + halo, bar.bottom + halo),
+                                  r + halo, r + halo),
+                accentBrush_.Get());
+            accentBrush_->SetOpacity(Clamp((playing ? 0.62f : 0.40f) + 0.38f * level + 0.3f * glow, 0.0f, 1.0f));
+            target_->FillRoundedRectangle(D2D1::RoundedRect(bar, r, r), accentBrush_.Get());
         }
         accentBrush_->SetOpacity(1.0f);
     }
@@ -17199,6 +17661,26 @@ class Renderer {
             }
         }
 
+        // Bunbun: poke reactions win over everything (cross, then dizzy), and the
+        // mascot says hello for a moment after Bunbun starts.
+        if (settings.pokeReactions) {
+            static double s_helloAt = -1.0;
+            if (s_helloAt < 0.0) { s_helloAt = now; s_moodSince = now; }
+            const double dizzyUntil = g_mascotDizzyUntil.load(std::memory_order_relaxed);
+            const double crossUntil = g_mascotCrossUntil.load(std::memory_order_relaxed);
+            static bb::mascot::Mood s_reaction = bb::mascot::Mood::Idle;
+            bb::mascot::Mood reaction = mood;
+            if (NowSeconds() < dizzyUntil) reaction = bb::mascot::Mood::Confused;
+            else if (NowSeconds() < crossUntil) reaction = bb::mascot::Mood::Alert;
+            else if (now - s_helloAt < 2.6) reaction = bb::mascot::Mood::Happy;
+            if (reaction != mood) {
+                if (reaction != s_reaction) s_moodSince = now;
+                mood = reaction;
+                g_layoutDirty = true;  // keep frames coming until the reaction ends
+            }
+            s_reaction = reaction;
+        }
+
         // Bunbun: fit the character's real outline to the slot, so short-eared
         // mascots fill the height like Bun does instead of leaving a gap above.
         const float w = slot.right - slot.left;
@@ -17207,6 +17689,11 @@ class Renderer {
         float size = 0.0f;
         bb::mascot::FitToBox(D2D1::RectF(slot.left + w * 0.16f - w * 0.05f, slot.top + pad, slot.right + w * 0.05f, slot.bottom - pad),
                              &c, &size);
+        if (settings.idleEyes) {  // Bunbun: just the eyes
+            DrawIdleEyes(state, D2D1::Point2F((slot.left + slot.right) * 0.5f, (slot.top + slot.bottom) * 0.5f),
+                         slot.bottom - slot.top, mood, now, s_moodSince);
+            return;
+        }
         bb::mascot::Draw(target_.Get(), c, size, mood, now, s_moodSince, MascotLook(c));
     }
 
@@ -17294,6 +17781,18 @@ class Renderer {
                                          accentBrush_.Get());
                 }
                 accentBrush_->SetOpacity(1.0f);
+            } else if (a.phase == bb::AgentPhase::Finished && a.replyId) {
+                // Bunbun: the finished task is listening; a Reply button instead of "Done".
+                const D2D1_RECT_F rb = D2D1::RectF(status.left - 6.0f, cy - 12.0f, status.right + 6.0f, cy + 12.0f);
+                const bool hovered = static_cast<int>(g_agentButtons.size()) == g_agentHoveredButton;
+                raisedStrongBrush_->SetOpacity(hovered ? 1.0f : 0.85f);
+                target_->FillRoundedRectangle(D2D1::RoundedRect(rb, 12.0f, 12.0f), raisedStrongBrush_.Get());
+                raisedStrongBrush_->SetOpacity(1.0f);
+                DrawAgentText(L"Reply", rb, smallTextFormat_.Get(), AgentInk(D2D1::ColorF(0x34C759)), true);
+                AgentButton b;
+                b.rect = D2D1::RectF(rb.left - rect.left, rb.top - rect.top, rb.right - rect.left, rb.bottom - rect.top);
+                b.action = 2;  // ActReply
+                g_agentButtons.push_back(b);
             } else if (a.phase == bb::AgentPhase::Finished) {
                 DrawAgentText(L"Done", status, smallTextFormat_.Get(), AgentInk(D2D1::ColorF(0x34C759)), true);
             } else if (a.phase == bb::AgentPhase::Error) {
@@ -17311,6 +17810,7 @@ class Renderer {
         }
 
         // ── Card: an agent is waiting for you ────────────────────────────────
+        if (DrawAgentRichCard(state, rect, settings, now)) return;  // Bunbun: plan / several questions
         const float left = rect.left + AgentLayout::kPadX;
         const float right = rect.right - AgentLayout::kPadX;
         const float top = rect.top + AgentLayout::kPadTop;
@@ -18871,6 +19371,7 @@ class Renderer {
     CollapsedLyricLine collapsedLyricPrev_;
     int collapsedLyricIdx_ = -2;            // -2 = nothing built yet (forces a snap)
     std::wstring collapsedLyricTitle_;
+    std::wstring collapsedLyricWidthTitle_, collapsedLyricWidthArtist_;  // Bunbun: song the pill was sized for
     std::wstring collapsedLyricArtist_;
     double collapsedLyricAnimStart_ = -10.0;
 
@@ -19125,6 +19626,17 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
             if (AgentLayout::IsCard(state.agent.phase)) {
                 activity.width = AgentLayout::kCardWidth;
                 activity.height = AgentLayout::kCardHeight;
+                // Bunbun: a plan gets room to read; a question card one row per option.
+                if (!state.agent.plan.empty()) {
+                    activity.width = 480.0f;
+                    activity.height = 320.0f;
+                } else if (NeedsQuestionCard(state.agent)) {
+                    const size_t idx = std::min<size_t>(static_cast<size_t>(std::max(0, g_questions.index)),
+                                                        state.agent.questions.size() - 1);
+                    const size_t rows = std::min<size_t>(state.agent.questions[idx].options.size(), 6);
+                    activity.width = 440.0f;
+                    activity.height = 128.0f + 30.0f * static_cast<float>(rows);
+                }
             } else {
                 activity.width = AgentLayout::kCompactWidth;
                 activity.height = AgentLayout::kCompactHeight;
@@ -19175,7 +19687,8 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     }
 
     // Bunbun: an agent waiting for you outranks every passive alert.
-    const bool agentShown = settings.bunbunAgents && state.agent.phase != bb::AgentPhase::None;
+    const bool agentShown = settings.bunbunAgents && state.agent.phase != bb::AgentPhase::None &&
+                            settings.showAgent[AgentKindFor(state.agent.agent)];  // Bunbun: per-agent switch
     if (agentShown && AgentLayout::IsCard(state.agent.phase)) {
         activities.push_back(IslandKind::Agent);
     }
@@ -19228,7 +19741,7 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
         activities.push_back(IslandKind::Download);
     }
     // A working (or just-finished) agent sits beside the media pill.
-    if (agentShown && !AgentLayout::IsCard(state.agent.phase)) {
+    if (agentShown && settings.agentPill && !AgentLayout::IsCard(state.agent.phase)) {  // Bunbun: AgentPill
         activities.push_back(IslandKind::Agent);
     }
     if (settings.media && state.media.available) {
@@ -19996,6 +20509,7 @@ class TrayDropTarget final : public IDropTarget {
 
         if (ok) {
             AddPathsToFileTray(paths);
+            NoteTrayDrop(paths);  // Bunbun: the Studio frame's "caught it" card
             const int tab = FileTrayTabIndex(GetSettingsCopy());
             if (tab >= 0) {
                 g_idleTab = tab;
@@ -20223,6 +20737,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ApplyBackdropMaterial(hwnd);
             return 0;
 
+        case WM_APP_SUBMIT_ASK: {
+            StartQuickLookup(hwnd);
+            wchar_t* q = reinterpret_cast<wchar_t*>(lParam);
+            if (q) {
+                SubmitLookup(q);
+                free(q);
+            }
+            return 0;
+        }
+
         case WM_APP_MOUSE_WAKE:
             // No-op payload — its only job is to wake MsgWaitForMultipleObjects
             // and get drained by the PeekMessage pump.
@@ -20294,6 +20818,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_CLIPBOARDUPDATE:
+            if (g_settings.clipboardHistory) {
+                RememberClipboardText(ReadClipboardText(hwnd));  // Bunbun: the Clipboard page
+            }
             if (g_settings.clipboard) {
                 CaptureClipboard(hwnd);
             }
@@ -20419,6 +20946,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 s_touchStart.y = yPos;
                 s_touchStartTime = GetTickCount64();
 
+                if (HandleStudioButtonDown(hwnd, xPos, yPos)) {  // Bunbun: volume slider drag
+                    s_touchStartTime = 0;
+                    return 0;
+                }
+
                 if (g_lookupUi.open) {
                     s_trayPressActive = false;
                     return 0;  // handled on button-up by HandleLookupClick
@@ -20503,6 +21035,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 return 0;
             }
             HandleAgentMouseMove(xPos, yPos);
+            HandleStudioMouseMove(xPos, yPos);  // Bunbun
 
             if (g_scrubbing.load()) {
                 const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
@@ -20619,6 +21152,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_MOUSELEAVE:
+            ClearStudioHover();  // Bunbun: no button stays lit after the pointer leaves
             if (g_hoveredSourceSlot.exchange(-1) != -1 || g_pressedSourceSlot.exchange(-1) != -1) {
                 g_layoutDirty = true;
             }
@@ -20653,6 +21187,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_LBUTTONUP:
             {
+                if (g_studioVolumeDrag) {  // Bunbun: end of a volume slider drag
+                    HandleStudioClick(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                    return 0;
+                }
                 if (g_scrubbing.load()) {
                     g_scrubbing = false;
                     ReleaseCapture();
@@ -20691,6 +21229,23 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     const int dx = xPos - s_touchStart.x;
                     const int dy = yPos - s_touchStart.y;
                     const int travel = abs(dy) > abs(dx) ? dy : dx;  // dominant axis wins
+                    // Bunbun: a sideways swipe on the small music pill skips songs.
+                    const bool smallPill = g_pillClientRect.valid &&
+                        (g_pillClientRect.bottom - g_pillClientRect.top) <= 64.0f * g_settings.sizeScale;
+                    if (g_settings.musicSwipe && smallPill && abs(dx) > 48 && abs(dy) < 36) {
+                        bool media = false;
+                        {
+                            std::lock_guard lock(g_stateMutex);
+                            media = g_settings.media && g_state.media.available;
+                        }
+                        if (media) {
+                            if (dx < 0) g_skipTriggerNext.fetch_add(1); else g_skipTriggerPrev.fetch_add(1);
+                            SendMediaTransportCommand(dx < 0 ? 2 : 0);
+                            g_layoutDirty = true;
+                            s_touchStartTime = 0;
+                            return 0;
+                        }
+                    }
                     if (abs(travel) > 40) {
                         // Swipe up / left -> next tab, down / right -> previous tab
                         if (ActiveTabCount(GetSettingsCopy()) > 1) {
@@ -20703,6 +21258,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 s_touchStartTime = 0;
 
                 bool mediaActive = false;
+                if (HandleStudioClick(hwnd, xPos, yPos)) {  // Bunbun: Studio frame, tiles, extra pages
+                    return 0;
+                }
                 if (HandleAgentClick(xPos, yPos)) {
                     return 0;
                 }
@@ -20735,7 +21293,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                             g_state.clipboard.expiresAt = 0.0;
                         }
                     }
-                    if (!notifApp.empty() || !notifTitle.empty()) {
+                    std::wstring updateUrl;
+                    if (notifApp == L"Bunbun") {  // Bunbun: our own update notice
+                        std::lock_guard lock(g_stateMutex);
+                        updateUrl = g_updatePageUrl;
+                    }
+                    if (!updateUrl.empty()) {
+                        ShellExecuteW(nullptr, L"open", updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    } else if (!notifApp.empty() || !notifTitle.empty()) {
                         FocusNotificationApp(notifApp, notifTitle);
                     }
                     g_clickExpanded = false;
@@ -20910,6 +21475,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     // Collapsed island click: check if clicked on mascot slot (right half of idle strip)
                     if (!kinds.empty() && kinds[0] == IslandKind::Idle && g_settings.bunbunMascot) {
                         g_lastMascotPokeTime.store(NowSeconds(), std::memory_order_relaxed);
+                        RegisterMascotPoke(NowSeconds());  // Bunbun: cross, then dizzy
                         g_layoutDirty = true;
                         TriggerNudge();
                     }
@@ -20967,6 +21533,39 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 return 0;
             }
             s_lastWheelStep = wheelNow;
+            // Bunbun: over the Focus page's picker, the wheel turns the numbers.
+            if (HandleStudioWheel(hwnd, lParam, s_wheelAccum > 0 ? -1 : 1)) {
+                s_wheelAccum = 0;
+                return 0;
+            }
+            // Bunbun: over a plan card, the wheel scrolls the plan.
+            if (g_planScrollMax > 0.0f) {
+                bool planShown = false;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    planShown = !g_state.agent.plan.empty() && g_state.agent.requestId == g_planScrollFor;
+                }
+                if (planShown) {
+                    g_planScroll = Clamp(g_planScroll - (s_wheelAccum > 0 ? 48.0f : -48.0f), 0.0f, g_planScrollMax);
+                    s_wheelAccum = 0;
+                    g_layoutDirty = true;
+                    return 0;
+                }
+            }
+            // Bunbun: in Ask Bun chat (Studio), the wheel scrolls the transcript.
+            if (g_settings.studioLayout && g_chatScrollMax > 0.0f) {
+                bool chatShown = g_lookupUi.open;
+                if (!chatShown) {
+                    std::lock_guard lock(g_stateMutex);
+                    chatShown = g_state.lookup.active;
+                }
+                if (chatShown) {
+                    g_chatScroll = Clamp(g_chatScroll + (s_wheelAccum > 0 ? 36.0f : -36.0f), 0.0f, g_chatScrollMax);
+                    s_wheelAccum = 0;
+                    g_layoutDirty = true;
+                    return 0;
+                }
+            }
             // Bunbun: over the game overlay, the first notch opens a peek at the
             // dashboard instead of moving through tabs nobody can see yet.
             if (g_settings.gameOverlay || g_gameOverlayPinned.load()) {
@@ -20982,6 +21581,31 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             const int ringSize = g_activeActivityCount.load(std::memory_order_relaxed);
             StepActivityScroll(s_wheelAccum > 0 ? -1 : 1, ringSize);  // wheel up = previous
             s_wheelAccum = 0;
+            return 0;
+        }
+
+        case WM_MOUSEHWHEEL: {
+            // Bunbun: a sideways touchpad scroll on the island skips songs.
+            static int s_hAccum = 0;
+            static ULONGLONG s_hLast = 0, s_hStep = 0;
+            const ULONGLONG t = GetTickCount64();
+            if (t - s_hLast > 300) s_hAccum = 0;
+            s_hLast = t;
+            s_hAccum += GET_WHEEL_DELTA_WPARAM(wParam);
+            if (!g_settings.musicSwipe || abs(s_hAccum) < 90 * 3 || t - s_hStep < 700) return 0;
+            bool media = false;
+            {
+                std::lock_guard lock(g_stateMutex);
+                media = g_settings.media && g_state.media.available;
+            }
+            if (media) {
+                const bool next = s_hAccum > 0;
+                if (next) g_skipTriggerNext.fetch_add(1); else g_skipTriggerPrev.fetch_add(1);
+                SendMediaTransportCommand(next ? 2 : 0);
+                g_layoutDirty = true;
+                s_hStep = t;
+            }
+            s_hAccum = 0;
             return 0;
         }
 
@@ -21015,6 +21639,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_HOTKEY: {
             if (wParam == ID_LOOKUP_HOTKEY) {
                 StartQuickLookup(hwnd);
+                return 0;
+            }
+            if (wParam == ID_TUCK_HOTKEY) {  // Bunbun
+                SetTucked(!g_tucked.load());
                 return 0;
             }
             if (wParam == ID_HIDE_SHOW_HOTKEY) {
@@ -21431,13 +22059,10 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (k == IslandKind::Media) ringHost = IslandKind::Media;
             else if (k != IslandKind::Idle && inRing(k)) ringActivities.push_back(k);
         }
-        int ringTabs = std::max(1, ActiveTabCount(g_settings));
-        // ActiveTabCount counts the Lyrics tab whenever a media session exists, but
-        // only the media view draws it. Counting it under the clock left a phantom
-        // last stop (one wheel notch that did nothing) before the ring wrapped.
-        if (ringHost == IslandKind::Idle && g_settings.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed)) {
-            ringTabs = std::max(1, ringTabs - 1);
-        }
+        // Bunbun: exactly the pages the host view draws (DashboardTabIds), so the
+        // wheel reaches the last one (All apps) and never stops on a phantom tab.
+        const int ringTabs = std::max(1, static_cast<int>(
+            DashboardTabIds(ringHost == IslandKind::Media ? 0 : 1, g_settings).size()));
         // A media session that isn't the main view (paused, say) gets the last stop,
         // so the player is always reachable: past the last tile, or one notch up from
         // the first. At rest the island still shows the clock.
@@ -21450,7 +22075,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         int actIdx = ((g_activityIndex.load(std::memory_order_relaxed) % ringSize) + ringSize) % ringSize;
 
         IslandKind shownKind = kinds[0];
-        if (inRing(kinds[0])) {
+        const bool ringStepped = g_ringStepped.exchange(false, std::memory_order_relaxed);  // Bunbun
+        // Bunbun: a page capture steers the tab itself; the ring must not pull it back.
+        if (inRing(kinds[0]) && !g_capturingPages.load(std::memory_order_relaxed)) {
             if (actIdx < static_cast<int>(ringActivities.size())) {
                 shownKind = ringActivities[static_cast<size_t>(actIdx)];
             } else if (mediaStop && actIdx == ringSize - 1) {
@@ -21462,12 +22089,18 @@ DWORD WINAPI RenderThreadProc(void*) {
                 // Only steer the tab while the user is scrolling the ring, so the
                 // tab they picked earlier stays put otherwise.
                 const int tab = actIdx - static_cast<int>(ringActivities.size());
-                if (g_activityIndex.load(std::memory_order_relaxed) != 0 && g_idleTab.load() != tab) {
+                // Bunbun: also when the wheel wraps back to the first stop. Leaving
+                // that out kept the last tab (To-do) on screen for one dead notch,
+                // then the next notch went on to Calendar.
+                if ((ringStepped || g_activityIndex.load(std::memory_order_relaxed) != 0) && g_idleTab.load() != tab) {
                     g_idleTab = tab;
                 }
             }
         }
 
+        // Bunbun: while the settings app takes pictures of the pages, show the pages
+        // (not an agent pill or another activity on top of them).
+        if (g_capturingPages.load(std::memory_order_relaxed)) shownKind = ringHost;
         Activity primary = ActivityForKind(shownKind, g_settings, snapshot);
         std::optional<Activity> secondary;
         // Secondary is only shown if an agent approval/card requires immediate stand-alone prompt,
@@ -21587,6 +22220,17 @@ DWORD WINAPI RenderThreadProc(void*) {
             }
         }
 
+        {
+            // Bunbun: a blip when the dashboard opens or folds (Bunbun.SoundOpenClose).
+            static bool s_wasOpen = false;
+            const bool open = (isHoverExpanded || pinned) &&
+                              (primary.kind == IslandKind::Idle || primary.kind == IslandKind::Media);
+            if (open != s_wasOpen) PlayChime(open ? Chime::Open : Chime::Close);
+            s_wasOpen = open;
+            g_dashboardOpen.store(open && !currentlyHidden, std::memory_order_relaxed);
+            static const bool s_pictures = (StartPassivePagePictures(), true);
+            (void)s_pictures;
+        }
         if (currentlyHidden && !g_settings.unhideOnHover) {
             isHoverExpanded = false;
         } else if (isHoverExpanded || hoverUnhides || pinned || isTransientAlert || unhideGraceActive) {
@@ -21616,6 +22260,16 @@ DWORD WINAPI RenderThreadProc(void*) {
                 // hides again even if the hotkey was used to reveal the
                 // island this time.
                 g_fullscreenOverrideVisible = false;
+            }
+            // Bunbun: with "Tuck instead of hiding", full screen folds the island to a
+            // line, and leaving full screen unfolds it again (only if we folded it).
+            static bool s_fullscreenTucked = false;
+            if (g_settings.fullscreenTuck && newFullscreen && !isFullscreen && !g_tucked.load()) {
+                SetTucked(true);
+                s_fullscreenTucked = true;
+            } else if (!newFullscreen && isFullscreen && s_fullscreenTucked) {
+                if (g_tucked.load()) SetTucked(false);
+                s_fullscreenTucked = false;
             }
             isFullscreen = newFullscreen;
             g_isFullscreen.store(isFullscreen, std::memory_order_relaxed);
@@ -21682,6 +22336,10 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (!isFullscreen && (pinned || isHoverExpanded)) {
                 primary.width = MediaLayout::kExpandedWidth * g_settings.sizeScale;
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
+                if (g_settings.studioLayout) {  // Bunbun: header + page + tab bar
+                    primary.width = kStudioIslandW * g_settings.sizeScale;
+                    primary.height = kStudioIslandH * g_settings.sizeScale;
+                }
             } else if (primary.width > 0.0f) {
                 // Collapsed: size the strip to the text it will actually render.
                 // ActivityForKind's 96/170px was wrong both ways -- dead air around
@@ -21713,6 +22371,10 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (!isFullscreen && (isHoverExpanded || pinned || recentTrackChange)) {
                 primary.width = MediaLayout::kExpandedWidth * g_settings.sizeScale;
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
+                if (g_settings.studioLayout) {  // Bunbun: header + page + tab bar
+                    primary.width = kStudioIslandW * g_settings.sizeScale;
+                    primary.height = kStudioIslandH * g_settings.sizeScale;
+                }
                 // (Immersive lyrics: the island keeps its normal 380px width.)
             } else {
                 // Optional clock section on the left of the collapsed pill.
@@ -21721,8 +22383,11 @@ DWORD WINAPI RenderThreadProc(void*) {
                     : 0.0f;
                 if (CollapsedLyricsActive(snapshot, g_settings)) {
                     // Collapsed but carrying lyrics: wider pill, same height.
-                    primary.width = ((g_settings.collapsedLyrics ? kCollapsedLyricsWidth : kCollapsedTitleWidth) +
-                                     clockSection) * g_settings.sizeScale;  // Bunbun: title-only is narrower
+                    // Bunbun: title-only is narrower; lyrics fit the song's longest line.
+                    const float fitted = g_collapsedLyricsWidth.load(std::memory_order_relaxed);
+                    const float lyricsW = fitted > 0.0f ? fitted : kCollapsedLyricsWidth;
+                    primary.width = ((g_settings.collapsedLyrics ? lyricsW : kCollapsedTitleWidth) +
+                                     clockSection) * g_settings.sizeScale;
                 } else if (g_settings.mediaPillClock) {
                     primary.width = (MediaPillLayout::kBaseWidth + clockSection) * g_settings.sizeScale;
                 }
@@ -21740,15 +22405,49 @@ DWORD WINAPI RenderThreadProc(void*) {
                 const Settings lookupSettings = GetSettingsCopy();
                 primary.height = renderer.MeasureLookupCard(snapshot, lookupSettings) *
                                  lookupSettings.sizeScale;
+                if (lookupSettings.studioLayout) {  // Bunbun: Ask Bun as a chat
+                    primary.width = kStudioChatW * lookupSettings.sizeScale;
+                    primary.height = kStudioChatH * lookupSettings.sizeScale;
+                }
             }
         }
 
         const bool fullscreenSuppressed =
-            isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed);
+            isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed) &&
+            !g_settings.fullscreenTuck;  // Bunbun: tucked instead (see the full screen check)
         if ((isHidden || fullscreenSuppressed) && !privacyActive && !pinned && !isHoverExpanded && !isTransientAlert) {
             primary.width = 0.0f;
             primary.height = 0.0f;
             secondary.reset();
+        }
+
+        // Bunbun: tucked away. The island shrinks to a thin line; pointing at it for
+        // a moment (after the pointer has left it once) brings the island back, and so
+        // does an agent that needs an answer.
+        if (g_tucked.load(std::memory_order_relaxed)) {
+            const bool needsYou = snapshot.agent.phase == bb::AgentPhase::Approval ||
+                                  snapshot.agent.phase == bb::AgentPhase::Question;
+            const LONG zoneHalfW = static_cast<LONG>(80 * g_settings.sizeScale);
+            const LONG zoneH = static_cast<LONG>(12 * g_settings.sizeScale);
+            const LONG lineCx = (pillRect.left + pillRect.right) / 2;
+            // Screen space, like pillRect and cursor. Reaches above the line so the
+            // very top edge of the screen counts.
+            const RECT zone{lineCx - zoneHalfW, pillRect.top - zoneH, lineCx + zoneHalfW, pillRect.top + zoneH};
+            const bool onLine = PtInRect(&zone, cursor) != FALSE;
+            if (!onLine) {
+                g_tuckPointerLeft = true;
+                g_tuckHoverSince = 0.0;
+            } else if (g_tuckPointerLeft && g_tuckHoverSince <= 0.0) {
+                g_tuckHoverSince = now;
+            }
+            if (needsYou || (g_tuckHoverSince > 0.0 && now - g_tuckHoverSince > 0.45)) {
+                SetTucked(false);
+            } else {
+                primary.width = 60.0f * g_settings.sizeScale;
+                primary.height = 6.0f * g_settings.sizeScale;
+                secondary.reset();
+                if (g_tuckHoverSince > 0.0 || now - g_tuckedAt < 0.3) needsRender = true;
+            }
         }
 
         const bool mediaWaveformVisible =
@@ -21761,12 +22460,13 @@ DWORD WINAPI RenderThreadProc(void*) {
         // music pill, headphones on). Notch islands also get a little extra width.
         const bool collapsedLook = primary.width > 1.0f && primary.height > 1.0f &&
                                    primary.height <= 64.0f * g_settings.sizeScale;
-        if (collapsedLook && g_settings.notchStyle) {
+        if (collapsedLook && g_settings.notchStyle && !g_tucked.load(std::memory_order_relaxed)) {
             primary.width += kNotchExtraContent * g_settings.sizeScale;
         }
         // Bunbun: Bun sits in the collapsed idle island (beside the clock).
         // On the music pill, the mascot alternates with the cover art in a cycle.
         g_bunSlotWidth = (collapsedLook && !secondary && g_settings.bunbunMascot && g_settings.bunbunMascotOnIsland &&
+                          !g_tucked.load(std::memory_order_relaxed) &&
                           primary.kind == IslandKind::Idle)
                              ? kBunSlotContent * g_settings.sizeScale
                              : 0.0f;
@@ -22501,6 +23201,23 @@ double IslandNow() {
     return NowSeconds();
 }
 
+// Bunbun: "a new version is available", on the island. Clicking it opens the
+// release page (see the notification click in OverlayWndProc).
+void IslandAnnounceUpdate(const wchar_t* version, const wchar_t* url) {
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_updatePageUrl = url ? url : L"";
+        g_state.notification.active = true;
+        g_state.notification.app = L"Bunbun";
+        g_state.notification.title = std::wstring(L"Bunbun ") + (version ? version : L"") + L" is ready";
+        g_state.notification.body = L"An update is available \x00B7 click to open the download page";
+        g_state.notification.icon = {};
+        g_state.notification.expiresAt = NowSeconds() + 8.0;
+    }
+    g_layoutDirty = true;
+    if (HWND hwnd = g_hwnd) PostMessageW(hwnd, WM_APP_NEW_EVENT, 0, 0);
+}
+
 void IslandSetAgentView(const bb::AgentView& view, bool nudge) {
     bool changed = false;
     {
@@ -22509,8 +23226,31 @@ void IslandSetAgentView(const bb::AgentView& view, bool nudge) {
         changed = cur.phase != view.phase || cur.requestId != view.requestId || cur.step != view.step ||
                   cur.detail != view.detail || cur.project != view.project || cur.agent != view.agent ||
                   cur.added != view.added || cur.removed != view.removed || cur.queued != view.queued ||
-                  cur.sessions != view.sessions || cur.options != view.options || cur.tool != view.tool;
+                  cur.sessions != view.sessions || cur.options != view.options || cur.tool != view.tool ||
+                  // Bunbun: the Studio agent page and usage ring
+                  cur.stage != view.stage || cur.command != view.command || cur.output != view.output ||
+                  cur.commandFailed != view.commandFailed || cur.turnStart != view.turnStart ||
+                  cur.prompt != view.prompt || cur.diffOld != view.diffOld || cur.diffNew != view.diffNew ||
+                  cur.jobsToday != view.jobsToday || cur.history.size() != view.history.size() ||
+                  (!view.history.empty() && cur.history.front().finishedAt != view.history.front().finishedAt) ||
+                  cur.usage5h != view.usage5h || cur.usage7d != view.usage7d || cur.contextPct != view.contextPct ||
+                  cur.usage5hResets != view.usage5hResets ||
+                  cur.plan != view.plan || cur.questions.size() != view.questions.size() ||
+                  cur.replyId != view.replyId;
         if (changed) g_state.agent = view;
+    }
+    NoteAgentActivity(view);  // Bunbun: the agent tile appears once an agent has been active
+    {
+        // Bunbun: a chime when an agent finishes, needs you, or stops with an error.
+        static bb::AgentPhase s_lastPhase = bb::AgentPhase::None;
+        static uint64_t s_lastRequest = 0;
+        const bool newRequest = view.requestId != 0 && view.requestId != s_lastRequest;
+        if (view.phase == bb::AgentPhase::Finished && s_lastPhase != bb::AgentPhase::Finished) PlayChime(Chime::Done);
+        else if (view.phase == bb::AgentPhase::Error && s_lastPhase != bb::AgentPhase::Error) PlayChime(Chime::Error);
+        else if ((view.phase == bb::AgentPhase::Approval || view.phase == bb::AgentPhase::Question) && newRequest)
+            PlayChime(Chime::Question);
+        s_lastPhase = view.phase;
+        if (view.requestId) s_lastRequest = view.requestId;
     }
     if (!changed) return;
     g_layoutDirty = true;
@@ -22524,6 +23264,12 @@ void IslandSetAgentView(const bb::AgentView& view, bool nudge) {
 void IslandOpenAsk() {
     // Same path as the Quick Lookup hotkey, so it runs on the window thread.
     if (HWND hwnd = g_hwnd) PostMessageW(hwnd, WM_HOTKEY, ID_LOOKUP_HOTKEY, 0);
+}
+
+void IslandSubmitAsk(const std::wstring& query) {
+    if (HWND hwnd = g_hwnd) {
+        PostMessageW(hwnd, WM_APP_SUBMIT_ASK, 0, reinterpret_cast<LPARAM>(_wcsdup(query.c_str())));
+    }
 }
 
 bool IslandAskHotkeyActive() {
@@ -22569,4 +23315,100 @@ bool IslandSnapshotPng(std::string* png, RECT* screen, RECT* monitor, RECT* work
     stream->Read(png->data(), static_cast<ULONG>(png->size()), &read);
     png->resize(read);
     return true;
+}
+
+// Bunbun: real pictures of every page for the settings app's Island pages screen.
+// Holds the island open ("Keep open"), shows each tab in turn, snapshots it and
+// puts the tab and Keep open back. About half a second per page, on its own
+// thread so neither the pipe nor the render loop waits.
+namespace {
+const wchar_t* const kPageKeys[] = {L"home", L"music", L"calendar", L"weather", L"system", L"toggles", L"tray", L"todo",
+                                    L"lyrics", L"agent", L"clipboard", L"note", L"focus", L"apps", L"mirror"};
+
+std::wstring PagePicturesDir() {
+    std::wstring dir = bb::StatePath();
+    dir = dir.substr(0, dir.find_last_of(L'\\')) + L"\\previews";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+bool SavePagePicture(const std::wstring& dir, StudioPage page) {
+    const int i = static_cast<int>(page);
+    if (i < 0 || i >= static_cast<int>(std::size(kPageKeys))) return false;
+    std::string png;
+    RECT screen{}, monitor{}, work{};
+    if (!IslandSnapshotPng(&png, &screen, &monitor, &work) || png.empty()) return false;
+    // Written to a temp name and renamed, so the settings app never reads half a file.
+    const std::wstring path = dir + L"\\" + kPageKeys[i] + L".png", temp = path + L".tmp";
+    HANDLE f = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool ok = WriteFile(f, png.data(), static_cast<DWORD>(png.size()), &written, nullptr) && written == png.size();
+    CloseHandle(f);
+    return ok && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
+// Bunbun: pictures without asking. Whenever the dashboard is open and one page has
+// stayed put for 1.5 s, its picture is saved (at most every 15 s per page), so the
+// settings app's Island pages screen keeps up with the real island on its own.
+void StartPassivePagePictures() {
+    std::thread([] {
+        const std::wstring dir = PagePicturesDir();
+        double lastSaved[std::size(kPageKeys)] = {};
+        int stablePage = -1;
+        double stableSince = 0.0;
+        for (;;) {
+            Sleep(500);
+            const double now = NowSeconds();
+            if (!g_dashboardOpen.load(std::memory_order_relaxed) || g_capturingPages.load(std::memory_order_relaxed)) {
+                stablePage = -1;
+                continue;
+            }
+            const int id = CurrentDashboardTabId();
+            const int page = id < 0 ? -1 : static_cast<int>(StudioPageFor(g_dashboardContext.load(std::memory_order_relaxed), id));
+            if (page != stablePage) {
+                stablePage = page;
+                stableSince = now;
+                continue;
+            }
+            if (page < 0 || page >= static_cast<int>(std::size(kPageKeys)) || now - stableSince < 1.5) continue;
+            if (lastSaved[page] > 0.0 && now - lastSaved[page] < 15.0) continue;
+            if (SavePagePicture(dir, static_cast<StudioPage>(page))) lastSaved[page] = now;
+        }
+    }).detach();
+}
+}  // namespace
+
+int IslandCapturePages() {
+    if (g_capturingPages.exchange(true)) return 0;
+    const Settings s = GetSettingsCopy();
+    const int context = g_dashboardContext.load(std::memory_order_relaxed);
+    const std::vector<int> ids = DashboardTabIds(context, s);
+    std::thread([context, ids] {
+        const std::wstring dir = PagePicturesDir();
+        auto repaint = [] {
+            g_layoutDirty = true;
+            if (g_hwnd) PostMessageW(g_hwnd, WM_APP_NEW_EVENT, 0, 0);
+        };
+        // An idle island draws only when nudged, so keep nudging while a page settles.
+        auto settle = [&](int ms) {
+            for (int t = 0; t < ms; t += 40) {
+                repaint();
+                Sleep(40);
+            }
+        };
+        const int oldTab = g_idleTab.load();
+        const bool oldPinned = g_pinnedExpanded.exchange(true);
+        settle(800);  // the island opens
+        for (size_t i = 0; i < ids.size(); ++i) {
+            g_idleTab = static_cast<int>(i);
+            settle(650);  // the tab slides in and settles
+            SavePagePicture(dir, StudioPageFor(context, ids[i]));
+        }
+        g_idleTab = oldTab;
+        g_pinnedExpanded = oldPinned;
+        repaint();
+        g_capturingPages = false;
+    }).detach();
+    return static_cast<int>(ids.size());
 }
