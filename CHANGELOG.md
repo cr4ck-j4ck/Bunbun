@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Added
 - **Island pages** in Settings: a drawing of every page of the island, a switch for each, and drag
   (or the arrows) to put them in any order. Home always comes first. The same screen picks what each
@@ -37,6 +39,10 @@ and versions follow [Semantic Versioning](https://semver.org/).
 - The music bars sat as a row of dots: the refined bars read frequency bands that were only worked
   out for the Orb and Plasma styles. They move with the music again.
 - Scrolling couldn't reach the last page (All apps) in the Studio layout while music played.
+- In the Studio layout, clicks and hover could land on the wrong button (pausing music on Home
+  started the focus timer; All apps lit up and opened the wrong page). The island only repaints the
+  part that changed, and button positions were measured in that part instead of the whole window.
+  A clicked tab was also pulled back by the scroll ring while the pointer stayed on the island.
 - Hovering the gear and the eyedropper in the Studio header did nothing when other buttons had
   appeared or gone since the last frame.
 - Home no longer has an Edit button; pick the cards in Settings → Island pages.

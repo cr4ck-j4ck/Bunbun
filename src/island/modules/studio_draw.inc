@@ -99,8 +99,11 @@
     void SHit(D2D1_RECT_F r, StudioAction action, int arg = 0) {
         D2D1_MATRIX_3X2_F m;
         target_->GetTransform(&m);
+        // The live transform maps into the region bound this frame, not the window;
+        // bindOffset_ turns that back into window (client) coordinates.
         auto map = [&](float x, float y) {
-            return D2D1::Point2F(x * m._11 + y * m._21 + m._31, x * m._12 + y * m._22 + m._32);
+            return D2D1::Point2F(x * m._11 + y * m._21 + m._31 + bindOffset_.x,
+                                 x * m._12 + y * m._22 + m._32 + bindOffset_.y);
         };
         const D2D1_POINT_2F a = map(r.left, r.top), b = map(r.right, r.bottom);
         g_studioHits.push_back({D2D1::RectF(std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)),

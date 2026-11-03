@@ -1316,6 +1316,7 @@ std::atomic<int> g_activityIndex = 0;
 // whatever stop it lands on (the first one included).
 std::atomic<bool> g_ringStepped{false};
 std::atomic<int> g_activeActivityCount = 1;
+std::atomic<int> g_ringActivityCount{0};  // Bunbun: activities ahead of the dashboard tabs in the ring
 // True while a media pill exists, i.e. while the Lyrics tab can be shown.
 // Set by the render loop; read by ActiveTabCount().
 std::atomic<bool> g_lyricsTabAvailable{false};
@@ -9766,6 +9767,9 @@ class Renderer {
         target_->BeginDraw();
         target_->SetTransform(D2D1::Matrix3x2F::Translation(-static_cast<float>(dirty.left),
                                                             -static_cast<float>(dirty.top)));
+        // Bunbun: Studio click spots are kept in window coordinates, so SHit adds this
+        // back after the live transform (it changes with every frame's dirty region).
+        bindOffset_ = D2D1::Point2F(static_cast<float>(dirty.left), static_cast<float>(dirty.top));
         // Clear() honours the active clip, so this only wipes the dirty region.
         target_->PushAxisAlignedClip(
             D2D1::RectF(static_cast<float>(dirty.left), static_cast<float>(dirty.top),
@@ -19290,6 +19294,7 @@ class Renderer {
     HDC memDc_ = nullptr;
     HBITMAP dib_ = nullptr;
     HBITMAP oldBitmap_ = nullptr;
+    D2D1_POINT_2F bindOffset_{};  // Bunbun: top-left of the region bound this frame (see Render)
     int bitmapWidth_ = 0;     // logical size of the frame being drawn
     int bitmapHeight_ = 0;
     int bitmapCapW_ = 0;      // allocated size of the DIB (>= logical size)
@@ -22069,6 +22074,7 @@ DWORD WINAPI RenderThreadProc(void*) {
         const bool mediaStop = ringHost == IslandKind::Idle && g_settings.media && snapshot.media.available;
         const int ringSize = static_cast<int>(ringActivities.size()) + ringTabs + (mediaStop ? 1 : 0);
         g_activeActivityCount.store(ringSize, std::memory_order_relaxed);
+        g_ringActivityCount.store(static_cast<int>(ringActivities.size()), std::memory_order_relaxed);  // Bunbun
 
         static double s_lastRingHover = 0.0;
         if (now - s_lastRingHover > 2.5) g_activityIndex.store(0, std::memory_order_relaxed);

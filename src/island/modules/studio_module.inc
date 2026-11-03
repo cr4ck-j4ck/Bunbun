@@ -1324,6 +1324,16 @@ bool HandleStudioButtonDown(HWND hwnd, int x, int y) {
 }
 
 // Returns true when the click belonged to the Studio frame or one of its pages.
+// Opens a dashboard page from a click. The scroll ring remembers its own stop while
+// the pointer is over the island and steers the page back to it, which undid tab
+// and All apps clicks; so the ring is moved to the clicked page too.
+void ShowDashboardTab(int tab) {
+    if (tab < 0) return;
+    g_idleTab = tab;
+    g_activityIndex.store(g_ringActivityCount.load(std::memory_order_relaxed) + tab, std::memory_order_relaxed);
+    g_layoutDirty = true;
+}
+
 bool HandleStudioClick(HWND hwnd, int x, int y) {
     if (g_studioVolumeDrag) {
         g_studioVolumeDrag = false;
@@ -1338,7 +1348,7 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
     const StudioHit hit = g_studioHits[static_cast<size_t>(i)];
     switch (hit.action) {
         case StudioAction::Tab:
-            g_idleTab = hit.arg;
+            ShowDashboardTab(hit.arg);
             break;
         case StudioAction::Volume:
             if (hit.arg == -1) {  // the speaker icon: mute / unmute
@@ -1362,7 +1372,7 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             StopFocusTimer();
             break;
         case StudioAction::AgentPage:
-            if (const int tab = DashboardTabIndexOf(kTabAgent); tab >= 0) g_idleTab = tab;
+            ShowDashboardTab(DashboardTabIndexOf(kTabAgent));
             break;
         case StudioAction::AgentFocus:
             OpenAgentApp();
@@ -1403,7 +1413,7 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             ToggleTimerPause();
             break;
         case StudioAction::FocusPage:
-            if (const int tab = DashboardTabIndexOf(kTabFocus); tab >= 0) g_idleTab = tab;
+            ShowDashboardTab(DashboardTabIndexOf(kTabFocus));
             break;
         case StudioAction::HomeEdit:
             g_homeEdit = !g_homeEdit;
@@ -1418,7 +1428,7 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             Mirror::Stop();
             break;
         case StudioAction::OpenTab:
-            if (const int tab = DashboardTabIndexOf(hit.arg); tab >= 0) g_idleTab = tab;
+            ShowDashboardTab(DashboardTabIndexOf(hit.arg));
             break;
         case StudioAction::OpenLink: {
             const auto links = ParseHomeLinks(GetSettingsCopy().homeLinks);
