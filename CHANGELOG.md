@@ -5,28 +5,9 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-- **Fill: Transparent or Opaque.** A new Fill choice in Appearance. Transparent is the look you had
-  (the theme's colour, with the transparency and blur settings). Opaque paints the island one steady
-  solid colour, with nothing showing through and no album-art tint: pick Black, Obsidian, Graphite,
-  Navy, Forest, Plum, Espresso or White, or type any hex. Works on every shape, including the notch,
-  and on Linux.
+## [0.3.3]
 
-### Changed
-- **Videos don't auto-expand.** With **Auto-expand on track change** on, a new song still opens the
-  island for a moment, but a video (the Streaming pill) stays small.
-
-## [0.3.2]
-
-### Added
-- **Streaming.** While a video plays (YouTube, Netflix, an anime site, VLC…), the small island shows
-  your mascot watching and munching popcorn with "Streaming", instead of the title and cover; the
-  bars still move in the album colour. Music apps (Spotify, YouTube Music, Apple Music and others)
-  keep the song and the headphones. Every character has the new Streaming mood, and skin packs can
-  add `streaming` frames (falling back to `snack`). Turn it off with **Streaming mode for videos**
-  in Features → Music. On Linux too, from the MPRIS player (browsers, VLC, mpv, Celluloid…).
-
-## [0.3.1]
+Everything that was briefly out as 0.3.1 and 0.3.2, plus a solid-colour island.
 
 ### Added
 - **One-click updates.** Choose **Update** in Settings → General, the tray menu or the island's
@@ -56,6 +37,21 @@ and versions follow [Semantic Versioning](https://semver.org/).
   and features, pages and options Linux doesn't have yet are marked **Not on Linux yet**. The To-dos
   screen works on Linux too. Music & media, Expand on hover and Pill while an agent works now work
   on Linux too.
+- **Streaming.** While a video plays (YouTube, Netflix, an anime site, VLC…), the small island shows
+  your mascot watching and munching popcorn with "Streaming", instead of the title and cover; the
+  bars still move in the album colour. Music apps (Spotify, YouTube Music, Apple Music and others)
+  keep the song and the headphones. Every character has the new Streaming mood, and skin packs can
+  add `streaming` frames (falling back to `snack`). Turn it off with **Streaming mode for videos**
+  in Features → Music. On Linux too, from the MPRIS player (browsers, VLC, mpv, Celluloid…).
+- **Fill: Transparent or Opaque.** A new Fill choice in Appearance. Transparent is the look you had
+  (the theme's colour, with the transparency and blur settings). Opaque paints the island one steady
+  solid colour, with nothing showing through and no album-art tint: pick Black, Obsidian, Graphite,
+  Navy, Forest, Plum, Espresso or White, or type any hex. Works on every shape, including the notch,
+  and on Linux.
+
+### Changed
+- **Videos don't auto-expand.** With **Auto-expand on track change** on, a new song still opens the
+  island for a moment, but a video (the Streaming pill) stays small.
 
 ### Fixed
 - Sliding text on the island (song titles, the agent's current step) started at a random point, so
