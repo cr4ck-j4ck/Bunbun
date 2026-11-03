@@ -17,6 +17,7 @@
 #include "../common/todos.h"  // Bunbun: to-do file and repeats, shared with the settings app
 #include "../common/json.h"   // Bunbun: talking to the local AI helper
 #include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
+#include "../updater.h"  // Bunbun: one-click updates from the island's update notice
 #include "studio_icons.h"  // Bunbun: Studio page model and icons, shared with the Linux island
 #include <windows.h>
 #include <unknwn.h>
@@ -721,6 +722,7 @@ struct Settings {
     std::wstring dateFormat;        // empty = locale default
     bool mediaPillClock = false;    // show the clock inside the collapsed media pill
     bool collapsedTitle = true;     // Bunbun: song title inside the collapsed media pill
+    bool streamingMood = true;      // Bunbun: videos show the Streaming mascot, not title and cover
     bool dateFirst = false;
     int firstDayOfWeek = -1;        // 0 = Sunday .. 6 = Saturday, -1 = follow Windows
 
@@ -819,6 +821,7 @@ class PixelsRef {
 struct MediaSnapshot {
     bool available = false;
     bool playing = false;
+    bool video = false;  // Bunbun: a video or film, not music (IsVideoMedia)
     std::wstring title;
     std::wstring artist;
     std::wstring albumTitle;
@@ -2825,6 +2828,7 @@ void LoadSettings() {
     }
     next.mediaPillClock = Wh_GetIntSetting(L"Modules.MediaPillClock") != 0;
     next.collapsedTitle = Wh_GetIntSetting(L"Modules.CollapsedTitle") != 0;  // Bunbun
+    next.streamingMood = Wh_GetIntSetting(L"Bunbun.StreamingMood") != 0;     // Bunbun
 
     // ── Localization (#35) ───────────────────────────────────────────────────
     {
@@ -3082,6 +3086,17 @@ void LoadSettings() {
     // a little. The rest of the palettes are opaque unless the user says so.
     if (next.themePreset == ThemePreset::Graphite && localOpacity < 0) {
         next.pillOpacity = 0.88f;
+    }
+
+    // Bunbun: Fill = Opaque. One steady colour: nothing shows through, no blur,
+    // and no depth shading or album-art wash shifting the tone.
+    if (EqualsNoCase(GetStringSettingCopy(L"Themes.IslandFill"), L"opaque")) {
+        next.pillBgColor = ColorFromHex(GetStringSettingCopy(L"Themes.SolidColor"), D2D1::ColorF(0, 0, 0, 1.0f));
+        next.pillBgColor.a = 1.0f;
+        next.pillOpacity = 1.0f;
+        next.backdropMaterial = BackdropMaterial::None;
+        next.materialDepth = false;
+        next.accentBloom = 0.0f;
     }
 
     next.borderMergedMode = Wh_GetIntSetting(L"Appearance.BorderMergedMode") != 0;
@@ -4991,6 +5006,31 @@ winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession Select
 }
 
 // Exe name for path-style AUMIDs (classic desktop apps), friendly name otherwise.
+// Bunbun: is this session a video rather than music? Players that say so are
+// believed (Netflix, VLC, Media Player report Video or Music). Browsers report
+// everything alike, so there a track with an album is music (YouTube Music,
+// Spotify on the web) and one without is a video (YouTube, streaming sites).
+// Music apps always count as music.
+bool IsVideoMedia(const std::wstring& aumid, int playbackType, const std::wstring& albumTitle) {
+    std::wstring id = aumid;
+    for (wchar_t& c : id) c = static_cast<wchar_t>(towlower(c));
+    static const wchar_t* kMusicApps[] = {L"spotify", L"applemusic", L"apple music", L"itunes", L"youtube music", L"youtube-music",
+                                          L"th-ch", L"tidal", L"deezer", L"amazon music", L"amazonmusic", L"foobar", L"musicbee",
+                                          L"aimp", L"winamp", L"soundcloud", L"pandora", L"qobuz", L"audacious"};
+    for (const wchar_t* m : kMusicApps)
+        if (id.find(m) != std::wstring::npos) return false;
+    static const wchar_t* kBrowsers[] = {L"chrome", L"msedge", L"firefox", L"brave", L"opera", L"vivaldi", L"arc", L"zen", L"librewolf"};
+    for (const wchar_t* b : kBrowsers)
+        if (id.find(b) != std::wstring::npos) return albumTitle.empty();
+    if (playbackType == 2) return true;   // MediaPlaybackType::Video
+    if (playbackType == 1) return false;  // MediaPlaybackType::Music
+    static const wchar_t* kVideoApps[] = {L"vlc", L"mpv", L"potplayer", L"mpc-hc", L"netflix", L"primevideo", L"disney", L"hulu",
+                                          L"plex", L"kodi", L"stremio", L"crunchyroll", L"hotstar", L"jiocinema", L"zune"};
+    for (const wchar_t* v : kVideoApps)
+        if (id.find(v) != std::wstring::npos) return true;
+    return false;
+}
+
 std::wstring MediaSourceDisplayName(const std::wstring& aumid) {
     std::wstring name = FriendlyMediaSourceName(aumid);
     if (name.find(L'\\') != std::wstring::npos || name.find(L'/') != std::wstring::npos ||
@@ -5310,6 +5350,15 @@ DWORD WINAPI MediaThreadProc(void*) {
 
                     next.sourceAppUserModelId = session.SourceAppUserModelId().c_str();
                     next.sourceName = MediaSourceDisplayName(next.sourceAppUserModelId);
+                    {
+                        // Bunbun: video or music (Streaming mood).
+                        int type = 0;
+                        try {
+                            if (auto pt = playback.PlaybackType()) type = static_cast<int>(pt.Value());
+                        } catch (...) {
+                        }
+                        next.video = IsVideoMedia(next.sourceAppUserModelId, type, next.albumTitle);
+                    }
 
                     // Fallback for VLC, which often exposes a session with no
                     // Title metadata at all.
@@ -5460,6 +5509,7 @@ DWORD WINAPI MediaThreadProc(void*) {
         }
 
         bool trackJustChanged = false;
+        bool trackIsVideo = false;
         {
             std::lock_guard lock(g_stateMutex);
 
@@ -5479,6 +5529,7 @@ DWORD WINAPI MediaThreadProc(void*) {
             if (isDifferentTrack) {
                 next.titleChangedAt = NowSeconds();
                 trackJustChanged = true;
+                trackIsVideo = next.video;  // Bunbun: a video stays collapsed
                 g_idleTab = 0;
             }
 
@@ -5503,7 +5554,7 @@ DWORD WINAPI MediaThreadProc(void*) {
 
         if (trackJustChanged) {
             g_layoutDirty = true;
-            if (g_settings.mediaAutoExpand) {
+            if (g_settings.mediaAutoExpand && !trackIsVideo) {
                 TriggerNudge();
             }
         }
@@ -9551,6 +9602,7 @@ struct MarqueeLayoutCache {
     float wrapWidth = 0.0f;
     ComPtr<IDWriteTextLayout> layout;
     DWRITE_TEXT_METRICS metrics{};
+    double startedAt = -1.0;  // Bunbun: when this text first showed, so it starts at its first word
 };
 
 // Measured geometry of the collapsed idle strip, produced by
@@ -9633,11 +9685,22 @@ constexpr float kCollapsedTitleWidth = 260.0f;
 
 // True when the collapsed pill should be widened for lyrics. "fetching" counts
 // too, so the pill does not shrink and regrow on every track change.
+// Bunbun: the mascot's mood while something plays: popcorn for a video, headphones for music.
+bb::mascot::Mood MediaMascotMood(const MediaSnapshot& media, const Settings& settings) {
+    return media.video && settings.streamingMood ? bb::mascot::Mood::Streaming : bb::mascot::Mood::Music;
+}
+
+// Bunbun: a video plays and the small island shows the mascot and "Streaming".
+bool StreamingPill(const SharedState& state, const Settings& settings) {
+    return settings.streamingMood && settings.media && state.media.available && state.media.video;
+}
+
 bool CollapsedLyricsActive(const SharedState& state, const Settings& settings) {
     // Stays wide for as long as media is available. If there are no lyrics to
     // show, DrawCollapsedLyrics shows the media title instead.
     // Bunbun: the song-title setting reuses the same text slot without lyrics.
-    return (settings.collapsedLyrics || settings.collapsedTitle) && settings.media && state.media.available;
+    return ((settings.collapsedLyrics || settings.collapsedTitle) && settings.media && state.media.available) ||
+           StreamingPill(state, settings);  // Bunbun: "Streaming" takes the title's place
 }
 
 // One pre-built lyric line. Built once when the line changes, then reused every
@@ -14368,7 +14431,9 @@ class Renderer {
                 // the cover art and our vibing mascot every few seconds in a loop.
                 const bool allowMascotLoop = settings.bunbunMascot && settings.bunbunMascotOnIsland && state.media.playing;
                 float mascotMix = 0.0f;
-                if (allowMascotLoop) {
+                if (StreamingPill(state, settings) && settings.bunbunMascot) {
+                    mascotMix = 1.0f;  // Bunbun: a video shows the mascot, never the cover
+                } else if (allowMascotLoop) {
                     constexpr double kCycle = 7.0; // 3.5s cover, 3.5s mascot
                     const double phase = std::fmod(now, kCycle);
                     if (phase < 3.0) {
@@ -14417,12 +14482,25 @@ class Renderer {
                                                   D2D1_LAYER_OPTIONS_NONE),
                             mLayer);
                     }
-                    const float size = std::min(artDrawRect.right - artDrawRect.left,
-                                                artDrawRect.bottom - artDrawRect.top);
-                    const D2D1_POINT_2F c = D2D1::Point2F(
+                    float size = std::min(artDrawRect.right - artDrawRect.left,
+                                          artDrawRect.bottom - artDrawRect.top);
+                    D2D1_POINT_2F c = D2D1::Point2F(
                         (artDrawRect.left + artDrawRect.right) * 0.5f,
                         (artDrawRect.top + artDrawRect.bottom) * 0.5f);
-                    bb::mascot::Draw(target_.Get(), c, size * 1.05f, bb::mascot::Mood::Music, now, 0.0,
+                    if (StreamingPill(state, settings) &&
+                        bb::mascot::GetStyle().character != bb::mascot::Character::Custom) {
+                        // Bunbun: the mascot stands alone here, so it gets a slot a third
+                        // larger than the cover and its real outline (head, popcorn) fills it.
+                        // Skin packs already fill their frame, so they keep the cover's slot.
+                        const float side = size * 1.35f;
+                        D2D1_POINT_2F fc{};
+                        float fs = 0.0f;
+                        bb::mascot::FitToBox(D2D1::RectF(c.x - side * 0.5f, c.y - side * 0.5f, c.x + side * 0.5f, c.y + side * 0.5f),
+                                             &fc, &fs);
+                        c = fc;
+                        size = fs / 1.05f;
+                    }
+                    bb::mascot::Draw(target_.Get(), c, size * 1.05f, MediaMascotMood(state.media, settings), now, 0.0,
                                      MascotLook(c));
                     if (mLayer) target_->PopLayer();
                 }
@@ -15114,7 +15192,8 @@ class Renderer {
         // This also stops the previous song's lyrics showing while the lyrics
         // thread has not noticed the track change yet.
         // Bunbun: with only the song-title setting on, the slot always shows the title.
-        const bool lyricsUsable = g_settings.collapsedLyrics &&
+        const bool streaming = StreamingPill(state, g_settings);  // Bunbun: no title for a video
+        const bool lyricsUsable = !streaming && g_settings.collapsedLyrics &&
             state.lyrics.hasData && state.lyrics.synced && !lines.empty() &&
             state.lyrics.matchedTitle == state.media.title &&
             state.lyrics.matchedArtist == state.media.artist;
@@ -15182,7 +15261,7 @@ class Renderer {
         const bool gapNote = !showTitle && LyricsGapNoteMix(lines, idx, posMs) > 0.0f;
         const int showIdx = showTitle ? kTitleKey : (gapNote ? -1000 - idx : idx);
 
-        std::wstring fallback = state.media.title;
+        std::wstring fallback = streaming ? std::wstring(L"Streaming") : state.media.title;
         if (fallback.empty()) fallback = state.media.sourceName;
         if (fallback.empty()) fallback = Loc(L"Media");
 
@@ -15209,6 +15288,7 @@ class Renderer {
                                                           : std::wstring(L"\u266A"));
             BuildCollapsedLyricLine(collapsedLyricCur_, text, fmt, showTitle ? 0.0f : availW);
             collapsedLyricCur_.isTitle = showTitle;
+            collapsedLineSince_ = now;
         } else if (!collapsedLyricCur_.isTitle && std::fabs(collapsedLyricCur_.builtFor - availW) > 0.5f) {
             // The pill is still growing or shrinking: refit the line to the new slot.
             const std::wstring text = collapsedLyricCur_.text;
@@ -15253,9 +15333,13 @@ class Renderer {
             float titleCycle = 0.0f;  // > 0 only when the title is scrolling as a marquee
             if (overflow > 0.0f) {
                 if (c.isTitle) {
-                    // Long title: scroll it in a loop, like the other marquees.
+                    // Long title: scroll it in a loop, like the other marquees. Bunbun: from
+                    // its first word, resting there 1.5 s each loop (was clock-based, so it
+                    // often appeared mid-word).
                     titleCycle = c.width + 38.0f;
-                    x = area.left - std::fmod(static_cast<float>(now) * 30.0f, titleCycle);
+                    constexpr double kHold = 1.5;
+                    const double phase = std::fmod(now - collapsedLineSince_, kHold + titleCycle / 30.0);
+                    x = area.left - (phase < kHold ? 0.0f : static_cast<float>((phase - kHold) * 30.0));
                 } else if (showIdx >= 0) {
                     // Long lyric: start at the left edge and pan across as it is sung.
                     const int64_t startMs = lines[showIdx].timeMs;
@@ -16021,11 +16105,9 @@ class Renderer {
                (c >= 0x0E00 && c <= 0x0EFF) || c == 0x200D;
     }
 
-    // Same formula DrawMarqueeText uses for the title (speed 42), so the hand-off
-    // back to the normal marquee at the end of the animation doesn't jump.
-    static float TitleScrollOffset(const TitleScroll& sc, double now) {
-        return sc.scrolls ? std::fmod(static_cast<float>(now) * 42.0f, sc.cycle) : 0.0f;
-    }
+    // Bunbun: a new title starts at its first word, and DrawMarqueeText rests there
+    // 1.5 s before scrolling, so the hand-off after this animation is at 0 as well.
+    static float TitleScrollOffset(const TitleScroll&, double) { return 0.0f; }
 
     // allLayouts = false keeps only the glyphs visible right now (the outgoing
     // title is frozen, so nothing else of it will ever be seen).
@@ -17224,7 +17306,7 @@ class Renderer {
                 D2D1_POINT_2F c{};
                 float size = 0.0f;
                 bb::mascot::FitToBox(D2D1::RectF(mid.x - side * 0.5f, mid.y - side * 0.5f, mid.x + side * 0.5f, mid.y + side * 0.5f), &c, &size);
-                bb::mascot::Draw(target_.Get(), c, size, bb::mascot::Mood::Music, now, 0.0, MascotLook(c));
+                bb::mascot::Draw(target_.Get(), c, size, MediaMascotMood(media, g_settings), now, 0.0, MascotLook(c));
                 if (fade) target_->PopLayer();
             }
         }
@@ -17420,6 +17502,7 @@ class Renderer {
             cache.layout.Reset();
             dwriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
                                              format, 2000.0f, wrapHeight, &cache.layout);
+            if (cache.text != text) cache.startedAt = now;  // Bunbun: new text starts from its beginning
             cache.text = text;
             cache.format = format;
             cache.wrapWidth = wrapHeight;
@@ -17445,7 +17528,13 @@ class Renderer {
                                     D2D1_DRAW_TEXT_OPTIONS_NONE);
         } else {
             const float cycle = cache.metrics.widthIncludingTrailingWhitespace + 38.0f;
-            const float offset = std::fmod(static_cast<float>(now) * speed, cycle);
+            // Bunbun: start at the first word and rest there 1.5 s each loop. The offset
+            // used to come from the clock alone, so a new line often appeared mid-word.
+            constexpr double kHold = 1.5;
+            if (cache.startedAt < 0.0) cache.startedAt = now;
+            const double period = kHold + cycle / std::max(1.0f, speed);
+            const double phase = std::fmod(now - cache.startedAt, period);
+            const float offset = phase < kHold ? 0.0f : static_cast<float>((phase - kHold) * speed);
             target_->DrawTextLayout(D2D1::Point2F(rect.left - offset, rect.top), cache.layout.Get(),
                                     brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
             target_->DrawTextLayout(D2D1::Point2F(rect.left - offset + cycle, rect.top),
@@ -17649,7 +17738,7 @@ class Renderer {
         } else if (drowsy && !music) {
             mood = bb::mascot::Mood::Sleepy;
         } else if (music) {
-            mood = bb::mascot::Mood::Music;
+            mood = MediaMascotMood(state.media, settings);  // Bunbun: popcorn for a video
         } else if (settings.mascotDnd || FocusModeActive()) {  // Bunbun: Focus mode too
             // Bunbun: the mascot's own do-not-disturb (settings or Ask Bun), so Bun
             // settles in with a snack. Deliberately independent of Windows' DND.
@@ -17721,6 +17810,53 @@ class Renderer {
         format->SetParagraphAlignment(oldPara);
     }
 
+    // Bunbun: one line that ends in an ellipsis when it doesn't fit, never wrapped
+    // or slid; the start of the text always shows.
+    void DrawEllipsizedText(const std::wstring& text, D2D1_RECT_F r, IDWriteTextFormat* format, ID2D1Brush* brush) {
+        if (!format || text.empty() || !dwriteFactory_) return;
+        ComPtr<IDWriteTextLayout> layout;
+        const float w = std::max(1.0f, r.right - r.left), h = std::max(1.0f, r.bottom - r.top);
+        if (FAILED(dwriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format, w, h, &layout)) || !layout)
+            return;
+        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        ComPtr<IDWriteInlineObject> ellipsis;
+        if (SUCCEEDED(dwriteFactory_->CreateEllipsisTrimmingSign(format, &ellipsis))) {
+            const DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            layout->SetTrimming(&trim, ellipsis.Get());
+        }
+        target_->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        target_->DrawTextLayout(D2D1::Point2F(r.left, r.top), layout.Get(), brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        target_->PopAxisAlignedClip();
+    }
+
+    // Bunbun: a finished agent's reply, cut to its first sentence and stripped of
+    // markdown, for the one-line pill ("**Done.** The `x` tab…" → "Done.").
+    static std::wstring AgentSummaryLine(const std::wstring& text) {
+        std::wstring out;
+        out.reserve(std::min<size_t>(text.size(), 240));
+        bool lineStart = true;
+        for (size_t i = 0; i < text.size() && out.size() < 240; ++i) {
+            const wchar_t c = text[i];
+            if (c == L'\n' || c == L'\r') {
+                if (!out.empty()) break;  // the first line (or paragraph) only
+                lineStart = true;
+                continue;
+            }
+            if (c == L'*' || c == L'`' || (c == L'_' && (i == 0 || text[i - 1] == L' '))) continue;
+            if (lineStart && (c == L'#' || c == L'>' || c == L'-' || c == L' ')) continue;  // headings, quotes, bullets
+            lineStart = false;
+            out += c;
+            // The end of the first sentence.
+            if ((c == L'.' || c == L'!' || c == L'?') && i + 1 < text.size() &&
+                (text[i + 1] == L' ' || text[i + 1] == L'\n' || text[i + 1] == L'\r'))
+                break;
+        }
+        while (!out.empty() && out.back() == L' ') out.pop_back();
+        return out;
+    }
+
     void DrawAgent(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
         const bb::AgentView& a = state.agent;
         PublishContentGeometry(rect);
@@ -17753,14 +17889,25 @@ class Renderer {
                 bb::mascot::Draw(target_.Get(), fc, fs, mood, now, a.phaseSince, MascotLook(fc));
             }
             const float statusW = 70.0f;
+            // Bunbun: the Reply button is wider than the status column; keep text clear of it.
+            const bool replyButton = a.phase == bb::AgentPhase::Finished && a.replyId;
+            const float textRight = rect.right - statusW - (replyButton ? 12.0f : 0.0f);
 
             mutedBrush_->SetOpacity(0.75f);
-            DrawAgentText(who, D2D1::RectF(tx, cy - 18.0f, rect.right - statusW, cy - 3.0f), smallTextFormat_.Get(),
-                          mutedBrush_.Get());
+            DrawEllipsizedText(who, D2D1::RectF(tx, cy - 18.0f, textRight, cy - 3.0f), smallTextFormat_.Get(),
+                               mutedBrush_.Get());
             textBrush_->SetOpacity(0.95f);
-            const std::wstring step = a.step.empty() ? std::wstring(L"Getting started…") : a.step;
-            DrawMarqueeText(step, D2D1::RectF(tx, cy - 3.0f, rect.right - statusW, cy + 15.0f), textFormat_.Get(),
-                            textBrush_.Get(), now, 28.0f, marqueeAgentCache_);
+            if (a.phase == bb::AgentPhase::Finished) {
+                // Bunbun: a finished task's reply can be paragraphs of markdown; show its
+                // first sentence, still, ending in "…" if it doesn't fit.
+                std::wstring line = AgentSummaryLine(a.step);
+                if (line.empty()) line = L"Done";
+                DrawEllipsizedText(line, D2D1::RectF(tx, cy - 3.0f, textRight, cy + 15.0f), textFormat_.Get(), textBrush_.Get());
+            } else {
+                const std::wstring step = a.step.empty() ? std::wstring(L"Getting started…") : a.step;
+                DrawMarqueeText(step, D2D1::RectF(tx, cy - 3.0f, textRight, cy + 15.0f), textFormat_.Get(),
+                                textBrush_.Get(), now, 28.0f, marqueeAgentCache_);
+            }
 
             const D2D1_RECT_F status = D2D1::RectF(rect.right - statusW, cy - 10.0f, rect.right - 14.0f, cy + 10.0f);
             if (a.phase == bb::AgentPhase::Working && a.added >= 0) {
@@ -19374,7 +19521,8 @@ class Renderer {
     CollapsedLyricLine collapsedLyricPrev_;
     int collapsedLyricIdx_ = -2;            // -2 = nothing built yet (forces a snap)
     std::wstring collapsedLyricTitle_;
-    std::wstring collapsedLyricWidthTitle_, collapsedLyricWidthArtist_;  // Bunbun: song the pill was sized for
+    std::wstring collapsedLyricWidthTitle_, collapsedLyricWidthArtist_;
+    double collapsedLineSince_ = 0.0;  // Bunbun: when the current line appeared (title marquee start)  // Bunbun: song the pill was sized for
     std::wstring collapsedLyricArtist_;
     double collapsedLyricAnimStart_ = -10.0;
 
@@ -21302,7 +21450,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         updateUrl = g_updatePageUrl;
                     }
                     if (!updateUrl.empty()) {
-                        ShellExecuteW(nullptr, L"open", updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                        // Bunbun: an installed copy updates in one go; others open the page.
+                        if (!bb::updater::CanSelfUpdate() || bb::updater::Start() != 0)
+                            ShellExecuteW(nullptr, L"open", updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                     } else if (!notifApp.empty() || !notifTitle.empty()) {
                         FocusNotificationApp(notifApp, notifTitle);
                     }
@@ -22173,7 +22323,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         // auto-hide timer. Only the 5s window after a *title* change is transient
         // now, so the pill behaves like the clipboard and battery alerts -- it surfaces,
         // then hides again while playback continues in the background.
+        // Bunbun: videos (the Streaming pill) never auto-expand.
         const bool recentTrackChange = g_settings.mediaAutoExpand &&
+                                       !snapshot.media.video &&
                                        !MediaExpandBlocked(snapshot.media) &&
                                        primary.kind == IslandKind::Media &&
                                        snapshot.media.playing &&
@@ -22390,7 +22542,7 @@ DWORD WINAPI RenderThreadProc(void*) {
                     // Bunbun: title-only is narrower; lyrics fit the song's longest line.
                     const float fitted = g_collapsedLyricsWidth.load(std::memory_order_relaxed);
                     const float lyricsW = fitted > 0.0f ? fitted : kCollapsedLyricsWidth;
-                    primary.width = ((g_settings.collapsedLyrics ? lyricsW : kCollapsedTitleWidth) +
+                    primary.width = ((g_settings.collapsedLyrics && !StreamingPill(snapshot, g_settings) ? lyricsW : kCollapsedTitleWidth) +
                                      clockSection) * g_settings.sizeScale;
                 } else if (g_settings.mediaPillClock) {
                     primary.width = (MediaPillLayout::kBaseWidth + clockSection) * g_settings.sizeScale;

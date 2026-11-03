@@ -360,7 +360,7 @@
         float gx = cx - groupW * 0.5f;
         if (settings.bunbunMascot && studioAlpha_ > 0.3f && settings.idleEyes) {
             const auto mood = state.agent.phase != bb::AgentPhase::None ? AgentMood(state.agent.phase)
-                              : state.media.playing ? bb::mascot::Mood::Music : bb::mascot::Mood::Idle;
+                              : state.media.playing ? MediaMascotMood(state.media, settings) : bb::mascot::Mood::Idle;
             DrawIdleEyes(state, D2D1::Point2F(gx + 9, hy), 14.0f, mood, now, state.agent.phaseSince);
         } else if (settings.bunbunMascot && studioAlpha_ > 0.3f) {
             D2D1_POINT_2F mc{};
@@ -368,7 +368,7 @@
             bb::mascot::FitToBox(D2D1::RectF(gx, hy - 9, gx + 18, hy + 9), &mc, &msize);
             bb::AgentPhase phase = state.agent.phase;
             const auto mood = phase != bb::AgentPhase::None ? AgentMood(phase)
-                              : state.media.playing ? bb::mascot::Mood::Music : bb::mascot::Mood::Idle;
+                              : state.media.playing ? MediaMascotMood(state.media, settings) : bb::mascot::Mood::Idle;
             bb::mascot::Draw(target_.Get(), mc, msize, mood, now, state.agent.phaseSince, MascotLook(mc));
         }
         gx += mascotW;

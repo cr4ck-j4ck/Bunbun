@@ -8,7 +8,7 @@ type Group = { id: string; title: string; desc: string; icon: ReactNode; main?: 
 
 const GROUPS: Group[] = [
   { id: "media", title: "Music", desc: "Now playing, controls and cover art, and which app the Music card opens.", icon: <Music2 size={18} />, main: "Modules.Media",
-    keys: ["Bunbun.MusicApp", "Modules.MediaAutoExpand", "Modules.CollapsedTitle", "Modules.MediaPillClock", "Bunbun.MusicSwipe", "Modules.MediaExpandBlocklist"] },
+    keys: ["Bunbun.MusicApp", "Bunbun.StreamingMood", "Modules.MediaAutoExpand", "Modules.CollapsedTitle", "Modules.MediaPillClock", "Bunbun.MusicSwipe", "Modules.MediaExpandBlocklist"] },
   { id: "lyrics", title: "Lyrics", desc: "Synced lyrics, karaoke style, and timing for Bluetooth headphones.", icon: <Quote size={18} />, main: "Modules.Lyrics",
     keys: ["Bunbun.PillLyrics", "Modules.MediaTabLyrics", "Modules.KaraokeLyrics", "Modules.KaraokeLetterGlow", "Modules.LyricsNeighborLinesVisible", "Modules.LyricsVisualizer",
       "Modules.LyricsOffsetMs", "Modules.LyricsOffsetBluetoothMs", "Modules.LyricsNetEase", "Modules.LyricsCache", "Modules.LyricsCacheMaxMB"] },

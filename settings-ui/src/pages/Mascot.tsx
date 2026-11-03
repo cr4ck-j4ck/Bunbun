@@ -22,7 +22,7 @@ const CHARACTERS = [
 const MOODS = [
   ["idle", "Idle"], ["working", "Working"], ["thinking", "Thinking"], ["alert", "Needs you"],
   ["happy", "Celebrate"], ["music", "Music"], ["snack", "Do not disturb"], ["sad", "Error"], ["sleepy", "Sleepy"],
-  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"],
+  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming"],
 ] as const;
 
 // Preset colours per character; "" is the character's own colour. Luffy, Dazai and
@@ -146,7 +146,7 @@ export function Mascot() {
             s.set("Bunbun.Character", `custom:${pack}`);
           }} />
         </div>
-        <Row label="Skin packs" description={<>Or make a folder in <code>{folder || "%APPDATA%\\Bunbun\\mascots"}</code> with <code>idle.png</code> and, optionally, <code>working</code>, <code>thinking</code>, <code>alert</code>, <code>happy</code>, <code>sad</code>, <code>sleepy</code>, <code>music</code>, <code>snack</code>, <code>listening</code>, <code>talking</code> and <code>confused</code> PNGs. Square, transparent, 256 px or more.</>}>
+        <Row label="Skin packs" description={<>Or make a folder in <code>{folder || "%APPDATA%\\Bunbun\\mascots"}</code> with <code>idle.png</code> and, optionally, <code>working</code>, <code>thinking</code>, <code>alert</code>, <code>happy</code>, <code>sad</code>, <code>sleepy</code>, <code>music</code>, <code>snack</code>, <code>listening</code>, <code>talking</code>, <code>confused</code> and <code>streaming</code> PNGs. Square, transparent, 256 px or more.</>}>
           <button className="btn small" onClick={() => call("openPacksFolder")}><FolderOpen size={15} /> Open folder</button>
           <button className="btn small" onClick={() => call<string[]>("listPacks").then(setPacks)}><RotateCcw size={14} /> Refresh</button>
         </Row>

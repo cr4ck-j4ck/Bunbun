@@ -6,13 +6,43 @@ and versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Fill: Transparent or Opaque.** A new Fill choice in Appearance. Transparent is the look you had
+  (the theme's colour, with the transparency and blur settings). Opaque paints the island one steady
+  solid colour, with nothing showing through and no album-art tint: pick Black, Obsidian, Graphite,
+  Navy, Forest, Plum, Espresso or White, or type any hex. Works on every shape, including the notch,
+  and on Linux.
+
+### Changed
+- **Videos don't auto-expand.** With **Auto-expand on track change** on, a new song still opens the
+  island for a moment, but a video (the Streaming pill) stays small.
+
+## [0.3.2]
+
+### Added
+- **Streaming.** While a video plays (YouTube, Netflix, an anime site, VLC…), the small island shows
+  your mascot watching and munching popcorn with "Streaming", instead of the title and cover; the
+  bars still move in the album colour. Music apps (Spotify, YouTube Music, Apple Music and others)
+  keep the song and the headphones. Every character has the new Streaming mood, and skin packs can
+  add `streaming` frames (falling back to `snack`). Turn it off with **Streaming mode for videos**
+  in Features → Music. On Linux too, from the MPRIS player (browsers, VLC, mpv, Celluloid…).
+
+## [0.3.1]
+
+### Added
+- **One-click updates.** Choose **Update** in Settings → General, the tray menu or the island's
+  update notice: Bunbun and its settings close, a small window with Bun downloads the new version,
+  checks it against the release's checksums, installs it silently and starts it. Your settings,
+  skin packs and connected agents carry over. Copies that weren't installed with setup still open
+  the release page.
 - **Linux.** Bunbun now runs on Linux, packaged as a `.deb` (Debian, Ubuntu and derivatives) and an
   AppImage (most other distributions), both attached to every release. It runs on GNOME and KDE, on
   Wayland (layer-shell; GNOME through XWayland) and X11. This first Linux version has the island
   with the clock, music from any MPRIS player (cover art, play / pause, next, previous), the
   mascot with every character and mood, coding agents with Allow / Deny and question answers, the
   right-click menu, and the settings app (Codex connects from there too). Ask Bun, the tray icon and
-  the system pop-ups aren't on Linux yet.
+  the system pop-ups aren't on Linux yet. See [Bunbun on Linux](docs/linux.md). To build it:
+  `cmake -S . -B build-linux`, and `./scripts/package-linux.sh` for the packages;
+  `tests/test_dialects.py` and `tests/simulate_agent.py` run against the Linux hook too.
 - **Studio on Linux.** The island opens into the Studio frame on Linux too, with the same header,
   tab bar and page order, and the same pages: Home with its cards and your links, Music, Calendar,
   Weather, System, Quick toggles (Wi-Fi, Bluetooth, Do not disturb), To-do with reminders,
@@ -24,14 +54,19 @@ and versions follow [Semantic Versioning](https://semver.org/).
   See [Studio on Linux](docs/linux.md#studio-on-linux).
 - **Settings on Linux** say what's there: Island pages shows real pictures of the Linux island's pages,
   and features, pages and options Linux doesn't have yet are marked **Not on Linux yet**. The To-dos
-  screen works on Linux too. Music &
-  media, Expand on hover and Pill while an agent works now work on Linux too.
+  screen works on Linux too. Music & media, Expand on hover and Pill while an agent works now work
+  on Linux too.
 
 ### Fixed
+- Sliding text on the island (song titles, the agent's current step) started at a random point, so
+  it often appeared mid-word. Every line now starts at its first word and rests there a moment
+  before it scrolls.
+- A finished agent's pill showed its whole reply sliding under the Reply button. It now shows the
+  first sentence, without markdown, ending in "…" when it doesn't fit.
+- Updating while a coding agent was running could fail, because the agent kept `bunbun-hook.exe`
+  in use. The installer now moves a running copy aside and Bunbun clears it up on the next start.
 - A link on Home given as a bare file path (`C:\Notes\todo.txt`) was named after its drive (`C:`)
-  instead of its file. See [Bunbun on Linux](docs/linux.md).
-- Building on Linux: `cmake -S . -B build-linux`, and `./scripts/package-linux.sh` for the packages.
-  `tests/test_dialects.py` and `tests/simulate_agent.py` run against the Linux hook too.
+  instead of its file.
 
 ## [0.3.0]
 

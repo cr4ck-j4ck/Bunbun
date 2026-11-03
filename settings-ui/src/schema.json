@@ -460,6 +460,27 @@
    }
   ]
  },
+ "Themes.IslandFill": {
+  "default": "transparent",
+  "name": "Fill",
+  "description": "Transparent uses the theme's colour with the transparency and blur settings below. Opaque paints the island one steady solid colour (Solid colour), with nothing showing through and no album-art tint.",
+  "options": [
+   {
+    "value": "transparent",
+    "label": "Transparent"
+   },
+   {
+    "value": "opaque",
+    "label": "Opaque (solid colour)"
+   }
+  ]
+ },
+ "Themes.SolidColor": {
+  "default": "#000000",
+  "name": "Solid colour",
+  "description": "The colour of the island when Fill is Opaque. Black by default; any 6-digit hex works.",
+  "options": []
+ },
  "Themes.PillOpacity": {
   "default": "96",
   "name": "Pill transparency",
@@ -673,7 +694,7 @@
  "Modules.MediaAutoExpand": {
   "default": "false",
   "name": "Auto-expand on track change",
-  "description": "Automatically expand the island when a new song or video starts playing. If disabled, album art updates smoothly in the collapsed pill without unprompted expansion.",
+  "description": "Automatically expand the island when a new song starts playing. Videos (the Streaming pill) never expand on their own. If disabled, album art updates smoothly in the collapsed pill without unprompted expansion.",
   "options": []
  },
  "Modules.CollapsedTitle": {
@@ -1356,6 +1377,12 @@
   "default": "true",
   "name": "Poke reactions and hello",
   "description": "Poke the mascot three times quickly and it gets cross; six times and it gets dizzy. It also says hello when Bunbun starts.",
+  "options": []
+ },
+ "Bunbun.StreamingMood": {
+  "default": "true",
+  "name": "Streaming mode for videos",
+  "description": "While a video plays (YouTube, Netflix, an anime site, VLC...), the small island shows your mascot munching popcorn and \"Streaming\" instead of the title and cover. Music apps (Spotify, YouTube Music, Apple Music and the like) keep the song and the headphones.",
   "options": []
  },
  "Bunbun.MusicSwipe": {

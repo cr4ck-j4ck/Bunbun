@@ -32,6 +32,7 @@ suit.
 | Error | A task failed | Droopy eyes, a tear, a rain cloud, a little head shake |
 | Sleepy | Idle for a while | Eyes closed, "Z"s |
 | Music | Music is playing | Headphones on, nodding to the beat |
+| Streaming | A video or film is playing | Watching, munching popcorn from a striped bucket |
 | Do not disturb | Mascot DND is on | Eating its favourite snack |
 | Listening | You're typing in Ask Bun | Ears up, leaning toward the text, sound waves at the ear |
 | Talking | Bun's local AI is answering | Mouth moving with the words, a speech bubble with dots (Bolt talks through an equaliser) |
@@ -119,11 +120,12 @@ snack.png       do not disturb
 listening.png   you're typing to Bun
 talking.png     Bun is answering
 confused.png    Bun didn't understand
+streaming.png   a video is playing
 ```
 
 Animated: name the frames `idle_1.png`, `idle_2.png`… (all the same canvas size) instead.
-Any mood without its own PNG uses `idle.png`; `talking.png` falls back to `happy.png` and
-`confused.png` to `thinking.png`. Click **Refresh** in the Mascot studio and pick the
+Any mood without its own PNG uses `idle.png`; `talking.png` falls back to `happy.png`,
+`confused.png` to `thinking.png` and `streaming.png` to `snack.png`. Click **Refresh** in the Mascot studio and pick the
 pack.
 
 Skin packs are for artwork you own or have permission to use. Please don't submit third-party

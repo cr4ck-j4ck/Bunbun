@@ -50,6 +50,7 @@ compile src/mascot/mascot.cpp      build/obj/mascot.o & pids+=($!)
 compile src/mascot/pack_sheet.cpp  build/obj/pack_sheet.o & pids+=($!)
 compile src/assistant/assistant.cpp build/obj/assistant.o & pids+=($!)
 compile src/main.cpp               build/obj/main.o & pids+=($!)
+compile src/updater.cpp            build/obj/updater.o & pids+=($!)
 compile src/hook/bunbun_hook.cpp   build/obj/bunbun_hook.o & pids+=($!)
 compile src/settings/settings_host.cpp build/obj/settings_host.o -I"$WEBVIEW2/include" & pids+=($!)
 failed=0
@@ -61,10 +62,10 @@ for p in "${pids[@]}"; do wait "$p" || failed=1; done
 
 LIBS=(-lole32 -loleaut32 -luuid -lshcore -lshlwapi -ld2d1 -ldwrite -ldwmapi -lgdi32 -luser32 -lshell32 -lruntimeobject
       -lwindowscodecs -lsetupapi -lwinhttp -lpdh -liphlpapi -lwlanapi -lwinmm -ladvapi32 -lcomctl32
-      -lmfuuid)
+      -lmfuuid -lbcrypt)
 echo "  LD  build/bunbun.exe"
 "$CXX" "${LDOPT[@]}" -municode -mwindows -static -o build/bunbun.exe \
-    build/obj/main.o build/obj/island_core.o build/obj/wh_shim.o build/obj/agent_bridge.o \
+    build/obj/main.o build/obj/updater.o build/obj/island_core.o build/obj/wh_shim.o build/obj/agent_bridge.o \
     build/obj/hook_installer.o build/obj/mascot.o build/obj/pack_sheet.o build/obj/assistant.o build/obj/bunbun_res.o "${LIBS[@]}"
 echo "  LD  build/bunbun-hook.exe"
 # Agents run the hook before every tool call, so it must never be missing, not

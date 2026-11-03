@@ -269,6 +269,7 @@ bb::mascot::Mood MoodFromName(const std::string& m) {
     if (m == "listening") return Mood::Listening;
     if (m == "talking") return Mood::Talking;
     if (m == "confused") return Mood::Confused;
+    if (m == "streaming") return Mood::Streaming;
     return Mood::Idle;
 }
 
@@ -637,7 +638,7 @@ Value SheetCommand(const std::string& cmd, const Value& args, std::string* err) 
     if (!rows || !rows->isArray() || g_sheetRows.empty()) { *err = "slice a sheet first"; return {}; }
     const std::wstring dir = bm::PacksFolder() + L"\\" + name;
     static const char* kMoods[] = {"idle", "working", "thinking", "alert", "happy", "sad", "sleepy", "music", "snack",
-                                   "listening", "talking", "confused"};
+                                   "listening", "talking", "confused", "streaming"};
     for (const Value& r : rows->arr) {
         const int index = static_cast<int>(r.getNumber("row", -1));
         const std::string mood = r.getString("mood");
@@ -836,6 +837,17 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
             ShellExecuteW(nullptr, L"open", (ExeDir() + L"\\bunbun.exe").c_str(), nullptr, ExeDir().c_str(), SW_SHOWNORMAL);
         return Value::Bool(true);
     }
+    if (cmd == "installUpdate") {
+        // The island's own updater (bunbun.exe --update) closes this window, installs
+        // and starts the new version. Only for installed copies.
+        const std::wstring exe = ExeDir() + L"\\bunbun.exe";
+        if (GetFileAttributesW((ExeDir() + L"\\unins000.exe").c_str()) == INVALID_FILE_ATTRIBUTES) {
+            *err = "this copy wasn't installed with setup";
+            return {};
+        }
+        ShellExecuteW(nullptr, L"open", exe.c_str(), L"--update", ExeDir().c_str(), SW_SHOWNORMAL);
+        return Value::Bool(true);
+    }
     if (cmd == "openUrl") {
         // Only web links; never arbitrary programs from the page.
         const std::string url = args.getString("url");
@@ -870,6 +882,9 @@ void OnWebMessage(const std::wstring& jsonText) {
                 o["newer"] = Value::Bool(bb::update::CompareVersions(r.version, current) > 0);
                 o["url"] = Value::String(r.url);
                 o["name"] = Value::String(r.name);
+                // One-click install: an installed copy (unins000.exe beside it) and a release with a setup.
+                o["canInstall"] = Value::Bool(!r.setupUrl.empty() &&
+                    GetFileAttributesW((ExeDir() + L"\\unins000.exe").c_str()) != INVALID_FILE_ATTRIBUTES);
             } else {
                 o["error"] = Value::String(r.error);
             }

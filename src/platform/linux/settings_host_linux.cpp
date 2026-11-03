@@ -95,6 +95,7 @@ bb::mascot::Mood MoodFromName(const std::string& m) {
     if (m == "listening") return Mood::Listening;
     if (m == "talking") return Mood::Talking;
     if (m == "confused") return Mood::Confused;
+    if (m == "streaming") return Mood::Streaming;
     return Mood::Idle;
 }
 

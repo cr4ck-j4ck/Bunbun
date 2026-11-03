@@ -33,7 +33,7 @@ int wmain(int argc, wchar_t** argv) {
     const Character chars[] = {Character::Bunny, Character::Cat, Character::Dog, Character::Fox, Character::Panda, Character::Robot, Character::Spiderman,
                                Character::Luffy, Character::Dazai};
     const Mood moods[] = {Mood::Idle, Mood::Working, Mood::Thinking, Mood::Alert, Mood::Happy, Mood::Music, Mood::Sad, Mood::Sleepy,
-                          Mood::Snack, Mood::Listening, Mood::Talking, Mood::Confused};
+                          Mood::Snack, Mood::Listening, Mood::Talking, Mood::Confused, Mood::Streaming};
     const int cell = pack.empty() ? 120 : packCell, cols = static_cast<int>(std::size(moods));
     const int rows = pack.empty() ? static_cast<int>(std::size(chars)) : 6;
     const double moments[] = {0.05, 0.5, 1.3, 2.5};

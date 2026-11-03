@@ -27,12 +27,14 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <memory>
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -72,10 +74,12 @@ bool g_layerShell = false;
 double g_scale = 1.0;       // Appearance.SizeScale
 double g_offsetY = 0;       // Appearance.OffsetY
 double g_opacity = 0.96;    // Themes.PillOpacity
+double g_fill[3] = {0.035, 0.035, 0.045};  // the surface colour; Themes.SolidColor when Fill is Opaque
 bool g_mascotOn = true;     // Bunbun.Mascot and MascotOnIsland
 bool g_agentsOn = true;     // Bunbun.Agents
 bool g_agentPill = true;    // Bunbun.AgentPill: the pill while an agent works (cards always show)
 bool g_mediaOn = true;      // Modules.Media: what's playing
+bool g_streamingMood = true;  // Bunbun.StreamingMood: a video shows the popcorn mascot and "Streaming"
 bool g_expandOnHover = true;  // Behavior.ExpandOnHover; off: a click opens and closes the island
 bool g_pinned = false;      // opened by a click (ExpandOnHover off)
 std::string g_toastTitle, g_toastText;  // a reminder or the focus timer, until g_toastUntil
@@ -123,10 +127,23 @@ void LoadSettings() {
     if (g_scale <= 0) g_scale = 1.0;
     g_offsetY = s::GetInt(L"Appearance.OffsetY");
     g_opacity = std::clamp(s::GetInt(L"Themes.PillOpacity"), 30, 100) / 100.0;
+    g_fill[0] = 0.035; g_fill[1] = 0.035; g_fill[2] = 0.045;
+    if (s::Get(L"Themes.IslandFill") == L"opaque") {
+        // One steady colour, nothing showing through.
+        g_opacity = 1.0;
+        std::wstring hex = s::Get(L"Themes.SolidColor");
+        if (!hex.empty() && hex[0] == L'#') hex.erase(0, 1);
+        if (hex.size() == 3) hex = {hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]};
+        const unsigned long v = hex.size() >= 6 ? std::wcstoul(hex.substr(0, 6).c_str(), nullptr, 16) : 0;
+        g_fill[0] = ((v >> 16) & 0xFF) / 255.0;
+        g_fill[1] = ((v >> 8) & 0xFF) / 255.0;
+        g_fill[2] = (v & 0xFF) / 255.0;
+    }
     g_mascotOn = s::GetBool(L"Bunbun.Mascot") && s::GetBool(L"Bunbun.MascotOnIsland");
     g_agentsOn = s::GetBool(L"Bunbun.Agents");
     g_agentPill = s::GetBool(L"Bunbun.AgentPill");
     g_mediaOn = s::GetBool(L"Modules.Media");
+    g_streamingMood = s::GetBool(L"Bunbun.StreamingMood");
     g_expandOnHover = s::GetBool(L"Behavior.ExpandOnHover");
     if (g_expandOnHover) g_pinned = false;
     g_showSeconds = s::GetBool(L"Modules.ShowSeconds");
@@ -201,6 +218,27 @@ double TextWidth(cairo_t* cr, const std::string& text, double size, bool bold) {
     g_object_unref(layout);
     return w;
 }
+
+// Is the player showing a video rather than music? Same rule as Windows'
+// IsVideoMedia: music apps are music; browsers report everything alike, so there a
+// track with an album is music (YouTube Music, Spotify on the web) and one without
+// is a video; known video players are video.
+bool IsVideoTrack(const bb::mpris::Track& t) {
+    std::string id = t.player;
+    for (char& c : id) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* m : {"spotify", "rhythmbox", "elisa", "lollypop", "amarok", "clementine", "strawberry", "audacious",
+                          "deadbeef", "cmus", "quod libet", "youtube music", "youtube-music", "tidal", "deezer", "amberol",
+                          "g4music", "tauon", "musikcube", "cider", "apple music"})
+        if (id.find(m) != std::string::npos) return false;
+    for (const char* b : {"firefox", "chrom", "brave", "edge", "vivaldi", "opera", "librewolf", "zen", "epiphany", "web"})
+        if (id.find(b) != std::string::npos) return t.album.empty();
+    for (const char* v : {"vlc", "mpv", "celluloid", "totem", "videos", "smplayer", "kodi", "stremio", "haruna", "dragon", "parole"})
+        if (id.find(v) != std::string::npos) return true;
+    return false;
+}
+
+// A video plays: the small island shows the mascot munching popcorn and "Streaming".
+bool StreamingNow() { return g_streamingMood && g_mediaOn && g_track.active && IsVideoTrack(g_track); }
 
 void DrawMascot(cairo_t* cr, double cx, double cy, double size) {
     if (!g_mascotOn) return;
@@ -338,7 +376,8 @@ mascot::Mood MoodFor(Kind k) {
             default: break;
         }
     }
-    if ((k == Kind::Media || k == Kind::Studio) && g_track.playing) return mascot::Mood::Music;
+    if ((k == Kind::Media || k == Kind::Studio) && g_track.playing)
+        return StreamingNow() ? mascot::Mood::Streaming : mascot::Mood::Music;
     if (k == Kind::Toast || Now() < g_pokeUntil) return mascot::Mood::Happy;
     return mascot::Mood::Idle;
 }
@@ -360,6 +399,11 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
             return;
         case Kind::Media:
             if (g_pinned || (g_expandOnHover && g_hover)) { *w = 380; *h = 96; return; }
+            if (StreamingNow()) {  // the mascot, "Streaming" and the bars
+                *w = 44 + TextWidth(cr, "Streaming", 12.5, true) + 44;
+                *h = kCollapsedH;
+                return;
+            }
             // Lyrics on the small island: as wide as the song's longest line needs.
             if (const double lw = LyricPillWidth(cr, 38 + 40); lw > 0) { *w = lw; *h = kCollapsedH; return; }
             *w = 36 + std::min(200.0, TextWidth(cr, g_track.title, 12.5, true)) + 44;
@@ -403,6 +447,14 @@ void PaintClock(cairo_t* cr, const Rect& p) {
 
 void PaintMedia(cairo_t* cr, const Rect& p) {
     const bool expanded = p.h > 60;
+    if (!expanded && StreamingNow()) {
+        // A video: no cover or title, just the mascot with its popcorn, "Streaming"
+        // and the bars (still in the accent colour).
+        DrawMascot(cr, p.x + 22, p.y + p.h / 2, 34);
+        Text(cr, "Streaming", p.x + 44, p.y + (p.h - 16) / 2, p.w - 44 - 40, 12.5, true);
+        Bars(cr, p.x + p.w - 30, p.y + p.h / 2, 16);
+        return;
+    }
     if (!expanded) {
         // The owner's rule: art and the music-vibing mascot take turns, 3.5 s each.
         const double phase = std::fmod(Now(), 7.0);
@@ -585,7 +637,7 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
         cairo_fill(cr);
     }
     RoundRect(cr, p.x, p.y, p.w, p.h, radius);
-    cairo_set_source_rgba(cr, 0.035, 0.035, 0.045, g_opacity);
+    cairo_set_source_rgba(cr, g_fill[0], g_fill[1], g_fill[2], g_opacity);
     cairo_fill_preserve(cr);
     cairo_set_source_rgba(cr, 1, 1, 1, 0.06);
     cairo_set_line_width(cr, 1);

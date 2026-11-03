@@ -211,6 +211,7 @@ const wchar_t* MoodFile(Mood m) {
         case Mood::Listening: return L"listening.png";
         case Mood::Talking: return L"talking.png";
         case Mood::Confused: return L"confused.png";
+        case Mood::Streaming: return L"streaming.png";
         default: return L"idle.png";
     }
 }
@@ -220,6 +221,7 @@ const wchar_t* FallbackFile(Mood m) {
     switch (m) {
         case Mood::Talking: return L"happy.png";
         case Mood::Confused: return L"thinking.png";
+        case Mood::Streaming: return L"snack.png";  // a pack without popcorn frames still munches
         default: return L"idle.png";
     }
 }
@@ -439,7 +441,7 @@ const PackInfo& LoadPackInfo(ID2D1RenderTarget* rt, PackCache& cache, const std:
         info.frameSeconds = std::clamp(static_cast<float>(_wtof(fs.c_str())), 0.05f, 5.0f);
     info.frames = FileExists(dir + L"idle_1.png");
     if (info.frames) {
-        for (int m = 0; m <= static_cast<int>(Mood::Confused); ++m) {
+        for (int m = 0; m <= static_cast<int>(Mood::Streaming); ++m) {  // every mood, the newest last
             const std::wstring stem = Stem(static_cast<Mood>(m));
             int count = 0;
             while (count < 32 && FileExists(dir + stem + L"_" + std::to_wstring(count + 1) + L".png")) ++count;
@@ -1151,6 +1153,9 @@ SpideyPalette SpideyPaletteFor(const Style& st) {
 }
 
 thread_local SpideyPalette t_spidey = SpideyPaletteFor(Style{});  // set by DrawStyled for each frame
+// Streaming is drawn as Snack (the same chewing face and motion) with the eyes
+// open on the screen and popcorn instead of each character's own snack.
+thread_local bool t_streaming = false;  // set by DrawStyled for each frame
 
 void SpideyHead(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float rx, float ry, float s, Mood mood,
                 double t, const D2D1_MATRIX_3X2_F& world) {
@@ -1323,7 +1328,7 @@ void SpideyLenses(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, flo
                 else { sy = 1.04f; lift = -ry * 0.10f; rot = -5.0f; }
                 break;
             case Mood::Working: sy = 0.80f; break;                     // focused
-            case Mood::Snack: sy = 0.50f; lift = -ry * 0.03f; break;   // content squint
+            case Mood::Snack: if (!t_streaming) { sy = 0.50f; lift = -ry * 0.03f; } break;   // content squint
             case Mood::Listening: sx = sy = 1.08f; lift = -ry * 0.04f; break;  // wide, attentive
             case Mood::Talking: sy = 0.80f + 0.14f * TalkOpen(t); break;       // lenses bob as he talks
             case Mood::Confused: sx = sy = 1.06f; break;  // wide, with spirals (below)
@@ -1740,6 +1745,60 @@ void TerminalVisor(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_RECT_F visor, 
         rt->FillRectangle(D2D1::RectF(cmdLeft + typed + s * 0.006f, promptY - barH * 1.4f, cmdLeft + typed + s * 0.022f, promptY + barH * 1.4f),
                           cache.Get(rt, green));
     rt->PopAxisAlignedClip();
+}
+
+// ── Streaming: a striped popcorn bucket by the chin, a kernel on its way up ──
+void Popcorn(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F headC, float headRx, float headRy, float s, double t,
+             const D2D1_MATRIX_3X2_F& world) {
+    rt->SetTransform(world);
+    const float bite = SnackBite(t);
+    // The bucket: wider at the top, sitting low on the right of the face.
+    const float w = s * 0.21f, h = s * 0.23f;
+    const D2D1_POINT_2F top = D2D1::Point2F(headC.x + headRx * 0.58f, headC.y + headRy * 0.55f);
+    const float topHalf = w * 0.5f, bottomHalf = w * 0.36f;
+    ComPtr<ID2D1GeometrySink> sink;
+    ComPtr<ID2D1PathGeometry> bucket = NewPath(rt, &sink);
+    if (bucket) {
+        sink->BeginFigure(D2D1::Point2F(top.x - topHalf, top.y), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(top.x + topHalf, top.y));
+        sink->AddLine(D2D1::Point2F(top.x + bottomHalf, top.y + h));
+        sink->AddLine(D2D1::Point2F(top.x - bottomHalf, top.y + h));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->Close();
+    }
+    // Popcorn heaped over the rim, drawn first so the bucket's rim sits in front.
+    const D2D1_COLOR_F corn = Hex(0xFFF3C4), cornShade = Hex(0xF2D27A);
+    const float r = s * 0.038f;
+    const float puffs[][2] = {{-0.36f, 0.10f}, {-0.12f, -0.20f}, {0.14f, -0.12f}, {0.38f, 0.06f}, {0.02f, 0.18f}, {-0.24f, -0.02f}, {0.26f, -0.30f}};
+    for (const auto& p : puffs) {
+        const D2D1_POINT_2F pc = D2D1::Point2F(top.x + p[0] * w, top.y - r * 0.4f + p[1] * w);
+        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(pc.x, pc.y + r * 0.25f), r, r), cache.Get(rt, cornShade));
+        rt->FillEllipse(D2D1::Ellipse(pc, r * 0.9f, r * 0.9f), cache.Get(rt, corn));
+    }
+    if (bucket) {
+        rt->FillGeometry(bucket.Get(), cache.Get(rt, Hex(0xFFFFFF)));
+        // Red stripes, clipped to the bucket by drawing them as narrow trapezoids.
+        for (int i = 0; i < 3; ++i) {
+            const float u0 = -1.0f + (0.18f + i * 0.66f), u1 = u0 + 0.30f;
+            ComPtr<ID2D1GeometrySink> ss;
+            ComPtr<ID2D1PathGeometry> stripe = NewPath(rt, &ss);
+            if (!stripe) continue;
+            ss->BeginFigure(D2D1::Point2F(top.x + u0 * topHalf, top.y), D2D1_FIGURE_BEGIN_FILLED);
+            ss->AddLine(D2D1::Point2F(top.x + u1 * topHalf, top.y));
+            ss->AddLine(D2D1::Point2F(top.x + u1 * bottomHalf, top.y + h));
+            ss->AddLine(D2D1::Point2F(top.x + u0 * bottomHalf, top.y + h));
+            ss->EndFigure(D2D1_FIGURE_END_CLOSED);
+            ss->Close();
+            rt->FillGeometry(stripe.Get(), cache.Get(rt, Hex(0xE5322D)));
+        }
+        rt->DrawGeometry(bucket.Get(), cache.Get(rt, Hex(0x7A1F1C)), std::max(0.8f, s * 0.010f));
+        rt->FillRectangle(D2D1::RectF(top.x - topHalf, top.y - s * 0.006f, top.x + topHalf, top.y + s * 0.012f), cache.Get(rt, Hex(0xC9231F)));
+    }
+    // One kernel rises from the bucket to the mouth on each bite.
+    const D2D1_POINT_2F mouth = D2D1::Point2F(headC.x + headRx * 0.10f, headC.y + headRy * 0.42f);
+    const float k = 1.0f - bite;  // 0 at the mouth, 1 in the bucket
+    const D2D1_POINT_2F kc = D2D1::Point2F(mouth.x + (top.x - mouth.x) * k, mouth.y + (top.y - r - mouth.y) * k - std::sin(k * kPi) * s * 0.05f);
+    if (bite < 0.93f) rt->FillEllipse(D2D1::Ellipse(kc, r * 0.75f, r * 0.75f), cache.Get(rt, corn));
 }
 
 // ── Snack (do not disturb): a cartoon drumstick held up to the mouth ──────
@@ -2456,6 +2515,7 @@ void DazaiFace(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float 
             // Holding a bun in both bandaged hands, munching.
             const float bite = SnackBite(t);
             MouthLine(rt, cache, D2D1::Point2F(c.x, c.y + ry * 0.48f), rx * 0.08f, ry * (0.04f + 0.06f * bite), lw, kDazaiInk);
+            if (t_streaming) break;  // streaming: only the munching mouth; the popcorn comes after the face
             const D2D1_POINT_2F b = D2D1::Point2F(c.x, c.y + ry * (0.78f + 0.05f * bite));
             const D2D1_ELLIPSE bun = D2D1::Ellipse(b, rx * 0.30f, ry * 0.22f);
             rt->FillEllipse(bun, brush(Hex(0x9A5A2C)));
@@ -2723,6 +2783,8 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         DrawPack(rt, st, center, s, mood, t, since, look);
         return;
     }
+    t_streaming = mood == Mood::Streaming;
+    if (t_streaming) mood = Mood::Snack;
     if (!st.eyesFollow) look = D2D1::Point2F(0, 0);
     t_spidey = SpideyPaletteFor(st);
     const Look L = LookFor(st);
@@ -2930,7 +2992,7 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
             EyeLine(rt, brush(drawEyeColor), ec, eyeR, eyeR * 0.9f, stroke * 1.2f);
             continue;
         }
-        switch (mood) {
+        switch (t_streaming ? Mood::Idle : mood) {  // streaming: eyes open, on the screen
             case Mood::Happy:
             case Mood::Snack:
             case Mood::Music: EyeLine(rt, brush(drawEyeColor), ec, eyeR, eyeR * 0.9f, stroke * (L.patches ? 1.25f : 1.0f)); break;
@@ -3068,7 +3130,9 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         }
     }
 
-    if (mood == Mood::Snack) {
+    if (mood == Mood::Snack && t_streaming) {
+        Popcorn(rt, cache, headC, headRx, headRy, s, t, world);
+    } else if (mood == Mood::Snack) {
         // Each character has its own favourite.
         const D2D1_POINT_2F mouth = D2D1::Point2F(headC.x, headC.y + headRy * 0.42f);
         switch (st.character) {

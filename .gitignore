@@ -75,3 +75,8 @@ scratch/
 MEMORIES.md
 CLAUDE.md
 docs/reverse-engineering.md
+
+# Local test screenshots
+/final_chat_view.png
+/snap_*.png
+/bench_*.png

@@ -7,7 +7,7 @@ import { call } from "../bridge";
 const TARGETS = [
   ["", "Skip this row"], ["idle", "Idle"], ["working", "Working"], ["thinking", "Thinking"], ["alert", "Needs you"],
   ["happy", "Celebrate"], ["sad", "Error"], ["sleepy", "Sleepy"], ["music", "Music"], ["snack", "Do not disturb"],
-  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["look", "Look directions (← ↑ • ↓ →)"],
+  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming"], ["look", "Look directions (← ↑ • ↓ →)"],
 ] as const;
 
 type Row = { frames: string[] };

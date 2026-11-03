@@ -17,8 +17,9 @@ export function IslandPreview({ content = "agent", height = 210 }: { content?: "
   const bottom = pos.startsWith("bottom");
   const flush = shape === "notch" || s.bool("Appearance.BorderMergedMode");
   const align = pos.endsWith("left") ? "left" : pos.endsWith("right") ? "right" : "center";
-  const bg = s.get("Themes.PillBgColor") || "#08080A";
-  const opacity = s.num("Themes.PillOpacity", 96) / 100;
+  const opaque = s.get("Themes.IslandFill") === "opaque";
+  const bg = opaque ? s.get("Themes.SolidColor") || "#000000" : s.get("Themes.PillBgColor") || "#08080A";
+  const opacity = opaque ? 1 : s.num("Themes.PillOpacity", 96) / 100;
   const h = 46;
   const w = content === "agent" ? "86%" : 120;
 

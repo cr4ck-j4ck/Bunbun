@@ -96,7 +96,11 @@ if(BUNBUN_BUILD_UI AND NPM)
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}/settings-ui
                 npm run build --silent -- --outDir ${CMAKE_BINARY_DIR}/settings-ui --emptyOutDir
         DEPENDS ${UI_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/settings-ui/index.html
-        COMMENT "Building the settings UI")
+        COMMENT "Building the settings UI"
+        # Without VERBATIM the "||" in the first command reaches the build shell unquoted,
+        # which then looks for a program called "npm ci --silent" (only seen when
+        # node_modules is missing: a fresh clone or CI).
+        VERBATIM)
     add_custom_target(settings_ui ALL DEPENDS ${CMAKE_BINARY_DIR}/settings-ui/index.html)
 elseif(BUNBUN_BUILD_UI)
     message(WARNING "npm not found: the settings UI isn't built (bunbun-settings will say so).")

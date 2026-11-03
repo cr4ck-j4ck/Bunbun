@@ -1,9 +1,9 @@
 // Bunbun — update check.
 //
 // Asks GitHub for the latest published release and compares it with the running
-// version. Read-only: nothing is downloaded or installed; callers only tell the
-// user and open the release page. Shared by bunbun.exe (daily check, tray) and
-// bunbun-settings.exe ("Check for updates").
+// version. Read-only: nothing is downloaded or installed here; the updater
+// (src/updater.cpp, `bunbun.exe --update`) uses setupUrl / sumsUrl to install it.
+// Shared by bunbun.exe (daily check, tray, updater) and bunbun-settings.exe.
 #pragma once
 
 #include <windows.h>
@@ -27,6 +27,8 @@ struct Release {
     std::string version;  // "0.2.0" (tag without the leading v)
     std::string url;      // release page
     std::string name;     // release title
+    std::string setupUrl; // Bunbun-<version>-setup.exe asset, "" if the release has none
+    std::string sumsUrl;  // SHA256SUMS.txt asset
     std::string error;    // why it failed, for the settings app
 };
 
@@ -143,6 +145,17 @@ inline Release FetchLatest(const wchar_t* userAgent) {
     r.name = root.getString("name");
     // Only ever open a GitHub page from this reply.
     if (r.url.rfind("https://github.com/", 0) != 0) r.url = "https://github.com/" BUNBUN_REPO_STR "/releases/latest";
+    // The installer and its checksums, for the one-click updater. Only GitHub
+    // download links of this repository are taken.
+    if (const bb::json::Value* assets = root.find("assets")) {
+        const std::string prefix = "https://github.com/" BUNBUN_REPO_STR "/releases/download/";
+        for (const bb::json::Value& a : assets->arr) {
+            const std::string name = a.getString("name"), link = a.getString("browser_download_url");
+            if (link.rfind(prefix, 0) != 0) continue;
+            if (name == "Bunbun-" + tag + "-setup.exe") r.setupUrl = link;
+            else if (name == "SHA256SUMS.txt") r.sumsUrl = link;
+        }
+    }
     r.ok = true;
     return r;
 }

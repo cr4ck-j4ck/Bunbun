@@ -15,6 +15,9 @@
 //                                  (scripts/dev.sh uses it to push a fresh build live)
 //   bunbun.exe --enable-local-ai   turn Local AI on in settings.ini, then exit (the
 //                                  installer uses it after downloading a model)
+//   bunbun.exe --update            install the latest release in one go: closes Bunbun,
+//                                  downloads and checks the setup, installs it silently
+//                                  and starts the new version (src/updater.cpp)
 #include <windows.h>
 #include <d2d1.h>
 #include <shellapi.h>
@@ -27,6 +30,7 @@
 
 #include "agents/agent_view.h"
 #include "common/update.h"
+#include "updater.h"
 #include "agents/hook_installer.h"
 #include "island/island.h"
 #include "island/wh_shim.h"
@@ -238,6 +242,26 @@ void ToggleHooks(HWND owner) {
     MessageBoxW(owner, report.c_str(), L"Bunbun", MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONWARNING));
 }
 
+// An installed copy updates itself in one go (the updater closes this island);
+// any other copy opens the release page.
+void InstallOrOpenUpdate() {
+    if (bb::updater::CanSelfUpdate() && bb::updater::Start() == 0) return;
+    if (!g_updateUrl.empty()) ShellExecuteW(nullptr, L"open", g_updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// The installer renames a bunbun-hook.exe or bunbun-brain.exe that's still running
+// (agents keep the hook busy) to *.old instead of failing; clear those out.
+void RemoveOldCopies() {
+    std::wstring dir = SelfPath();
+    dir.resize(dir.find_last_of(L'\\'));
+    WIN32_FIND_DATAW fd;
+    HANDLE find = FindFirstFileW((dir + L"\\*.exe.old*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+    while (FindNextFileW(find, &fd));
+    FindClose(find);
+}
+
 void ShowMenu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Bunbun " WH_MOD_VERSION);
@@ -285,7 +309,7 @@ void ShowMenu(HWND hwnd) {
         }
         case kMenuAutostart: SetAutostart(!AutostartEnabled()); break;
         case kMenuUpdate:
-            if (!g_updateUrl.empty()) ShellExecuteW(nullptr, L"open", g_updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            if (!g_updateUrl.empty()) InstallOrOpenUpdate();
             else PostUpdateCheck(true);
             break;
         case kMenuQuit: PostQuitMessage(0); break;
@@ -298,7 +322,7 @@ LRESULT CALLBACK TrayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (event == WM_CONTEXTMENU || event == WM_RBUTTONUP || event == NIN_SELECT || event == NIN_KEYSELECT)
             ShowMenu(hwnd);
         if (event == NIN_BALLOONUSERCLICK && g_balloonIsUpdate && !g_updateUrl.empty())
-            ShellExecuteW(nullptr, L"open", g_updateUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            InstallOrOpenUpdate();
         return 0;
     }
     if (msg == WM_BUNBUN_UPDATE) {
@@ -405,6 +429,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
         return RunConnect(false, agent, quiet);
     }
     if (args.find(L"--quit") != std::wstring::npos) return QuitRunningInstance(10000) ? 0 : 1;
+    // --run-update before --update: the first contains the second.
+    if (args.find(L"--run-update") != std::wstring::npos) return bb::updater::Run(instance, args);
+    if (args.find(L"--update") != std::wstring::npos) return bb::updater::Start();
     if (args.find(L"--enable-local-ai") != std::wstring::npos) {
         // Only this one key is written; every other setting keeps its live default.
         bb::EnsureSettingsFile();
@@ -422,6 +449,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bb::EnsureSettingsFile();
+    RemoveOldCopies();
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = TrayProc;

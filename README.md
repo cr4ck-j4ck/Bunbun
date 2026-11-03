@@ -214,11 +214,12 @@ over a local pipe that only your user account can open.
 
 ## Updates
 
-Bunbun checks GitHub once a day and shows a notification when a new version is out; click it, or
-**Update available** in the tray menu, to open the release page. You can also check any time from
-the tray (**Check for updates…**) or **Settings → General → Updates**. Nothing is downloaded or
-installed for you: run the new setup, which replaces the old version in place. Your settings and
-connected agents carry over.
+Bunbun checks GitHub once a day and shows a notification when a new version is out. Click it,
+**Update available** in the tray menu, or **Update** in **Settings → General → Updates**, and Bunbun
+updates itself: it closes, a small window with Bun downloads the new version, checks it against the
+release's published checksums, installs it and opens the new Bunbun. Nothing is installed until you
+choose Update. Your settings, skin packs and connected agents carry over. A copy you unzipped or
+built yourself opens the release page instead.
 
 ## Credits & license
 

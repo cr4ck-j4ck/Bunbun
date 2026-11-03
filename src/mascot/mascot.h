@@ -30,6 +30,7 @@ enum class Mood {
     Listening, // ears up, leaning in: you're typing to Bun
     Talking,   // mouth moving, speech bubble: Bun is answering
     Confused,  // head tilt, uneven eyes, a swirl: Bun didn't understand
+    Streaming, // watching a video, munching popcorn from a bucket
 };
 
 enum class Character { Bunny, Cat, Dog, Fox, Panda, Robot, Spiderman, Luffy, Dazai, Custom };

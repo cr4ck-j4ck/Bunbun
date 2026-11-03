@@ -11,10 +11,13 @@ type UpdateInfo = {
   newer?: boolean;
   url?: string;
   error?: string;
+  canInstall?: boolean;  // an installed copy, and the release has a setup to install
 };
 
 // "Check for updates": asks GitHub for the latest release (the host does the
-// request on a worker thread). Nothing is downloaded; Download opens the page.
+// request on a worker thread). Update hands over to the island's updater, which
+// closes Bunbun, installs the new version and starts it; a copy that wasn't
+// installed with setup opens the release page instead.
 function Updates() {
   const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState<UpdateInfo | null>(null);
@@ -35,7 +38,12 @@ function Updates() {
   return (
     <>
       <Row label="Check for updates" description={status}>
-        {info?.newer && info.url && (
+        {info?.newer && info.canInstall && (
+          <button className="btn small primary" onClick={() => call("installUpdate").catch((e) => setFailed(String(e?.message ?? e)))}>
+            <Download size={14} /> Update to {info.latest}
+          </button>
+        )}
+        {info?.newer && !info.canInstall && info.url && (
           <button className="btn small primary" onClick={() => call("openUrl", { url: info.url })}>
             <Download size={14} /> Download {info.latest}
           </button>
@@ -45,7 +53,7 @@ function Updates() {
         </button>
       </Row>
       <Setting k="Bunbun.UpdateCheck" label="Check automatically"
-        description="Once a day, with a notification when there's a new version. Nothing is downloaded or installed for you." />
+        description="Once a day, with a notification when there's a new version. Nothing is installed until you choose Update." />
     </>
   );
 }

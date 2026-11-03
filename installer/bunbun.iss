@@ -153,6 +153,17 @@ begin
     GotModel := Fetch(ModelUrl, ModelFile, ModelSha256, 'The Local AI model');
 end;
 
+// Renames {app}\<Name> to <Name>.old-<n> when it's there (works while it runs).
+procedure MoveAside(Name: String);
+var
+  N: Integer;
+begin
+  if not FileExists(ExpandConstant('{app}\' + Name)) then exit;
+  N := 0;
+  while FileExists(ExpandConstant('{app}\' + Name + '.old-' + IntToStr(N))) do N := N + 1;
+  RenameFile(ExpandConstant('{app}\' + Name), ExpandConstant('{app}\' + Name + '.old-' + IntToStr(N)));
+end;
+
 // An older Bunbun must let go of its files before they're replaced.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -161,6 +172,11 @@ begin
   Result := '';
   if FileExists(ExpandConstant('{app}\bunbun.exe')) then
     Exec(ExpandConstant('{app}\bunbun.exe'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // Coding agents keep bunbun-hook.exe running (a reply hook can wait half an hour),
+  // and Windows won't overwrite a running exe but will rename it. The new copy goes
+  // in beside it; Bunbun deletes the *.old files the next time it starts.
+  MoveAside('bunbun-hook.exe');
+  MoveAside('bunbun-brain.exe');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
