@@ -113,6 +113,13 @@ bool StripOurs(Value* root, std::wstring* err) {
     return true;
 }
 
+// Our statusLine forwards Claude Code's usage limits to the island. Someone
+// else's statusLine is never replaced or removed.
+bool IsOurStatusLine(const Value& root) {
+    const Value* line = root.find("statusLine");
+    return line && line->isObject() && line->getString("command").find(kMarker) != std::string::npos;
+}
+
 std::wstring Timestamp() {
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -185,6 +192,15 @@ bool InstallClaudeHooks(std::wstring* report) {
     bool exists = false;
     if (!Load(path, &root, &exists, report) || !StripOurs(&root, report)) return false;
 
+    const bool statusLineFree = !root.find("statusLine") || IsOurStatusLine(root);
+    if (statusLineFree) {
+        Value line = Value::Object();
+        line["type"] = Value::String("command");
+        line["command"] = Value::String(HookCommandFor(nullptr, "--statusline"));
+        line["padding"] = Value::Number(0);
+        root["statusLine"] = std::move(line);
+    }
+
     Value& hooks = root["hooks"];
     for (const HookEvent& ev : kEvents) {
         Value cmd = Value::Object();
@@ -195,12 +211,26 @@ bool InstallClaudeHooks(std::wstring* report) {
         entry["hooks"].push(std::move(cmd));
         hooks[ev.name].push(std::move(entry));
     }
+    // Reply from the island: an asyncRewake Stop hook that waits in the background
+    // for your next message and hands it to Claude (bunbun-hook --reply).
+    {
+        Value cmd = Value::Object();
+        cmd["type"] = Value::String("command");
+        cmd["command"] = Value::String(HookCommandFor(nullptr, "--reply"));
+        cmd["asyncRewake"] = Value::Bool(true);
+        cmd["timeout"] = Value::Number(30 * 60 + 15);
+        Value entry = Value::Object();
+        entry["hooks"].push(std::move(cmd));
+        hooks["Stop"].push(std::move(entry));
+    }
 
     std::wstring backup;
     if (!Save(path, root, exists, &backup, report)) return false;
     *report = L"Bunbun now receives Claude Code events.\n\nUpdated: " + path +
               (backup.empty() ? L"" : L"\nBackup: " + backup) +
-              L"\n\nNew Claude Code sessions will show up on the island.";
+              L"\n\nNew Claude Code sessions will show up on the island." +
+              (statusLineFree ? L"" : L"\n\nYou already have a statusLine, so it was left alone; "
+                                      L"Bunbun's usage ring needs its own statusLine to see your limits.");
     return true;
 }
 
@@ -209,8 +239,9 @@ bool UninstallClaudeHooks(std::wstring* report) {
     Value root;
     bool exists = false;
     if (!Load(path, &root, &exists, report)) return false;
-    if (!exists || !ClaudeHooksInstalled()) { *report = L"No Bunbun hooks were installed."; return true; }
+    if (!exists || (!ClaudeHooksInstalled() && !IsOurStatusLine(root))) { *report = L"No Bunbun hooks were installed."; return true; }
     if (!StripOurs(&root, report)) return false;
+    if (IsOurStatusLine(root)) root.erase("statusLine");
     std::wstring backup;
     if (!Save(path, root, exists, &backup, report)) return false;
     *report = L"Bunbun hooks removed from " + path + L"\nBackup: " + backup;
@@ -525,6 +556,97 @@ std::string HookCommandFor(const char* agentName, const char* eventName) {
         cmd += eventName;
     }
     return cmd;
+}
+
+// ── Codex ────────────────────────────────────────────────────────────────────
+// Codex reads command hooks from %CODEX_HOME%\hooks.json (default
+// ~/.codex/hooks.json) in Claude Code's shape. Permission requests are answered in
+// Codex itself, so these hooks only report progress.
+std::wstring CodexHooksPath() {
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableW(L"CODEX_HOME", buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) return std::wstring(buf) + L"\\hooks.json";
+    PWSTR home = nullptr;
+    std::wstring p;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, 0, nullptr, &home))) p = home;
+    CoTaskMemFree(home);
+    return p + L"\\.codex\\hooks.json";
+}
+
+namespace {
+constexpr const char* kCodexEvents[] = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"};
+}
+
+bool CodexHooksInstalled() {
+    Value root;
+    bool exists = false;
+    std::wstring err;
+    if (!Load(CodexHooksPath(), &root, &exists, &err)) return false;
+    const Value* hooks = root.find("hooks");
+    if (!hooks || !hooks->isObject()) return false;
+    for (const auto& [event, list] : hooks->obj)
+        if (list.isArray()) for (const Value& e : list.arr) if (IsOurs(e)) return true;
+    return false;
+}
+
+bool InstallCodexHooks(std::wstring* report) {
+    const std::wstring path = CodexHooksPath();
+    if (GetFileAttributesW(HookExePath().c_str()) == INVALID_FILE_ATTRIBUTES) {
+        *report = L"bunbun-hook.exe was not found next to bunbun.exe.";
+        return false;
+    }
+    Value root;
+    bool exists = false;
+    if (!Load(path, &root, &exists, report) || !StripOurs(&root, report)) return false;
+    Value& hooks = root["hooks"];
+    for (const char* ev : kCodexEvents) {
+        Value cmd = Value::Object();
+        cmd["type"] = Value::String("command");
+        cmd["command"] = Value::String(HookCommandFor("codex", ev));
+        cmd["timeout"] = Value::Number(5);
+        Value entry = Value::Object();
+        entry["hooks"].push(std::move(cmd));
+        hooks[ev].push(std::move(entry));
+    }
+    std::wstring backup;
+    if (!Save(path, root, exists, &backup, report)) return false;
+    *report = L"Bunbun now receives Codex events.\n\nUpdated: " + path +
+              (backup.empty() ? L"" : L"\nBackup: " + backup) +
+              L"\n\nNew Codex sessions will show up on the island. Codex asks for permission in its own window.";
+    return true;
+}
+
+bool UninstallCodexHooks(std::wstring* report) {
+    const std::wstring path = CodexHooksPath();
+    Value root;
+    bool exists = false;
+    if (!Load(path, &root, &exists, report)) return false;
+    if (!exists || !CodexHooksInstalled()) { *report = L"No Bunbun hooks were installed for Codex."; return true; }
+    if (!StripOurs(&root, report)) return false;
+    std::wstring backup;
+    if (!Save(path, root, exists, &backup, report)) return false;
+    *report = L"Bunbun hooks removed from " + path + L"\nBackup: " + backup;
+    return true;
+}
+
+// ── Claude Code's model ─────────────────────────────────────────────────────
+std::string ClaudeModel() {
+    Value root;
+    bool exists = false;
+    std::wstring err;
+    if (!Load(ClaudeSettingsPath(), &root, &exists, &err)) return {};
+    return root.getString("model");
+}
+
+bool SetClaudeModel(const std::string& model, std::wstring* report) {
+    const std::wstring path = ClaudeSettingsPath();
+    Value root;
+    bool exists = false;
+    if (!Load(path, &root, &exists, report)) return false;
+    if (model.empty()) root.erase("model");
+    else root["model"] = Value::String(model);
+    std::wstring backup;
+    return Save(path, root, exists, &backup, report);
 }
 
 }  // namespace bb::hooks

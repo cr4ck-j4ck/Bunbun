@@ -982,12 +982,11 @@ void DrawPackMood(ID2D1RenderTarget* rt, PackCache& cache, const PackInfo& info,
     if (refW < 1.0f || refH < 1.0f) return;
     // Scale from idle's first frame, so every frame and mood keeps one size; the
     // frames carry their own motion, so the body moves only a little on top.
-    // Drawn frames carry all their own motion: tilting or bobbing them on top
-    // only makes them wobble. The live face breathes; Happy keeps its hop.
+    // Drawn frames carry all their own motion, the celebration included:
+    // tilting, bobbing or hopping them on top only makes them wobble. The live
+    // face breathes.
     Motion m = BodyMotion(st, mood, t, since, s);
-    if (mood == Mood::Happy) {
-        m.tilt = 0.0f;
-    } else if (rigged) {
+    if (rigged) {
         m.bob *= 0.4f;
         m.tilt = 0.0f;
     } else {
@@ -1023,8 +1022,10 @@ void DrawPackMood(ID2D1RenderTarget* rt, PackCache& cache, const PackInfo& info,
         for (; index + 1 < seq.size() && pos >= seq[index].length; ++index) pos -= seq[index].length;
         const int frame = seq[index].frame;
         const int before = seq[(index + seq.size() - 1) % seq.size()].frame;
-        // Fade in over the first moments of a step (not the very first step of a mood).
-        const float fade = info.fadeSeconds / info.frameSeconds;
+        // Fade in over the first moments of a step (not the very first step of a
+        // mood), never more than a third of it: quick frames that blend for
+        // most of their time look smeared and sluggish.
+        const float fade = std::min(info.fadeSeconds / info.frameSeconds, seq[index].length * 0.3f);
         const float a = fade > 0.0f && before != frame && (mood == Mood::Idle || clock >= fade) ? std::min(1.0f, pos / fade) : 1.0f;
         std::wstring file = stem + L"_" + std::to_wstring(frame) + L".png";
         const bool restful = (mood == Mood::Idle || mood == Mood::Listening) && frame == seq.front().frame;
@@ -2143,6 +2144,56 @@ void Fist(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F p, float rx, f
         rt->DrawLine(D2D1::Point2F(p.x + rx * 0.02f, p.y + ry * k), D2D1::Point2F(p.x + rx * 0.16f, p.y + ry * k), cache.Get(rt, ink), lw * 0.7f);
 }
 
+// Happy: a staged cheer, like the hand-drawn celebrations. Sparks pop out beside
+// the head, then pop again as confetti bursts from above it and drifts down.
+// The confetti stays close to the head, so the island's edges don't cut it off.
+// Drawn twice: `behind` (before the head) for the confetti, so it never covers
+// the face, then in front for the sparks.
+void Celebrate(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F head, float rx, float ry, float s, float since,
+               const D2D1_MATRIX_3X2_F& world, float lw, bool behind) {
+    // Sparks: three yellow strokes each side, popping in at the start and again with the punch.
+    auto pop = [](float x) { return x < 0.0f || x > 0.5f ? 0.0f : x < 0.1f ? Smooth(x / 0.1f) : 1.0f - Smooth((x - 0.3f) / 0.2f); };
+    const float spark = std::max(pop(since - 0.08f), pop(since - 0.6f));
+    if (!behind && spark > 0.0f) {
+        for (int side = -1; side <= 1; side += 2)
+            for (float deg : {-38.0f, -12.0f, 14.0f}) {
+                const float a = deg * kPi / 180.0f;
+                const float r0 = rx * 1.08f, r1 = r0 + s * 0.085f * spark;
+                const D2D1_POINT_2F p0 = D2D1::Point2F(head.x + side * std::cos(a) * r0, head.y - ry * 0.35f + std::sin(a) * r0);
+                const D2D1_POINT_2F p1 = D2D1::Point2F(head.x + side * std::cos(a) * r1, head.y - ry * 0.35f + std::sin(a) * r1);
+                rt->DrawLine(p0, p1, cache.Get(rt, Hex(0x2A1F14, spark)), lw * 3.4f);
+                rt->DrawLine(p0, p1, cache.Get(rt, Hex(0xFFC233, spark)), lw * 2.0f);
+            }
+    }
+
+    // Confetti: launched with the punch, out to both sides and over the head,
+    // falling with a little spin, gone by 2.2 s.
+    const float tau = since - 0.6f;
+    if (behind && tau > 0.0f && tau < 1.6f) {
+        static const UINT32 kColors[] = {0x8B5CF6, 0xFFC233, 0xFF5FA2, 0xF4F1FF, 0x4FD1C5, 0xB069FF};
+        const float fade = 1.0f - Smooth((tau - 1.2f) / 0.4f);
+        for (int i = 0; i < 16; ++i) {
+            const float h1 = Hash01(i * 7919u + 1), h2 = Hash01(i * 104729u + 7), h3 = Hash01(i * 1299709u + 3);
+            // From the head's top corners, outward, so it clears the head as it falls.
+            const float side = i % 2 ? 1.0f : -1.0f;
+            // Air drag (k) slows the burst, so pieces stay within about half the
+            // mascot's size either side and then flutter down at a gentle speed.
+            const float k = 3.0f, drift = (1.0f - std::exp(-k * tau)) / k;
+            const float vx = side * (0.3f + 0.7f * h1) * s, vy = -(0.6f + 0.9f * h2) * s, g = s * 3.0f;
+            const D2D1_POINT_2F p = D2D1::Point2F(
+                head.x + side * rx * 0.55f + vx * drift + std::sin(tau * 7.0f + h3 * 6.0f) * s * 0.02f,
+                head.y - ry * 0.85f + vy * drift + g * (tau - drift) / k);
+            const float w = s * (0.055f + 0.02f * h3), h = s * 0.038f;
+            rt->SetTransform(D2D1::Matrix3x2F::Rotation((h3 * 360.0f) + tau * (h1 > 0.5f ? 420.0f : -380.0f), p) * world);
+            const D2D1_RECT_F piece = D2D1::RectF(p.x - w * 0.5f, p.y - h * 0.5f, p.x + w * 0.5f, p.y + h * 0.5f);
+            rt->FillRectangle(piece, cache.Get(rt, Hex(kColors[i % std::size(kColors)], fade)));
+            rt->DrawRectangle(piece, cache.Get(rt, Hex(0x241A2E, fade * 0.55f)), lw * 0.45f);
+        }
+        rt->SetTransform(world);
+    }
+
+}
+
 // Thinking: a hand on the chin, index finger tapping.
 void ChinHand(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float rx, float ry, float lw, double t,
               D2D1_COLOR_F skin, D2D1_COLOR_F ink, bool bandaged) {
@@ -2759,6 +2810,8 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
     }
     rt->SetTransform(world);
     if (mood == Mood::Confused) DizzyRing(rt, cache, headC, headRx, headRy, s, t, world, false);  // behind the head
+    if (mood == Mood::Happy)  // the celebration's confetti, behind the head
+        Celebrate(rt, cache, headC, headRx, headRy, s, since, world, s * 0.012f, true);
 
     // ── Head ────────────────────────────────────────────────────────────────
     if (L.robot) {
@@ -3091,6 +3144,9 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         rt->DrawLine(D2D1::Point2F(n.x + ns * 0.5f, n.y), D2D1::Point2F(n.x + ns * 0.5f, n.y - ns * 1.8f), nb, lw * 1.1f);
         rt->DrawLine(D2D1::Point2F(n.x + ns * 0.5f, n.y - ns * 1.8f), D2D1::Point2F(n.x + ns * 1.2f, n.y - ns * 1.3f), nb, lw * 1.1f);
     }
+
+    // ── Celebrating: sparks and confetti ────────────────────────────────────
+    if (mood == Mood::Happy) Celebrate(rt, cache, headC, headRx, headRy, s, since, world, lw, false);
 
     // ── Charging: holding a plug, with a little spark now and then ──────────
     if (g_charging.load(std::memory_order_relaxed) && (mood == Mood::Idle || mood == Mood::Happy || mood == Mood::Sleepy)) {

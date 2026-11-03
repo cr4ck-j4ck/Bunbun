@@ -28,7 +28,7 @@ suit.
 | Working | An agent is working | Typing at a laptop, eyes reading across the screen (Bolt runs a terminal on his visor) |
 | Thinking | An agent is thinking | Eyes up, a "?" bobs beside the head |
 | Needs you | An agent is waiting for you | A double hop and an amber "!" |
-| Celebrate | A task finished | A hop |
+| Celebrate | A task finished | Sparks pop out beside the head, then a confetti burst drifts down around it (and a hop, if *Hop when a task finishes* is on) |
 | Error | A task failed | Droopy eyes, a tear, a rain cloud, a little head shake |
 | Sleepy | Idle for a while | Eyes closed, "Z"s |
 | Music | Music is playing | Headphones on, nodding to the beat |

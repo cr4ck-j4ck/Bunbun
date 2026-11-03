@@ -445,6 +445,10 @@ void PaintCard(cairo_t* cr, const Rect& p) {
         const double bw = (right - left - gap * (n - 1)) / n;
         for (int i = 0; i < n; ++i)
             Button(cr, {left + i * (bw + gap), by, bw, bh}, bb::plat::Utf8(a.options[i]), i == 0, Action::Answer, i);
+    } else if (a.phase == AgentPhase::Question) {
+        // Several questions, multi-select or free text (AgentView::questions): there's
+        // no card for those on Linux yet, and Allow would send no answers.
+        Button(cr, {left, by, right - left, bh}, "Answer in terminal", true, Action::Terminal);
     } else {
         const double bw = (right - left - gap * 2) / 3;
         Button(cr, {left, by, bw, bh}, "Allow", true, Action::Allow);
@@ -888,12 +892,20 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--quit") return QuitRunning() ? 0 : 1;
         if (a == "--replace") replace = true;
+        // The desktop file's Settings action. Exec keys can't hold shell code, so
+        // the island finds bunbun-settings next to itself.
+        if (a == "--settings") {
+            const std::string exe = bb::plat::ExeDir() + "/bunbun-settings";
+            bb::settings::EnsureFile();
+            execl(exe.c_str(), exe.c_str(), static_cast<char*>(nullptr));
+            return bb::plat::OpenWithDefault(bb::settings::Path()) ? 0 : 1;
+        }
         if (a == "--version") {
             printf("Bunbun %s\n", BUNBUN_VERSION_STR);
             return 0;
         }
         if (a == "--help" || a == "-h") {
-            printf("Usage: bunbun [--replace | --quit | --version | --render-icon FILE.png [SIZE]]\n");
+            printf("Usage: bunbun [--replace | --quit | --settings | --version | --render-icon FILE.png [SIZE]]\n");
             return 0;
         }
         // Packaging draws the app icon with the real mascot code (Bun, idle).

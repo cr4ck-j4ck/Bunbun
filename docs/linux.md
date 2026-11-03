@@ -33,7 +33,7 @@ GTK 3, which every GNOME and KDE desktop has. If your system has no FUSE, add
 `~/.config/autostart/bunbun.desktop`, which GNOME, KDE, XFCE, Cinnamon and MATE all read.
 
 **Connect your coding agent:** right-click the island → **Connect Claude Code**, or Settings →
-Assistant & agents for Claude Code, Antigravity, Cursor and Copilot. It works as on Windows; see
+Assistant & agents for Claude Code, Codex, Antigravity, Cursor and Copilot. It works as on Windows; see
 [Coding agents](agents.md).
 
 ## What works where
@@ -60,13 +60,19 @@ without its soft shadow.
 
 | Feature | Why | Plan |
 |---|---|---|
+| Studio layout (header, icon tab bar, Home cards) | The Windows Studio is drawn with Direct2D and DirectWrite inside the Windows island | Next: Linux draws the classic pill for now, whatever **Layout** says. The page order, Home cards and tab bar come first, then the Music and Agent pages |
+| Island pages (order, Home cards, page pictures) | Needs the Studio layout | Arrives with Studio. The screen works in Settings, with example drawings instead of real pictures |
+| Plan approval and several-question cards | Part of the Studio drawing | With Studio. Until then a plan shows Allow / Deny, and several questions are answered in the terminal |
+| Replying to a finished agent, typed answers | Need keyboard input on the island | After the cards (layer-shell keyboard focus on demand) |
+| Claude usage ring and history | Part of the Studio Agent page | With the Agent page. The numbers already reach the Linux island |
 | Tray icon | Linux has no single tray; it needs StatusNotifierItem over D-Bus | Right-click the island for the same menu. SNI tray later |
 | Ask Bun (Ctrl+Alt+B) | Its commands open Windows apps and Settings pages | Port the commands to Linux equivalents (`xdg-open`, desktop files, `pactl`) |
-| Weather, lyrics, calendar, downloads, to-dos | Built into the Windows island; not ported yet | Next, one module at a time |
+| Weather, lyrics and the lyric pill, calendar, downloads, to-dos | Built into the Windows island; not ported yet | One module at a time; lyrics after Studio |
 | Volume, brightness, battery, Wi-Fi, Bluetooth flyouts | Need Linux system APIs | PipeWire/PulseAudio, `brightnessctl`/logind, UPower, NetworkManager, BlueZ |
 | Notifications and clipboard peek | Need the desktop's notification service | `org.freedesktop.Notifications` monitoring |
 | Music waveform from the real audio | Needs audio capture | PipeWire monitor stream. The bars animate while music plays for now |
 | Several displays, other positions | The island sits top-centre on the primary display | Per-monitor layer surfaces / windows |
+| Clipboard, note, focus, apps and mirror pages, colour picker, tuck in full screen | Windows-only for now | Later |
 | Live island preview in Settings, character-sheet import, Local AI | Windows-only for now | Later |
 | Update check | Packages are updated by your package manager or a new AppImage | Not planned |
 
@@ -84,7 +90,8 @@ effect on Linux.
 | Hook used by agents (AppImage) | `~/.local/share/Bunbun/bin/bunbun-hook` |
 | Programs (`.deb`) | `/usr/lib/bunbun/`, with `/usr/bin/bunbun` |
 
-`bunbun --quit` closes a running island; `bunbun --replace` restarts it.
+`bunbun --quit` closes a running island; `bunbun --replace` restarts it; `bunbun --settings` opens
+the settings window.
 
 ## How the port is built
 
@@ -98,8 +105,8 @@ These parts are the same code on both systems:
 - **The agent bridge** (`src/agents/agent_bridge.cpp`): sessions, phases, the approval queue and
   question answers. Only its transport differs: a named pipe on Windows, a Unix socket on Linux.
 - **The hook** (`src/hook/`): every agent dialect and reply format; again only the transport differs.
-- **The hook installers** (`src/agents/hook_installer.cpp`): Claude Code, Antigravity, Cursor and
-  Copilot configs are merged the same way.
+- **The hook installers** (`src/agents/hook_installer.cpp`): Claude Code (with its statusLine and
+  reply hook), Codex, Antigravity, Cursor and Copilot configs are merged the same way.
 - **Settings**: the schema (`settings_schema.yaml`), the generated defaults and `settings.ini`'s rules
   (keys written commented out, so defaults stay live).
 - **The settings UI** (`settings-ui/`): the same React build. It talks to `window.chrome.webview`;

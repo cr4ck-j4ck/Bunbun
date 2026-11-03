@@ -1,0 +1,1506 @@
+// Bunbun — Studio layout: shared state for the framed island and its extra pages.
+//
+// #included inside island_core.cpp's anonymous namespace (after the focus timer
+// and media transport helpers). The drawing lives in studio_draw.inc, inside the
+// Renderer class. What lives here:
+//   - the dashboard's tab list, built in one place for the idle and media views;
+//   - the Agent, Clipboard and Note pages' data (clipboard history, note.txt);
+//   - tuck-away (the island folded to a thin line at the top of the screen);
+//   - the mascot's poke reactions (cross after 3 quick pokes, dizzy after 6);
+//   - the clickable spots the frame and pages publish, and what a click does.
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+
+// The open Studio island: a 184-unit page between a 34-unit header and a 38-unit
+// tab bar, 520 wide (content units; times sizeScale on screen).
+constexpr float kStudioIslandW = 520.0f;
+constexpr float kStudioIslandH = 184.0f + 34.0f + 38.0f;
+// Ask Bun's chat panel in the Studio layout.
+constexpr float kStudioChatW = 520.0f;
+constexpr float kStudioChatH = 300.0f;
+
+// Extra pages share their ids in both views; the built-in ids differ per view.
+constexpr int kTabAgent = 20;
+constexpr int kTabClipboard = 21;
+constexpr int kTabNote = 22;
+constexpr int kTabFocus = 23;
+constexpr int kTabApps = 24;
+constexpr int kTabMirror = 25;
+constexpr int kTabHome = 26;  // Home in the media view (Studio), so it stays while music plays
+
+// ── Which agents the island shows ────────────────────────────────────────────
+// Agents in the order of Settings::showAgent (Bunbun.Show*).
+enum AgentKind { AgentClaude, AgentAntigravity, AgentCursor, AgentCopilot, AgentCodex, AgentOther, AgentKindCount };
+
+AgentKind AgentKindFor(const std::wstring& displayName) {
+    std::wstring n = displayName;
+    for (auto& c : n) c = towlower(c);
+    if (n.find(L"claude") != std::wstring::npos || n.empty()) return AgentClaude;
+    if (n.find(L"antigravity") != std::wstring::npos || n.find(L"gemini") != std::wstring::npos) return AgentAntigravity;
+    if (n.find(L"cursor") != std::wstring::npos) return AgentCursor;
+    if (n.find(L"vs code") != std::wstring::npos || n.find(L"copilot") != std::wstring::npos) return AgentCopilot;
+    if (n.find(L"codex") != std::wstring::npos) return AgentCodex;
+    return AgentOther;
+}
+
+int AgentKindOf(const std::wstring& displayName) { return AgentKindFor(displayName); }
+
+const wchar_t* AgentKindName(int kind) {
+    static const wchar_t* kNames[] = {L"Claude Code", L"Antigravity", L"Cursor", L"VS Code", L"Codex", L"Agents"};
+    return kNames[std::clamp(kind, 0, AgentKindCount - 1)];
+}
+
+// Bit per AgentKind: connected through Bunbun's installer (refreshed every 30 s),
+// and seen sending events since Bunbun started. Either makes an agent "in use".
+std::atomic<unsigned> g_agentsConnected{0};
+std::atomic<unsigned> g_agentsSeen{0};
+std::atomic<int> g_lastAgentKind{-1};
+std::atomic<double> g_agentsCheckedAt{-100.0};
+
+void NoteAgentActivity(const bb::AgentView& view) {
+    if (view.phase == bb::AgentPhase::None || view.agent.empty()) return;
+    const int kind = AgentKindFor(view.agent);
+    g_agentsSeen.fetch_or(1u << kind);
+    g_lastAgentKind.store(kind);
+}
+
+unsigned AgentsInUse() {
+    const double now = NowSeconds();
+    if (now - g_agentsCheckedAt.load() > 30.0) {
+        g_agentsCheckedAt.store(now);
+        unsigned bits = 0;
+        if (bb::hooks::ClaudeHooksInstalled()) bits |= 1u << AgentClaude;
+        if (bb::hooks::AntigravityHooksInstalled()) bits |= 1u << AgentAntigravity;
+        if (bb::hooks::CursorHooksInstalled()) bits |= 1u << AgentCursor;
+        if (bb::hooks::CopilotHooksInstalled()) bits |= 1u << AgentCopilot;
+        if (bb::hooks::CodexHooksInstalled()) bits |= 1u << AgentCodex;
+        g_agentsConnected.store(bits);
+    }
+    return g_agentsConnected.load() | g_agentsSeen.load();
+}
+
+// True when an agent the user switched on is connected or has been active: only
+// then do the Agent tile, the Agent page and the usage ring appear.
+bool AgentsShown(const Settings& s) {
+    if (!s.bunbunAgents) return false;
+    const unsigned inUse = AgentsInUse();
+    for (int k = 0; k < AgentKindCount; ++k)
+        if (s.showAgent[k] && (inUse & (1u << k))) return true;
+    return false;
+}
+
+// The agent the Home tile and the header ring follow: the chosen main agent, else
+// the one used last, else the first one switched on and in use.
+int MainAgentKind(const Settings& s) {
+    if (s.mainAgent >= 0 && s.mainAgent < AgentKindCount && s.showAgent[s.mainAgent]) return s.mainAgent;
+    const int last = g_lastAgentKind.load();
+    if (last >= 0 && s.showAgent[last]) return last;
+    const unsigned inUse = AgentsInUse();
+    for (int k = 0; k < AgentKindCount; ++k)
+        if (s.showAgent[k] && (inUse & (1u << k))) return k;
+    return AgentClaude;
+}
+
+int StudioExtraTabCount(const Settings& s) {
+    return (s.agentTab && AgentsShown(s) ? 1 : 0) + (s.clipboardHistory ? 1 : 0) + (s.quickNote ? 1 : 0) + (s.focusPage ? 1 : 0) + (s.appsPage ? 1 : 0) + (s.mirrorPage ? 1 : 0);
+}
+
+// The dashboard's tabs, in scroll order. context 0 = the media view (first tab is
+// the player), 1 = the idle view (first tab is the clock, or Home in Studio).
+// DrawMedia and DrawIdleDashboard both draw from this list, so the frame's tab
+// bar, the scroll ring and the click handlers can't disagree about the order.
+// The first page (player or Home) always leads; Bunbun.PageOrder orders the rest
+// by key, and any page it doesn't name keeps its default place after those.
+struct OrderedPage { const wchar_t* key; int mediaId; int idleId; };
+constexpr OrderedPage kOrderedPages[] = {
+    {L"calendar", 1, 0},  {L"weather", 2, 1},           {L"system", 3, 2},           {L"toggles", 6, 5},
+    {L"tray", 4, 4},      {L"todo", 7, 7},              {L"lyrics", 5, -1},          {L"agent", kTabAgent, kTabAgent},
+    {L"clipboard", kTabClipboard, kTabClipboard},       {L"note", kTabNote, kTabNote},
+    {L"focus", kTabFocus, kTabFocus},                   {L"mirror", kTabMirror, kTabMirror},
+    {L"apps", kTabApps, kTabApps},
+};
+
+bool OrderedPageOn(const wchar_t* key, const Settings& s) {
+    const std::wstring_view k = key;
+    if (k == L"calendar") return true;
+    if (k == L"weather") return s.weather;
+    if (k == L"system") return s.hardwareMonitorModule;
+    if (k == L"toggles") return s.connectivityModule;
+    if (k == L"tray") return s.fileTrayModule;
+    if (k == L"todo") return s.todoModule;
+    if (k == L"lyrics") return s.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed);
+    if (k == L"agent") return s.agentTab && AgentsShown(s);
+    if (k == L"clipboard") return s.clipboardHistory;
+    if (k == L"note") return s.quickNote;
+    if (k == L"focus") return s.focusPage;
+    if (k == L"mirror") return s.mirrorPage;
+    return s.appsPage;
+}
+
+std::vector<int> DashboardTabIds(int context, const Settings& s) {
+    // Rank each page: its place in PageOrder, or after all named pages in default order.
+    constexpr size_t kCount = std::size(kOrderedPages);
+    size_t rank[kCount];
+    for (size_t i = 0; i < kCount; ++i) rank[i] = 1000 + i;
+    size_t pos = 0, at = 0;
+    const std::wstring& order = s.pageOrder;
+    while (at <= order.size()) {
+        size_t comma = order.find(L',', at);
+        if (comma == std::wstring::npos) comma = order.size();
+        std::wstring key = order.substr(at, comma - at);
+        key.erase(0, key.find_first_not_of(L" \t"));
+        key.erase(key.find_last_not_of(L" \t") + 1);
+        for (size_t i = 0; i < kCount; ++i)
+            if (rank[i] >= 1000 && !key.empty() && EqualsNoCase(key, kOrderedPages[i].key)) rank[i] = pos++;
+        at = comma + 1;
+    }
+    size_t idx[kCount];
+    for (size_t i = 0; i < kCount; ++i) idx[i] = i;
+    std::stable_sort(idx, idx + kCount, [&](size_t a, size_t b) { return rank[a] < rank[b]; });
+
+    std::vector<int> ids;
+    // Studio keeps Home first in both views, so the three cards don't vanish when music starts.
+    if (context == 0 && s.studioLayout) ids.push_back(kTabHome);
+    const bool lyricsFirst = context == 0 && s.lyricsPinnedFirst && OrderedPageOn(L"lyrics", s);
+    if (lyricsFirst) ids.push_back(5);
+    ids.push_back(context == 0 ? 0 : 3);
+    for (size_t n = 0; n < kCount; ++n) {
+        const OrderedPage& p = kOrderedPages[idx[n]];
+        const int id = context == 0 ? p.mediaId : p.idleId;
+        if (id < 0 || !OrderedPageOn(p.key, s)) continue;
+        if (lyricsFirst && id == 5 && context == 0) continue;
+        ids.push_back(id);
+    }
+    return ids;
+}
+
+StudioPage StudioPageFor(int context, int id) {
+    if (id == kTabHome) return StudioPage::Home;
+    if (id == kTabAgent) return StudioPage::Agent;
+    if (id == kTabClipboard) return StudioPage::Clipboard;
+    if (id == kTabNote) return StudioPage::Note;
+    if (id == kTabFocus) return StudioPage::Focus;
+    if (id == kTabApps) return StudioPage::Apps;
+    if (id == kTabMirror) return StudioPage::Mirror;
+    if (context == 0) {
+        switch (id) {
+            case 0: return StudioPage::Music;
+            case 1: return StudioPage::Calendar;
+            case 2: return StudioPage::Weather;
+            case 3: return StudioPage::Hardware;
+            case 4: return StudioPage::Tray;
+            case 5: return StudioPage::Lyrics;
+            case 6: return StudioPage::Connectivity;
+            default: return StudioPage::Todo;
+        }
+    }
+    switch (id) {
+        case 3: return StudioPage::Home;
+        case 0: return StudioPage::Calendar;
+        case 1: return StudioPage::Weather;
+        case 2: return StudioPage::Hardware;
+        case 4: return StudioPage::Tray;
+        case 5: return StudioPage::Connectivity;
+        default: return StudioPage::Todo;
+    }
+}
+
+// Which view the dashboard was last drawn in (render thread writes, the window
+// proc reads; both run on the render thread, the atomic just keeps it honest).
+std::atomic<int> g_dashboardContext{1};
+
+int DashboardPageIndex(StudioPage page, const Settings& s) {
+    return DashboardPageIndexIn(g_dashboardContext.load(std::memory_order_relaxed), page, s);
+}
+
+int DashboardPageIndexIn(int context, StudioPage page, const Settings& s) {
+    const std::vector<int> ids = DashboardTabIds(context, s);
+    for (size_t i = 0; i < ids.size(); ++i)
+        if (StudioPageFor(context, ids[i]) == page) return static_cast<int>(i);
+    return -1;
+}
+
+int DashboardTabCount(const Settings& s) {
+    return static_cast<int>(DashboardTabIds(g_dashboardContext.load(std::memory_order_relaxed), s).size());
+}
+
+int DashboardTabIndexOf(int id) {
+    const Settings s = GetSettingsCopy();
+    const std::vector<int> ids = DashboardTabIds(g_dashboardContext.load(std::memory_order_relaxed), s);
+    for (size_t i = 0; i < ids.size(); ++i)
+        if (ids[i] == id) return static_cast<int>(i);
+    return -1;
+}
+
+// The page currently on screen in the dashboard, or -1.
+int CurrentDashboardTabId() {
+    const Settings s = GetSettingsCopy();
+    const std::vector<int> ids = DashboardTabIds(g_dashboardContext.load(std::memory_order_relaxed), s);
+    if (ids.empty()) return -1;
+    const int i = std::min(NormalizedTabIndex(s), static_cast<int>(ids.size()) - 1);
+    return ids[static_cast<size_t>(i)];
+}
+
+// ── Clipboard history ────────────────────────────────────────────────────────
+
+constexpr size_t kClipHistoryMax = 8;
+std::deque<std::wstring> g_clipHistory;    // newest first, guarded by g_stateMutex
+std::atomic<bool> g_clipSelfSet{false};    // the next clipboard update is our own copy
+
+void RememberClipboardText(const std::wstring& raw) {
+    if (g_clipSelfSet.exchange(false)) return;
+    std::wstring text = raw;
+    while (!text.empty() && iswspace(text.back())) text.pop_back();
+    if (text.empty()) return;
+    if (text.size() > 4000) text.resize(4000);
+    std::lock_guard lock(g_stateMutex);
+    g_clipHistory.erase(std::remove(g_clipHistory.begin(), g_clipHistory.end(), text), g_clipHistory.end());
+    g_clipHistory.push_front(std::move(text));
+    while (g_clipHistory.size() > kClipHistoryMax) g_clipHistory.pop_back();
+}
+
+std::vector<std::wstring> ClipHistorySnapshot() {
+    std::lock_guard lock(g_stateMutex);
+    return {g_clipHistory.begin(), g_clipHistory.end()};
+}
+
+bool StudioCopyText(HWND hwnd, const std::wstring& text) {
+    if (!OpenClipboard(hwnd)) return false;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    bool ok = false;
+    if (mem) {
+        if (void* p = GlobalLock(mem)) {
+            memcpy(p, text.c_str(), bytes);
+            GlobalUnlock(mem);
+            g_clipSelfSet = true;  // don't flash the clipboard pill for our own copy
+            ok = SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+            if (!ok) { GlobalFree(mem); g_clipSelfSet = false; }
+        } else {
+            GlobalFree(mem);
+        }
+    }
+    CloseClipboard();
+    if (ok) {
+        // Move it to the top, like copying it again would.
+        std::lock_guard lock(g_stateMutex);
+        g_clipHistory.erase(std::remove(g_clipHistory.begin(), g_clipHistory.end(), text), g_clipHistory.end());
+        g_clipHistory.push_front(text);
+    }
+    return ok;
+}
+
+// ── Quick note ───────────────────────────────────────────────────────────────
+
+namespace QuickNote {
+
+std::wstring FilePath() {
+    std::wstring dir = bb::SettingsPath();
+    dir.erase(dir.find_last_of(L"\\/"));
+    return dir + L"\\note.txt";
+}
+
+struct Cache {
+    std::vector<std::wstring> lines;
+    FILETIME written{};
+    double checkedAt = -10.0;
+    bool exists = false;
+};
+Cache g_note;  // render thread only
+
+std::wstring Widen(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+std::string Narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// Lines of note.txt, re-read when the file changes (checked at most once a second).
+const std::vector<std::wstring>& Lines(double now) {
+    if (now - g_note.checkedAt < 1.0) return g_note.lines;
+    g_note.checkedAt = now;
+    WIN32_FILE_ATTRIBUTE_DATA attr{};
+    if (!GetFileAttributesExW(FilePath().c_str(), GetFileExInfoStandard, &attr)) {
+        g_note.exists = false;
+        g_note.lines.clear();
+        return g_note.lines;
+    }
+    if (g_note.exists && CompareFileTime(&attr.ftLastWriteTime, &g_note.written) == 0) return g_note.lines;
+    g_note.exists = true;
+    g_note.written = attr.ftLastWriteTime;
+    g_note.lines.clear();
+    HANDLE f = CreateFileW(FilePath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return g_note.lines;
+    std::string data(std::min<DWORD>(attr.nFileSizeLow, 64 * 1024), '\0');
+    DWORD n = 0;
+    ReadFile(f, data.data(), static_cast<DWORD>(data.size()), &n, nullptr);
+    CloseHandle(f);
+    data.resize(n);
+    if (data.size() >= 3 && data.compare(0, 3, "\xEF\xBB\xBF") == 0) data.erase(0, 3);
+    std::wstring text = Widen(data);
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find(L'\n', start);
+        if (end == std::wstring::npos) end = text.size();
+        std::wstring line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        g_note.lines.push_back(std::move(line));
+        start = end + 1;
+    }
+    while (!g_note.lines.empty() && g_note.lines.back().empty()) g_note.lines.pop_back();
+    return g_note.lines;
+}
+
+bool IsCheckbox(const std::wstring& line, bool* checked) {
+    size_t i = 0;
+    while (i < line.size() && line[i] == L' ') ++i;
+    if (line.size() < i + 3 || line[i] != L'[' || line[i + 2] != L']') return false;
+    *checked = line[i + 1] == L'x' || line[i + 1] == L'X';
+    return line[i + 1] == L' ' || *checked;
+}
+
+void Save(const std::vector<std::wstring>& lines) {
+    std::wstring text;
+    for (const auto& l : lines) text += l + L"\r\n";
+    const std::string bytes = Narrow(text);
+    const std::wstring tmp = FilePath() + L".tmp";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD n = 0;
+    const bool ok = WriteFile(f, bytes.data(), static_cast<DWORD>(bytes.size()), &n, nullptr) && n == bytes.size();
+    CloseHandle(f);
+    if (ok) MoveFileExW(tmp.c_str(), FilePath().c_str(), MOVEFILE_REPLACE_EXISTING);
+    else DeleteFileW(tmp.c_str());
+    g_note.checkedAt = -10.0;  // re-read on the next frame
+}
+
+void Toggle(int lineIndex) {
+    std::vector<std::wstring> lines = Lines(NowSeconds());
+    if (lineIndex < 0 || lineIndex >= static_cast<int>(lines.size())) return;
+    std::wstring& line = lines[static_cast<size_t>(lineIndex)];
+    bool checked = false;
+    if (!IsCheckbox(line, &checked)) return;
+    const size_t at = line.find(L'[') + 1;
+    line[at] = checked ? L' ' : L'x';
+    Save(lines);
+}
+
+void OpenInEditor() {
+    const std::wstring path = FilePath();
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        Save({L"Quick note", L"", L"[ ] Something to do", L"- A thought"});
+    }
+    ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + path + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+}  // namespace QuickNote
+
+// ── Antigravity quota ───────────────────────────────────────────────────────
+// Antigravity caches the user's status from Google in its VS Code-style state
+// database (%APPDATA%\Antigravity IDE\User\globalStorage\state.vscdb, key
+// antigravityUnifiedStateSync.userStatus): base64 of a small wrapper holding
+// base64 of a protobuf. Each model config sits at field 33 -> 1, with its name as
+// a string and its quota at field 15: 1 = fraction remaining (float), 2 = reset
+// time (a Timestamp, 1 = Unix seconds). Read once a minute on a worker thread,
+// through Windows' own winsqlite3.dll, read-only. No network, no credentials.
+namespace AgQuota {
+
+struct Snapshot {
+    bool valid = false;
+    float remaining = 1.0f;     // lowest fraction left across models
+    std::wstring model;         // the model with that lowest fraction
+    long long resetAt = 0;      // its reset time, Unix seconds
+    double readAt = 0.0;        // NowSeconds() of the last successful read
+};
+Snapshot g_quota;               // guarded by g_stateMutex
+std::atomic<bool> g_started{false};
+
+std::string Base64Decode(const std::string& in) {
+    static const std::string kAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    int val = 0, bits = -8;
+    for (char c : in) {
+        const size_t d = kAlphabet.find(c);
+        if (d == std::string::npos) continue;  // padding, whitespace
+        val = (val << 6) + static_cast<int>(d);
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back(static_cast<char>((val >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return out;
+}
+
+struct Field {
+    uint32_t num = 0;
+    int wire = 0;
+    uint64_t varint = 0;
+    float f32 = 0.0f;
+    std::string_view bytes;
+};
+
+// One level of a protobuf message. False when the bytes aren't a clean message.
+bool Parse(std::string_view b, std::vector<Field>* out) {
+    size_t i = 0;
+    auto readVarint = [&](uint64_t* v) {
+        *v = 0;
+        for (int shift = 0; shift < 64 && i < b.size(); shift += 7) {
+            const uint8_t c = static_cast<uint8_t>(b[i++]);
+            *v |= static_cast<uint64_t>(c & 0x7F) << shift;
+            if (!(c & 0x80)) return true;
+        }
+        return false;
+    };
+    while (i < b.size()) {
+        uint64_t key = 0;
+        if (!readVarint(&key) || (key >> 3) == 0) return false;
+        Field f;
+        f.num = static_cast<uint32_t>(key >> 3);
+        f.wire = static_cast<int>(key & 7);
+        if (f.wire == 0) {
+            if (!readVarint(&f.varint)) return false;
+        } else if (f.wire == 1) {
+            if (i + 8 > b.size()) return false;
+            i += 8;
+        } else if (f.wire == 5) {
+            if (i + 4 > b.size()) return false;
+            memcpy(&f.f32, b.data() + i, 4);
+            i += 4;
+        } else if (f.wire == 2) {
+            uint64_t n = 0;
+            if (!readVarint(&n) || i + n > b.size()) return false;
+            f.bytes = b.substr(i, static_cast<size_t>(n));
+            i += static_cast<size_t>(n);
+        } else {
+            return false;
+        }
+        out->push_back(f);
+    }
+    return true;
+}
+
+bool Printable(std::string_view s) {
+    if (s.empty()) return false;
+    for (char c : s)
+        if (static_cast<unsigned char>(c) < 32 || static_cast<unsigned char>(c) > 126) return false;
+    return true;
+}
+
+// Reads the cached status. False when Antigravity isn't installed or the layout changed.
+bool Read(Snapshot* out) {
+    wchar_t appData[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH)) return false;
+    const std::wstring path = std::wstring(appData) + L"\\Antigravity IDE\\User\\globalStorage\\state.vscdb";
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+    // winsqlite3.dll ships with Windows 10 and 11; loaded on demand so the island
+    // has no SQLite dependency of its own.
+    static HMODULE dll = LoadLibraryExW(L"winsqlite3.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!dll) return false;
+    using OpenFn = int(__stdcall*)(const char*, void**, int, const char*);
+    using PrepareFn = int(__stdcall*)(void*, const char*, int, void**, const char**);
+    using StepFn = int(__stdcall*)(void*);
+    using TextFn = const unsigned char*(__stdcall*)(void*, int);
+    using BytesFn = int(__stdcall*)(void*, int);
+    using FinalizeFn = int(__stdcall*)(void*);
+    using CloseFn = int(__stdcall*)(void*);
+    auto open = reinterpret_cast<OpenFn>(GetProcAddress(dll, "sqlite3_open_v2"));
+    auto prepare = reinterpret_cast<PrepareFn>(GetProcAddress(dll, "sqlite3_prepare_v2"));
+    auto step = reinterpret_cast<StepFn>(GetProcAddress(dll, "sqlite3_step"));
+    auto text = reinterpret_cast<TextFn>(GetProcAddress(dll, "sqlite3_column_text"));
+    auto bytes = reinterpret_cast<BytesFn>(GetProcAddress(dll, "sqlite3_column_bytes"));
+    auto finalize = reinterpret_cast<FinalizeFn>(GetProcAddress(dll, "sqlite3_finalize"));
+    auto close = reinterpret_cast<CloseFn>(GetProcAddress(dll, "sqlite3_close"));
+    if (!open || !prepare || !step || !text || !bytes || !finalize || !close) return false;
+
+    std::string utf8Path(WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, utf8Path.data(), static_cast<int>(utf8Path.size()), nullptr, nullptr);
+    void* db = nullptr;
+    constexpr int kReadOnly = 0x00000001;
+    if (open(utf8Path.c_str(), &db, kReadOnly, nullptr) != 0 || !db) {
+        if (db) close(db);
+        return false;
+    }
+    std::string value;
+    void* stmt = nullptr;
+    if (prepare(db, "SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.userStatus'", -1, &stmt,
+                nullptr) == 0 && stmt) {
+        if (step(stmt) == 100 /* SQLITE_ROW */) {
+            const unsigned char* t = text(stmt, 0);
+            if (t) value.assign(reinterpret_cast<const char*>(t), static_cast<size_t>(bytes(stmt, 0)));
+        }
+        finalize(stmt);
+    }
+    close(db);
+    if (value.empty()) return false;
+
+    // Outer layer: base64 of a wrapper whose longest string is base64 of the status.
+    const std::string wrapper = Base64Decode(value);
+    std::string inner;
+    {
+        size_t best = 0, start = std::string::npos;
+        for (size_t i = 0, run = 0; i <= wrapper.size(); ++i) {
+            const bool b64 = i < wrapper.size() &&
+                             (isalnum(static_cast<unsigned char>(wrapper[i])) || wrapper[i] == '+' || wrapper[i] == '/' || wrapper[i] == '=');
+            if (b64) { if (!run) start = i; ++run; }
+            else { if (run > best) { best = run; inner = wrapper.substr(start, run); } run = 0; }
+        }
+    }
+    if (inner.size() < 100) return false;
+    // The run can start with a protobuf length byte that happens to be a base64
+    // character, so try each alignment and keep the one that parses cleanly.
+    std::string status;
+    std::vector<Field> root;
+    for (size_t cut = 0; cut < 4 && root.empty(); ++cut) {
+        std::string candidate = Base64Decode(inner.substr(cut));
+        std::vector<Field> fields;
+        if (Parse(candidate, &fields) &&
+            std::any_of(fields.begin(), fields.end(), [](const Field& f) { return f.num == 33 && f.wire == 2; })) {
+            status = std::move(candidate);
+            root = std::move(fields);
+        }
+    }
+    if (root.empty()) return false;
+    root.clear();  // the fields point into the decoded text: parse again from where it now lives
+    if (!Parse(status, &root)) return false;
+    Snapshot snap;
+    for (const Field& f33 : root) {
+        if (f33.num != 33 || f33.wire != 2) continue;
+        std::vector<Field> group;
+        if (!Parse(f33.bytes, &group)) continue;
+        for (const Field& model : group) {
+            if (model.num != 1 || model.wire != 2) continue;
+            std::vector<Field> cfg;
+            if (!Parse(model.bytes, &cfg)) continue;
+            std::string name;
+            float remaining = -1.0f;
+            long long reset = 0;
+            for (const Field& c : cfg) {
+                if (c.wire != 2) continue;
+                if (name.empty() && Printable(c.bytes) && c.bytes.size() < 80) name = std::string(c.bytes);
+                if (c.num == 15) {
+                    std::vector<Field> quota;
+                    if (!Parse(c.bytes, &quota)) continue;
+                    for (const Field& q : quota) {
+                        if (q.num == 1 && q.wire == 5) remaining = q.f32;
+                        if (q.num == 2 && q.wire == 2) {
+                            std::vector<Field> ts;
+                            if (Parse(q.bytes, &ts))
+                                for (const Field& t : ts) if (t.num == 1 && t.wire == 0) reset = static_cast<long long>(t.varint);
+                        }
+                    }
+                }
+            }
+            if (remaining < 0.0f || remaining > 1.0001f) continue;
+            if (!snap.valid || remaining < snap.remaining) {
+                snap.valid = true;
+                snap.remaining = remaining;
+                snap.model = std::wstring(name.begin(), name.end());
+                snap.resetAt = reset;
+            }
+        }
+    }
+    if (!snap.valid) return false;
+    snap.readAt = NowSeconds();
+    *out = snap;
+    return true;
+}
+
+// Starts the once-a-minute reader the first time the quota is wanted.
+void EnsureStarted() {
+    if (g_started.exchange(true)) return;
+    std::thread([] {
+        for (;;) {
+            Snapshot snap;
+            const bool ok = Read(&snap);
+            {
+                std::lock_guard lock(g_stateMutex);
+                if (ok) g_quota = snap;
+                else if (NowSeconds() - g_quota.readAt > 600.0) g_quota.valid = false;
+            }
+            if (ok) g_layoutDirty = true;
+            Sleep(60 * 1000);
+        }
+    }).detach();
+}
+
+Snapshot Get() {
+    EnsureStarted();
+    std::lock_guard lock(g_stateMutex);
+    return g_quota;
+}
+
+}  // namespace AgQuota
+
+// ── Answering agents from the island ─────────────────────────────────────────
+// Plan feedback, replies to a finished task and free-text answers are typed in the
+// Ask Bun box, aimed at the agent instead of at Bun (g_compose). Questions with
+// several parts or multi-select step through a card (g_questions). Render thread.
+struct ComposeTarget {
+    int kind = 0;           // 0 none, 1 plan feedback, 2 reply, 3 free-text answer
+    uint64_t id = 0;        // request id (1, 3) or reply id (2)
+    int question = -1;      // kind 3: which question
+    std::wstring label;     // shown in the box: "Reply to Claude Code · Bunbun"
+};
+ComposeTarget g_compose;
+
+struct QuestionState {
+    uint64_t requestId = 0;
+    int index = 0;                              // the question on screen
+    std::vector<std::vector<int>> picks;        // chosen option indices per question
+    std::vector<std::wstring> other;            // typed answers per question
+};
+QuestionState g_questions;
+
+float g_planScroll = 0.0f;      // plan card: scrolled distance (wheel), render thread
+float g_planScrollMax = 0.0f;   // set while drawing; 0 = nothing to scroll
+uint64_t g_planScrollFor = 0;   // the request the scroll belongs to
+
+void SyncQuestions(const bb::AgentView& a) {
+    if (g_questions.requestId == a.requestId && g_questions.picks.size() == a.questions.size()) return;
+    g_questions = QuestionState{};
+    g_questions.requestId = a.requestId;
+    g_questions.picks.resize(a.questions.size());
+    g_questions.other.resize(a.questions.size());
+}
+
+// The step-through card is for what the quick buttons can't do: several
+// questions, multi-select, or a question with no or more than four options.
+bool NeedsQuestionCard(const bb::AgentView& a) {
+    if (a.phase != bb::AgentPhase::Question || a.questions.empty()) return false;
+    if (a.questions.size() > 1) return true;
+    const auto& q = a.questions[0];
+    return q.multi || q.options.size() < 2 || q.options.size() > 4 || a.options.empty();
+}
+
+bool QuestionAnswered(int i) {
+    if (i < 0 || i >= static_cast<int>(g_questions.picks.size())) return false;
+    return !g_questions.picks[i].empty() || !g_questions.other[i].empty();
+}
+
+void ClearCompose() { g_compose = ComposeTarget{}; }
+
+void StartCompose(int kind, uint64_t id, int question, const std::wstring& label) {
+    HWND hwnd = g_hwnd;
+    if (!hwnd) return;
+    StartQuickLookup(hwnd);
+    g_compose = ComposeTarget{kind, id, question, label};
+    g_layoutDirty = true;
+}
+
+// SubmitLookup hands the typed text here first; true when it went to an agent.
+bool SubmitCompose(const std::wstring& raw) {
+    if (g_compose.kind == 0) return false;
+    std::wstring text = raw;
+    while (!text.empty() && iswspace(text.back())) text.pop_back();
+    while (!text.empty() && iswspace(text.front())) text.erase(text.begin());
+    if (text.empty()) return true;
+    const ComposeTarget target = g_compose;
+    if (target.kind == 1) {
+        bb::json::Value reply = bb::json::Value::Object();
+        reply["deny"] = bb::json::Value::String(QuickNote::Narrow(text));
+        bb::agents::DecideRaw(target.id, bb::json::Serialize(reply));
+    } else if (target.kind == 2) {
+        bb::agents::SendReply(target.id, text);
+    } else if (target.kind == 3 && target.question >= 0 &&
+               target.question < static_cast<int>(g_questions.other.size()) && g_questions.requestId == target.id) {
+        g_questions.other[target.question] = text;
+        g_questions.picks[target.question].clear();
+    }
+    ClearCompose();
+    CloseLookupPanel(g_hwnd);
+    return true;
+}
+
+// {"answers":{"<question>":"<answer>"}} for every question, or "" while one is unanswered.
+std::string QuestionsReply(const bb::AgentView& a) {
+    bb::json::Value reply = bb::json::Value::Object();
+    for (size_t i = 0; i < a.questions.size(); ++i) {
+        std::wstring answer = i < g_questions.other.size() ? g_questions.other[i] : std::wstring();
+        if (answer.empty() && i < g_questions.picks.size()) {
+            for (int o : g_questions.picks[i]) {
+                if (o < 0 || o >= static_cast<int>(a.questions[i].options.size())) continue;
+                if (!answer.empty()) answer += L", ";
+                answer += a.questions[i].options[o];
+            }
+        }
+        if (answer.empty()) return {};
+        reply["answers"][QuickNote::Narrow(a.questions[i].text)] = bb::json::Value::String(QuickNote::Narrow(answer));
+    }
+    return bb::json::Serialize(reply);
+}
+
+// Agent card buttons that aren't plain Allow / Deny (AgentButton::action).
+enum AgentAction { ActDecide = 0, ActPlanChange = 1, ActReply = 2, ActToggle = 3, ActNext = 4, ActOther = 5, ActBack = 6 };
+
+void HandleAgentAction(int action, int arg) {
+    bb::AgentView a;
+    {
+        std::lock_guard lock(g_stateMutex);
+        a = g_state.agent;
+    }
+    const std::wstring who = a.project.empty() ? a.agent : a.agent + L" \x00B7 " + a.project;
+    switch (action) {
+        case ActPlanChange:
+            StartCompose(1, a.requestId, -1, L"What should change in the plan?");
+            break;
+        case ActReply:
+            if (a.replyId) StartCompose(2, a.replyId, -1, L"Reply to " + (a.replyTo.empty() ? who : a.replyTo));
+            break;
+        case ActToggle: {
+            SyncQuestions(a);
+            const int q = g_questions.index;
+            if (q < 0 || q >= static_cast<int>(a.questions.size())) break;
+            auto& picks = g_questions.picks[q];
+            g_questions.other[q].clear();
+            if (a.questions[q].multi) {
+                auto it = std::find(picks.begin(), picks.end(), arg);
+                if (it == picks.end()) picks.push_back(arg); else picks.erase(it);
+            } else {
+                picks.assign(1, arg);
+            }
+            break;
+        }
+        case ActNext: {
+            SyncQuestions(a);
+            if (!QuestionAnswered(g_questions.index)) break;
+            if (g_questions.index + 1 < static_cast<int>(a.questions.size())) {
+                ++g_questions.index;
+            } else {
+                const std::string reply = QuestionsReply(a);
+                if (!reply.empty()) bb::agents::DecideRaw(a.requestId, reply);
+            }
+            break;
+        }
+        case ActBack:
+            if (g_questions.index > 0) --g_questions.index;
+            break;
+        case ActOther:
+            SyncQuestions(a);
+            StartCompose(3, a.requestId, g_questions.index, L"Your answer");
+            break;
+        default:
+            break;
+    }
+    g_layoutDirty = true;
+}
+
+// ── The right-click menu's look ─────────────────────────────────────────────
+// Dark menus like the island, with a small icon per item. Dark mode for classic
+// Win32 menus is uxtheme's SetPreferredAppMode (ordinal 135) + FlushMenuThemes
+// (136), the same switch Windows' own apps use; it covers the tray menu too, as it
+// lives in this process. Icons are glyphs from Segoe Fluent Icons (Segoe MDL2
+// Assets on Windows 10), drawn into premultiplied 32-bit bitmaps.
+constexpr wchar_t kGlyphEyedropper = 0xEF3C;
+constexpr wchar_t kGlyphTuck = 0xE70E;       // chevron up
+constexpr wchar_t kGlyphPin = 0xE718;
+constexpr wchar_t kGlyphDismiss = 0xE711;    // cancel
+constexpr wchar_t kGlyphHide = 0xED1A;
+constexpr wchar_t kGlyphTimer = 0xE916;      // stopwatch
+constexpr wchar_t kGlyphMusic = 0xEC4F;
+constexpr wchar_t kGlyphTray = 0xE8B7;       // folder
+constexpr wchar_t kGlyphLyrics = 0xE720;     // microphone
+constexpr wchar_t kGlyphAppearance = 0xE790; // colour
+constexpr wchar_t kGlyphSettings = 0xE713;
+
+void UseDarkMenus() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!ux) return;
+    using SetModeFn = int(WINAPI*)(int);
+    using FlushFn = void(WINAPI*)();
+    auto setMode = reinterpret_cast<SetModeFn>(GetProcAddress(ux, MAKEINTRESOURCEA(135)));
+    auto flush = reinterpret_cast<FlushFn>(GetProcAddress(ux, MAKEINTRESOURCEA(136)));
+    if (setMode) setMode(2);  // ForceDark
+    if (flush) flush();
+}
+
+HBITMAP MenuGlyphBitmap(wchar_t glyph) {
+    static std::map<wchar_t, HBITMAP> cache;  // kept for the process's life, like the menu itself
+    if (auto it = cache.find(glyph); it != cache.end()) return it->second;
+    const int size = MulDiv(16, static_cast<int>(GetDpiForSystem()), 96);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = -size;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp || !bits) { DeleteDC(dc); return nullptr; }
+    HGDIOBJ old = SelectObject(dc, bmp);
+    RECT r{0, 0, size, size};
+    FillRect(dc, &r, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    HFONT font = CreateFontW(-MulDiv(15, static_cast<int>(GetDpiForSystem()), 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+                             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                             DEFAULT_PITCH, L"Segoe Fluent Icons");
+    LOGFONTW lf{};
+    GetObjectW(font, sizeof(lf), &lf);
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    WORD index = 0;
+    if (GetGlyphIndicesW(dc, &glyph, 1, &index, GGI_MARK_NONEXISTING_GLYPHS) == GDI_ERROR || index == 0xFFFF) {
+        // Windows 10: the same code points live in Segoe MDL2 Assets.
+        SelectObject(dc, oldFont);
+        DeleteObject(font);
+        font = CreateFontW(-MulDiv(15, static_cast<int>(GetDpiForSystem()), 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+                           FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           DEFAULT_PITCH, L"Segoe MDL2 Assets");
+        oldFont = SelectObject(dc, font);
+    }
+    SetTextColor(dc, RGB(255, 255, 255));
+    SetBkMode(dc, TRANSPARENT);
+    DrawTextW(dc, &glyph, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    // White-on-black coverage becomes alpha; the ink is a soft white, premultiplied.
+    auto* px = static_cast<uint8_t*>(bits);
+    for (int i = 0; i < size * size; ++i) {
+        const uint8_t a = px[i * 4 + 1];
+        px[i * 4 + 0] = static_cast<uint8_t>(232 * a / 255);
+        px[i * 4 + 1] = static_cast<uint8_t>(232 * a / 255);
+        px[i * 4 + 2] = static_cast<uint8_t>(232 * a / 255);
+        px[i * 4 + 3] = a;
+    }
+    cache[glyph] = bmp;
+    return bmp;
+}
+
+void SetMenuGlyph(HMENU menu, int position, wchar_t glyph) {
+    HBITMAP bmp = MenuGlyphBitmap(glyph);
+    if (!bmp || position < 0) return;
+    MENUITEMINFOW mi{};
+    mi.cbSize = sizeof(mi);
+    mi.fMask = MIIM_BITMAP;
+    mi.hbmpItem = bmp;
+    SetMenuItemInfoW(menu, static_cast<UINT>(position), TRUE, &mi);
+}
+
+// Writes one key of settings.ini. "-" removes it, so a default is never frozen in.
+void WriteBunbunSetting(const wchar_t* key, const wchar_t* value) {
+    WritePrivateProfileStringW(L"Bunbun", key, wcscmp(value, L"-") == 0 ? nullptr : value, bb::SettingsPath());
+}
+
+// The release page of a newer Bunbun, set by IslandAnnounceUpdate (guarded by g_stateMutex).
+std::wstring g_updatePageUrl;
+
+// ── Tuck away ────────────────────────────────────────────────────────────────
+
+std::atomic<bool> g_tucked{false};
+double g_tuckedAt = 0.0;         // render thread: when it folded, for the line's grow-in
+bool g_tuckPointerLeft = false;  // render thread: the pointer left the line once since tucking
+double g_tuckHoverSince = 0.0;   // render thread: pointer on the line since (0 = not on it)
+
+void SetTucked(bool tucked) {
+    if (g_tucked.exchange(tucked) == tucked) return;
+    g_tuckedAt = NowSeconds();
+    g_tuckPointerLeft = false;
+    g_tuckHoverSince = 0.0;
+    g_layoutDirty = true;
+}
+
+// ── Poke reactions ───────────────────────────────────────────────────────────
+
+std::atomic<double> g_mascotCrossUntil{0.0};
+std::atomic<double> g_mascotDizzyUntil{0.0};
+std::deque<double> g_pokeTimes;  // window proc only
+
+// Called for every poke on the mascot. 3 within 1.6 s: cross; 6: dizzy.
+void RegisterMascotPoke(double now) {
+    if (!g_settings.pokeReactions) return;
+    g_pokeTimes.push_back(now);
+    while (!g_pokeTimes.empty() && now - g_pokeTimes.front() > 1.6) g_pokeTimes.pop_front();
+    if (g_pokeTimes.size() >= 6) {
+        g_mascotDizzyUntil.store(now + 2.6, std::memory_order_relaxed);
+        g_mascotCrossUntil.store(0.0, std::memory_order_relaxed);
+        g_pokeTimes.clear();
+    } else if (g_pokeTimes.size() >= 3) {
+        g_mascotCrossUntil.store(now + 1.4, std::memory_order_relaxed);
+    }
+}
+
+// ── Tray drop animation ──────────────────────────────────────────────────────
+// Set by TrayDropTarget::Drop; the Studio frame plays "caught it" for 1.6 s.
+std::atomic<double> g_trayDropAt{-100.0};
+std::wstring g_trayDropName;   // first file's name (render thread reads after the drop)
+int g_trayDropCount = 0;
+
+void NoteTrayDrop(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+    const std::wstring& first = paths.front();
+    const size_t slash = first.find_last_of(L"/\\");
+    g_trayDropName = slash == std::wstring::npos ? first : first.substr(slash + 1);
+    g_trayDropCount = static_cast<int>(paths.size());
+    g_trayDropAt.store(NowSeconds());
+}
+
+// ── Home tiles ───────────────────────────────────────────────────────────────
+// What each of Home's three slots shows: Bunbun.HomeTile1-3 (auto = agent, or the
+// weather when no agent is shown; music; focus). Edit on Home cycles a slot.
+enum class HomeTile { Agent, Music, Focus, Weather, Calendar, Battery, System };
+bool g_homeEdit = false;  // render thread
+
+constexpr const wchar_t* kHomeTileIds[] = {L"agent", L"music", L"focus", L"weather", L"calendar", L"battery", L"system"};
+
+bool AgentsShown(const Settings& s);  // above
+
+HomeTile HomeTileKind(const Settings& s, int slot) {
+    const int v = s.homeTile[std::clamp(slot, 0, 2)];
+    if (v >= 0 && v <= static_cast<int>(HomeTile::System)) {
+        const HomeTile k = static_cast<HomeTile>(v);
+        return k == HomeTile::Agent && !AgentsShown(s) ? HomeTile::Weather : k;
+    }
+    if (slot == 0) return AgentsShown(s) ? HomeTile::Agent : HomeTile::Weather;
+    return slot == 1 ? HomeTile::Music : HomeTile::Focus;
+}
+
+void CycleHomeTile(int slot) {
+    const Settings s = GetSettingsCopy();
+    const int next = (static_cast<int>(HomeTileKind(s, slot)) + 1) % 7;
+    wchar_t key[16];
+    swprintf_s(key, L"HomeTile%d", slot + 1);
+    WriteBunbunSetting(key, kHomeTileIds[next]);
+}
+
+// ── Your links on Home ───────────────────────────────────────────────────────
+// "Name|address; Name|address" -> up to four (name, address). A bare address is
+// named after its host or file name.
+std::vector<std::pair<std::wstring, std::wstring>> ParseHomeLinks(const std::wstring& text) {
+    std::vector<std::pair<std::wstring, std::wstring>> out;
+    auto trim = [](std::wstring t) {
+        while (!t.empty() && iswspace(t.front())) t.erase(t.begin());
+        while (!t.empty() && iswspace(t.back())) t.pop_back();
+        return t;
+    };
+    size_t start = 0;
+    while (start < text.size() && out.size() < 4) {
+        size_t end = text.find(L';', start);
+        if (end == std::wstring::npos) end = text.size();
+        const std::wstring item = trim(text.substr(start, end - start));
+        start = end + 1;
+        if (item.empty()) continue;
+        const size_t bar = item.find(L'|');
+        std::wstring name = bar == std::wstring::npos ? std::wstring() : trim(item.substr(0, bar));
+        std::wstring target = trim(bar == std::wstring::npos ? item : item.substr(bar + 1));
+        if (target.empty()) continue;
+        if (name.empty()) {
+            std::wstring t = target;
+            if (const size_t scheme = t.find(L"://"); scheme != std::wstring::npos) t = t.substr(scheme + 3);
+            if (t.rfind(L"www.", 0) == 0) t = t.substr(4);
+            const size_t cut = t.find_first_of(L"/\\");
+            name = cut == std::wstring::npos ? t : t.substr(0, cut);
+            if (name.size() > 2 && name[1] == L':') name = t.substr(t.find_last_of(L"/\\") + 1);
+        }
+        out.emplace_back(name, target);
+    }
+    return out;
+}
+
+// ── Focus page ───────────────────────────────────────────────────────────────
+// The picker's hours (0-5) and minutes (0-59), remembered in state.ini.
+int g_focusPickH = -1, g_focusPickM = -1;  // render thread; -1 = not loaded yet
+
+void LoadFocusPicker() {
+    if (g_focusPickH >= 0) return;
+    const int total = std::clamp(Wh_GetIntValue(L"FocusPickMinutes", 25), 1, 359);
+    g_focusPickH = total / 60;
+    g_focusPickM = total % 60;
+}
+
+int FocusPickerMinutes() {
+    LoadFocusPicker();
+    return std::max(1, g_focusPickH * 60 + g_focusPickM);
+}
+
+void SaveFocusPicker() { Wh_SetIntValue(L"FocusPickMinutes", FocusPickerMinutes()); }
+
+void StepFocusPicker(int column, int step) {
+    LoadFocusPicker();
+    if (column == 0) g_focusPickH = (g_focusPickH + step + 6) % 6;
+    else g_focusPickM = (g_focusPickM + step + 60) % 60;
+    if (g_focusPickH == 0 && g_focusPickM == 0) g_focusPickM = step > 0 ? 1 : 59;
+    SaveFocusPicker();
+    g_layoutDirty = true;
+}
+
+void SetFocusPicker(int minutes) {
+    g_focusPickH = minutes / 60;
+    g_focusPickM = minutes % 60;
+    SaveFocusPicker();
+    g_layoutDirty = true;
+}
+
+void AddFocusMinutes(int minutes) {
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (!g_state.timer.active) return;
+        g_state.timer.totalSeconds += minutes * 60;
+        if (g_state.timer.running) g_state.timer.endsAt += minutes * 60;
+        else g_state.timer.remainingAtPause += minutes * 60;
+    }
+    g_layoutDirty = true;
+}
+
+// Focus guard: while a focus timer runs (not a break), a gentle note on the island
+// when a distracting app or site comes to the front. At most once a minute per match.
+void FocusGuardLoop() {
+    std::wstring lastMatch;
+    double lastAt = -1000.0;
+    for (;;) {
+        Sleep(2000);
+        const Settings s = GetSettingsCopy();
+        if (!s.focusGuard) continue;
+        bool running = false;
+        double left = 0.0;
+        {
+            std::lock_guard lock(g_stateMutex);
+            running = g_state.timer.active && g_state.timer.running && !g_state.timer.isBreak;
+            left = g_state.timer.endsAt - NowSeconds();
+        }
+        if (!running) continue;
+        HWND fg = GetForegroundWindow();
+        if (!fg) continue;
+        wchar_t title[256] = {};
+        GetWindowTextW(fg, title, ARRAYSIZE(title));
+        std::wstring hay = title;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        std::wstring exe;
+        if (ProcessImageNameForPid(pid, &exe)) hay += L" " + exe;
+        for (auto& c : hay) c = towlower(c);
+        std::wstring list = s.focusGuardApps;
+        for (auto& c : list) c = towlower(c);
+        std::wstring match;
+        size_t start = 0;
+        while (start < list.size()) {
+            size_t end = list.find(L',', start);
+            if (end == std::wstring::npos) end = list.size();
+            std::wstring word = list.substr(start, end - start);
+            while (!word.empty() && iswspace(word.front())) word.erase(word.begin());
+            while (!word.empty() && iswspace(word.back())) word.pop_back();
+            if (word.size() >= 2 && hay.find(word) != std::wstring::npos) { match = word; break; }
+            start = end + 1;
+        }
+        const double now = NowSeconds();
+        if (match.empty() || (match == lastMatch && now - lastAt < 60.0)) continue;
+        lastMatch = match;
+        lastAt = now;
+        const int mins = std::max(1, static_cast<int>((left + 59.0) / 60.0));
+        {
+            std::lock_guard lock(g_stateMutex);
+            g_state.notification.active = true;
+            g_state.notification.app = L"Focus";
+            g_state.notification.title = L"Still focusing \x00B7 " + std::to_wstring(mins) + (mins == 1 ? L" min left" : L" min left");
+            std::wstring name = match;
+            if (!name.empty()) name[0] = towupper(name[0]);
+            g_state.notification.body = name + L" can wait until the timer ends.";
+            g_state.notification.icon = {};
+            g_state.notification.expiresAt = now + 4.0;
+        }
+        g_layoutDirty = true;
+        if (HWND hwnd = g_hwnd) PostMessageW(hwnd, WM_APP_NEW_EVENT, 0, 0);
+    }
+}
+
+void EnsureFocusGuard() {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true)) return;
+    std::thread(FocusGuardLoop).detach();
+}
+
+// ── Clickable spots ──────────────────────────────────────────────────────────
+
+enum class StudioAction {
+    Tab, Volume, PlayPause, OpenMusic, FocusStart, FocusStop, AgentPage, AgentFocus,
+    ClipCopy, ClipClear, NoteToggle, NoteEdit, Settings,
+    ChatChip, ChatNew, ChatPanel, ColorPicker, ModelCycle, AgentReply,
+    FocusWheel, FocusPreset, FocusAdd5, FocusPause, FocusPage, OpenTab, OpenLink, MirrorStart, MirrorStop, HomeEdit, HomeTileCycle,
+};
+
+// Rects are in the published content space (see PublishContentGeometry), so
+// MediaContentFromClient maps a click into the same coordinates. Render thread only.
+struct StudioHit {
+    D2D1_RECT_F rect{};
+    StudioAction action = StudioAction::Tab;
+    int arg = 0;
+};
+std::vector<StudioHit> g_studioHits;
+uint64_t g_studioHitsFrame = 0;  // GetTickCount64() of the frame that published them
+
+// The pointer as a Studio hit-test point. Unlike MediaContentFromClient it has no
+// "painted in the last 0.5 s" rule (a still island doesn't repaint, which made idle
+// clicks miss) and doesn't depend on the last published content rect.
+MediaContentPoint StudioPointFromClient(int clientX, int clientY) {
+    // Studio spots are stored in client coordinates (see Renderer::SHit), so the
+    // pointer needs no mapping. Kept as a function so every caller reads the same.
+    MediaContentPoint out;
+    out.valid = true;
+    out.x = static_cast<float>(clientX);
+    out.y = static_cast<float>(clientY);
+    return out;
+}
+
+// Claude Code's model (settings.json "model"), read at most every 10 s.
+std::string g_claudeModel;
+double g_claudeModelAt = -100.0;
+
+std::wstring ClaudeModelLabel() {
+    if (NowSeconds() - g_claudeModelAt > 10.0) {
+        g_claudeModelAt = NowSeconds();
+        g_claudeModel = bb::hooks::ClaudeModel();
+    }
+    std::string m = g_claudeModel;
+    for (auto& c : m) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (m.empty() || m == "default") return L"Default";
+    if (m.find("opus") != std::string::npos) return L"Opus";
+    if (m.find("sonnet") != std::string::npos) return L"Sonnet";
+    if (m.find("haiku") != std::string::npos) return L"Haiku";
+    return std::wstring(g_claudeModel.begin(), g_claudeModel.end());
+}
+
+void HandleAgentAction(int action, int arg);  // below
+
+// Default -> Opus -> Sonnet -> Haiku -> Default. New Claude Code sessions use it.
+void CycleClaudeModel() {
+    static const char* kOrder[] = {"", "opus", "sonnet", "haiku"};
+    const std::wstring now = ClaudeModelLabel();
+    int i = 0;
+    if (now == L"Opus") i = 1; else if (now == L"Sonnet") i = 2; else if (now == L"Haiku") i = 3;
+    const std::string next = kOrder[(i + 1) % 4];
+    std::wstring report;
+    if (bb::hooks::SetClaudeModel(next, &report)) {
+        g_claudeModel = next;
+        g_claudeModelAt = NowSeconds();
+    }
+}
+
+void OpenSettingsApp() {
+    wchar_t appPath[MAX_PATH] = {};
+    const DWORD len = GetModuleFileNameW(nullptr, appPath, ARRAYSIZE(appPath));
+    if (len == 0 || len >= ARRAYSIZE(appPath)) return;
+    if (wchar_t* slash = wcsrchr(appPath, L'\\')) {
+        *(slash + 1) = L'\0';
+        const std::wstring exe = std::wstring(appPath) + L"bunbun-settings.exe";
+        ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, appPath, SW_SHOWNORMAL);
+    }
+}
+
+bool ShellOpen(const std::wstring& target) {
+    return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+
+bool ProtocolRegistered(const wchar_t* scheme) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, scheme, 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+    RegCloseKey(key);
+    return true;
+}
+
+// The Agent tile and page: bring the agent's window forward (terminal, IDE or the
+// Claude app). With no session to find, open the Claude app itself.
+void OpenAgentApp() {
+    bb::AgentView agent;
+    {
+        std::lock_guard lock(g_stateMutex);
+        agent = g_state.agent;
+    }
+    if (agent.agent.empty()) agent.agent = L"Claude Code";
+    if (FocusAgentApp(agent)) return;
+    if (ProtocolRegistered(L"claude")) ShellOpen(L"claude://");
+    else ShellOpen(L"https://claude.ai/");
+}
+
+// Bunbun.MusicApp: auto | spotify | youtube-music | apple-music.
+// The Music tile focuses whatever is playing when it is that app (or on auto);
+// otherwise it opens the chosen app.
+void OpenMusicApp() {
+    const std::wstring choice = ToLowerCopy(GetStringSettingCopy(L"Bunbun.MusicApp"));
+    std::wstring source, sourceName;
+    bool available = false;
+    {
+        std::lock_guard lock(g_stateMutex);
+        available = g_state.media.available;
+        source = ToLowerCopy(g_state.media.sourceAppUserModelId);
+        sourceName = ToLowerCopy(g_state.media.sourceName + L" " + g_state.media.title);
+    }
+    auto playing = [&](const wchar_t* needle) {
+        return available && (source.find(needle) != std::wstring::npos || sourceName.find(needle) != std::wstring::npos);
+    };
+    // Nothing playing on Auto: open a music app rather than asking Windows to open
+    // an empty "playing app" (which it answered with Settings).
+    auto openDefaultMusic = [] {
+        if (ProtocolRegistered(L"spotify")) ShellOpen(L"spotify:");
+        else ShellOpen(L"https://music.youtube.com/");
+    };
+    if (choice.empty() || choice == L"auto") {
+        if (available) OpenRelevantApp(); else openDefaultMusic();
+        return;
+    }
+    if (choice == L"spotify") {
+        if (playing(L"spotify")) { OpenRelevantApp(); return; }
+        if (!ProtocolRegistered(L"spotify") || !ShellOpen(L"spotify:")) ShellOpen(L"https://open.spotify.com/");
+    } else if (choice == L"youtube-music") {
+        if (playing(L"youtube music") || playing(L"music.youtube")) { OpenRelevantApp(); return; }
+        ShellOpen(L"https://music.youtube.com/");
+    } else if (choice == L"apple-music") {
+        if (playing(L"applemusic") || playing(L"apple music")) { OpenRelevantApp(); return; }
+        if (!ShellOpen(L"shell:AppsFolder\\AppleInc.AppleMusicWin_nzyj5cx40ttqa!App")) ShellOpen(L"https://music.apple.com/");
+    } else if (available) {
+        OpenRelevantApp();
+    } else {
+        openDefaultMusic();
+    }
+}
+
+float g_studioVolumeLevelPending = -1.0f;  // last level sent while dragging, to skip repeats
+bool g_studioVolumeDrag = false;          // left button went down on the volume slider
+D2D1_RECT_F g_studioVolumeRect{};          // that slider's rect, in content space
+
+void SetStudioVolume(const MediaContentPoint& pt) {
+    const float w = g_studioVolumeRect.right - g_studioVolumeRect.left;
+    if (!pt.valid || w <= 1.0f || !g_endpointVolume) return;
+    const float level = Clamp((pt.x - g_studioVolumeRect.left) / w, 0.0f, 1.0f);
+    if (std::fabs(level - g_studioVolumeLevelPending) < 0.005f) return;
+    g_studioVolumeLevelPending = level;
+    g_endpointVolume->SetMasterVolumeLevelScalar(level, nullptr);
+    g_endpointVolume->SetMute(FALSE, nullptr);
+    g_layoutDirty = true;
+}
+
+// ── Ask Bun as a chat (Studio) ──
+// The lookup panel keeps one answer at a time; the chat view remembers the last
+// few questions and answers on the render thread, in memory only.
+struct ChatTurn {
+    std::wstring question;
+    LookupSnapshot answer;
+    uint64_t seq = 0;  // g_lookupRequestSeq when it was asked
+};
+std::vector<ChatTurn> g_chat;
+std::vector<std::wstring> g_chatChips;  // suggestion chips on screen, by hit arg
+float g_chatScroll = 0.0f;              // scrolled distance in transcript (wheel)
+float g_chatScrollMax = 0.0f;           // max scroll distance; 0 = fits in view
+uint64_t g_chatLastSeq = 0;             // request seq to detect new questions and auto-scroll
+
+int StudioHitAt(const MediaContentPoint& pt) {
+    if (!pt.valid) return -1;
+    for (int i = static_cast<int>(g_studioHits.size()) - 1; i >= 0; --i) {
+        const D2D1_RECT_F& r = g_studioHits[static_cast<size_t>(i)].rect;
+        if (pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom) return i;
+    }
+    return -1;
+}
+
+// Left button down: a press on the volume slider starts a drag (the window
+// captures the mouse until the button comes up).
+bool HandleStudioButtonDown(HWND hwnd, int x, int y) {
+    if (g_studioHits.empty()) return false;
+    const MediaContentPoint pt = StudioPointFromClient(x, y);
+    const int i = StudioHitAt(pt);
+    if (i < 0) return false;
+    const StudioHit& hit = g_studioHits[static_cast<size_t>(i)];
+    if (hit.action != StudioAction::Volume || hit.arg != 0) return false;
+    g_studioVolumeDrag = true;
+    g_studioVolumeRect = hit.rect;
+    g_studioVolumeLevelPending = -1.0f;
+    SetCapture(hwnd);
+    SetStudioVolume(pt);
+    return true;
+}
+
+// Returns true when the click belonged to the Studio frame or one of its pages.
+// Opens a dashboard page from a click. The scroll ring remembers its own stop while
+// the pointer is over the island and steers the page back to it, which undid tab
+// and All apps clicks; so the ring is moved to the clicked page too.
+void ShowDashboardTab(int tab) {
+    if (tab < 0) return;
+    g_idleTab = tab;
+    g_activityIndex.store(g_ringActivityCount.load(std::memory_order_relaxed) + tab, std::memory_order_relaxed);
+    g_layoutDirty = true;
+}
+
+bool HandleStudioClick(HWND hwnd, int x, int y) {
+    if (g_studioVolumeDrag) {
+        g_studioVolumeDrag = false;
+        ReleaseCapture();
+        SetStudioVolume(StudioPointFromClient(x, y));
+        return true;
+    }
+    if (g_studioHits.empty()) return false;
+    const MediaContentPoint pt = StudioPointFromClient(x, y);
+    const int i = StudioHitAt(pt);
+    if (i < 0) return false;
+    const StudioHit hit = g_studioHits[static_cast<size_t>(i)];
+    switch (hit.action) {
+        case StudioAction::Tab:
+            ShowDashboardTab(hit.arg);
+            break;
+        case StudioAction::Volume:
+            if (hit.arg == -1) {  // the speaker icon: mute / unmute
+                ToggleEndpointMute();
+            } else {
+                g_studioVolumeRect = hit.rect;
+                g_studioVolumeLevelPending = -1.0f;
+                SetStudioVolume(pt);
+            }
+            break;
+        case StudioAction::PlayPause:
+            SendMediaTransportCommand(1);
+            break;
+        case StudioAction::OpenMusic:
+            OpenMusicApp();
+            break;
+        case StudioAction::FocusStart:
+            StartFocusTimer(hit.arg > 0 ? hit.arg : FocusPickerMinutes(), false);
+            break;
+        case StudioAction::FocusStop:
+            StopFocusTimer();
+            break;
+        case StudioAction::AgentPage:
+            ShowDashboardTab(DashboardTabIndexOf(kTabAgent));
+            break;
+        case StudioAction::AgentFocus:
+            OpenAgentApp();
+            break;
+        case StudioAction::ClipCopy: {
+            const std::vector<std::wstring> items = ClipHistorySnapshot();
+            if (hit.arg >= 0 && hit.arg < static_cast<int>(items.size()))
+                StudioCopyText(hwnd, items[static_cast<size_t>(hit.arg)]);
+            break;
+        }
+        case StudioAction::ClipClear: {
+            std::lock_guard lock(g_stateMutex);
+            g_clipHistory.clear();
+            break;
+        }
+        case StudioAction::NoteToggle:
+            QuickNote::Toggle(hit.arg);
+            break;
+        case StudioAction::NoteEdit:
+            QuickNote::OpenInEditor();
+            break;
+        case StudioAction::Settings:
+            OpenSettingsApp();
+            break;
+        case StudioAction::FocusWheel: {
+            // Clicking the upper half of a column steps down, the lower half up.
+            const float mid = (hit.rect.top + hit.rect.bottom) * 0.5f;
+            StepFocusPicker(hit.arg, pt.y < mid ? -1 : 1);
+            break;
+        }
+        case StudioAction::FocusPreset:
+            SetFocusPicker(hit.arg);
+            break;
+        case StudioAction::FocusAdd5:
+            AddFocusMinutes(5);
+            break;
+        case StudioAction::FocusPause:
+            ToggleTimerPause();
+            break;
+        case StudioAction::FocusPage:
+            ShowDashboardTab(DashboardTabIndexOf(kTabFocus));
+            break;
+        case StudioAction::HomeEdit:
+            g_homeEdit = !g_homeEdit;
+            break;
+        case StudioAction::HomeTileCycle:
+            CycleHomeTile(hit.arg);
+            break;
+        case StudioAction::MirrorStart:
+            Mirror::Start();
+            break;
+        case StudioAction::MirrorStop:
+            Mirror::Stop();
+            break;
+        case StudioAction::OpenTab:
+            ShowDashboardTab(DashboardTabIndexOf(hit.arg));
+            break;
+        case StudioAction::OpenLink: {
+            const auto links = ParseHomeLinks(GetSettingsCopy().homeLinks);
+            if (hit.arg >= 0 && hit.arg < static_cast<int>(links.size()))
+                ShellExecuteW(nullptr, L"open", links[static_cast<size_t>(hit.arg)].second.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
+        case StudioAction::ModelCycle:
+            CycleClaudeModel();
+            break;
+        case StudioAction::AgentReply:
+            HandleAgentAction(2 /*ActReply*/, 0);
+            break;
+        case StudioAction::ColorPicker:
+            ColorPicker::Start();
+            break;
+        case StudioAction::ChatChip:
+            TouchLookupPanel();
+            if (hit.arg >= 0 && hit.arg < static_cast<int>(g_chatChips.size()))
+                SubmitLookup(g_chatChips[static_cast<size_t>(hit.arg)]);
+            break;
+        case StudioAction::ChatNew:
+            TouchLookupPanel();
+            g_chat.clear();
+            g_chatScroll = 0.0f;
+            g_chatScrollMax = 0.0f;
+            g_chatLastSeq = 0;
+            break;
+        case StudioAction::ChatPanel:
+            TouchLookupPanel();  // a click inside the chat keeps it open and focused
+            break;
+    }
+    g_layoutDirty = true;
+    return true;
+}
+
+// The wheel over the Focus page's picker turns that column. True when it did.
+bool HandleStudioWheel(HWND hwnd, LPARAM lParam, int step) {
+    if (g_studioHits.empty()) return false;
+    POINT p{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // WM_MOUSEWHEEL is in screen coordinates
+    ScreenToClient(hwnd, &p);
+    const int i = StudioHitAt(StudioPointFromClient(p.x, p.y));
+    if (i < 0 || g_studioHits[static_cast<size_t>(i)].action != StudioAction::FocusWheel) return false;
+    StepFocusPicker(g_studioHits[static_cast<size_t>(i)].arg, step);
+    return true;
+}
+
+// Which spot the pointer is over, for hover feedback (-1 = none), and the
+// volume drag. Render thread.
+// Kept as the button itself (action + arg), not its index: the hit list is rebuilt
+// every frame, and when the number of spots drawn before the header changed, an
+// index pointed at the wrong button (the gear and eyedropper never lit up).
+struct StudioHoverSpot { bool on = false; StudioAction action{}; int arg = 0; };
+StudioHoverSpot g_studioHover;
+void HandleStudioMouseMove(int x, int y) {
+    const MediaContentPoint pt = StudioPointFromClient(x, y);
+    if (g_studioVolumeDrag) {
+        SetStudioVolume(pt);
+        return;
+    }
+    const int i = g_studioHits.empty() ? -1 : StudioHitAt(pt);
+    StudioHoverSpot next;
+    if (i >= 0) next = {true, g_studioHits[static_cast<size_t>(i)].action, g_studioHits[static_cast<size_t>(i)].arg};
+    if (next.on != g_studioHover.on || next.action != g_studioHover.action || next.arg != g_studioHover.arg) {
+        g_studioHover = next;
+        g_layoutDirty = true;
+    }
+}
+
+void ClearStudioHover() {
+    if (!g_studioHover.on) return;
+    g_studioHover = {};
+    g_layoutDirty = true;
+}
+

@@ -245,6 +245,8 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         o["cursorSettingsPath"] = Str(hooks::CursorSettingsPath());
         o["copilotConnected"] = Value::Bool(hooks::CopilotHooksInstalled());
         o["copilotSettingsPath"] = Str(hooks::CopilotHooksPath());
+        o["codexConnected"] = Value::Bool(hooks::CodexHooksInstalled());
+        o["codexSettingsPath"] = Str(hooks::CodexHooksPath());
         o["hookExePath"] = Str(hooks::HookExePath());
         o["hookCmdVscode"] = Value::String(hooks::HookCommandFor("vscode", ""));
         o["hookCmdAntigravity"] = Value::String(hooks::HookCommandFor("antigravity", ""));
@@ -261,6 +263,8 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
     if (cmd == "disconnectCursor") return HookResult(hooks::UninstallCursorHooks(&report), report);
     if (cmd == "connectCopilot") return HookResult(hooks::InstallCopilotHooks(&report), report);
     if (cmd == "disconnectCopilot") return HookResult(hooks::UninstallCopilotHooks(&report), report);
+    if (cmd == "connectCodex") return HookResult(hooks::InstallCodexHooks(&report), report);
+    if (cmd == "disconnectCodex") return HookResult(hooks::UninstallCodexHooks(&report), report);
     if (cmd == "getSystem") {
         Value o = Value::Object();
         o["platform"] = Value::String("linux");
@@ -304,6 +308,15 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         o["current"] = Value::String(BUNBUN_VERSION_STR);
         o["checked"] = Value::Bool(false);
         o["error"] = Value::String("Update your package manager's copy, or download the new AppImage.");
+        return o;
+    }
+    // The Linux island has no Studio pages to photograph yet: no pictures, so
+    // Island pages shows its example drawings.
+    if (cmd == "getPagePreviews") return Value::Object();
+    if (cmd == "capturePages") {
+        Value o = Value::Object();
+        o["running"] = Value::Bool(IslandRunning());
+        o["count"] = Value::Number(0);
         return o;
     }
     *err = cmd + " isn't available on Linux yet";

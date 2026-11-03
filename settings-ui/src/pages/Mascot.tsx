@@ -1,6 +1,7 @@
 import { Check, FolderOpen, Info, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { call } from "../bridge";
+import { IdleFaceSettings } from "../ui/IdleFace";
 import { SheetImport } from "../ui/SheetImport";
 import { useStore } from "../store";
 import { ColorField, PageHead, Row, Section, Setting, Toggle } from "../ui/controls";
@@ -61,6 +62,8 @@ export function Mascot() {
   return (
     <div className="page">
       <PageHead title="Mascot studio" subtitle="Choose who lives on your island, how they look, and how much they move." />
+
+      <IdleFaceSettings />
 
       <div className="studio">
         <div>
@@ -129,6 +132,7 @@ export function Mascot() {
         <Setting k="Bunbun.MascotBlinkEvery" label="Blink every" description="0 turns blinking off." />
         <Setting k="Bunbun.MascotEyesFollow" label="Eyes follow your cursor" description="" />
         <Setting k="Bunbun.MascotCelebrate" label="Hop when a task finishes" description="" />
+        <Setting k="Bunbun.PokeReactions" />
       </Section>
 
       <Section title="Custom skins">

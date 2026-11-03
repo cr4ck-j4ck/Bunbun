@@ -6,6 +6,10 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, bool https = true)
         Wh_Log(L"Weather HttpGet: WinHttpOpen failed with error %lu", GetLastError());
         return response;
     }
+    // Bunbun: resolve, connect, send, receive (ms). Without them a weather service
+    // that stops answering (wttr.in does, now and then) held every refresh for
+    // minutes, so the fallback below never got its turn.
+    WinHttpSetTimeouts(hSession, 5000, 5000, 8000, 10000);
 
     HINTERNET hConnect = WinHttpConnect(hSession, host, https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT, 0);
     if (hConnect) {
@@ -56,16 +60,16 @@ struct HttpResult {
     }
 };
 
-HttpResult HttpGetEx(const wchar_t* host, const wchar_t* path, bool https, const wchar_t* userAgent) {
+HttpResult HttpGetEx(const wchar_t* host, const wchar_t* path, bool https, const wchar_t* userAgent,
+                     const wchar_t* headers = nullptr) {
     HttpResult result;
     HINTERNET hSession = WinHttpOpen(userAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) {
         return result;
     }
-    // resolve, connect, send, receive (ms). Without these a dead network can park
-    // the lyrics thread for a very long time.
-    WinHttpSetTimeouts(hSession, 8000, 8000, 10000, 15000);
+    // resolve, connect, send, receive (ms). Snappy timeouts for responsive lookups.
+    WinHttpSetTimeouts(hSession, 3000, 3000, 4000, 5000);
 
     HINTERNET hConnect = WinHttpConnect(hSession, host,
                                         https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT, 0);
@@ -74,7 +78,8 @@ HttpResult HttpGetEx(const wchar_t* host, const wchar_t* path, bool https, const
                                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
                                                 https ? WINHTTP_FLAG_SECURE : 0);
         if (hRequest) {
-            if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+            const DWORD hLen = headers ? static_cast<DWORD>(wcslen(headers)) : 0;
+            if (WinHttpSendRequest(hRequest, headers ? headers : WINHTTP_NO_ADDITIONAL_HEADERS, hLen,
                                    WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
                 WinHttpReceiveResponse(hRequest, nullptr)) {
                 DWORD status = 0;
@@ -165,80 +170,205 @@ std::wstring PercentEncodeUtf8(const std::wstring& text) {
     return out;
 }
 
-// Bunbun: Ask Bun "weather in Mumbai" / "rain tomorrow". A one-off wttr.in request
-// for any place ("" = the Weather city setting, else wttr.in's guess from the IP)
-// and day (0 today, 1 tomorrow). Blocking: call it from a worker thread.
+// ── Bunbun: weather from Open-Meteo ─────────────────────────────────────────
+// Open-Meteo is free, needs no key and answers in well under a second (wttr.in,
+// used before, went down for hours at a time and made every refresh wait).
+// Where: a city typed in Ask Bun or set in Settings is found with Open-Meteo's
+// geocoder; otherwise this PC's position comes from Windows' own location
+// service (no IP lookup), and its name from the coordinates. Open-Meteo's WMO
+// weather codes are mapped to the WWO codes the island's icons use.
+struct OpenMeteoReport {
+    std::wstring city, country;
+    float temp = 0, feels = 0;
+    int humidity = 0, wwo = 0;
+    std::wstring desc, wind, windDir;
+    float hi[2] = {}, lo[2] = {};
+    int rain[2] = {}, dayWwo[2] = {};
+    std::wstring dayDesc[2];
+};
+
+// WMO code (Open-Meteo) → WWO code (wttr.in, the icons) and words.
+int WmoToWwo(int wmo, bool day, std::wstring* desc) {
+    struct Map { int wmo, wwo; const wchar_t* text; };
+    static const Map kMap[] = {
+        {0, 113, L"Sunny"}, {1, 116, L"Mainly clear"}, {2, 116, L"Partly cloudy"}, {3, 122, L"Overcast"},
+        {45, 248, L"Fog"}, {48, 260, L"Freezing fog"}, {51, 266, L"Light drizzle"}, {53, 266, L"Drizzle"},
+        {55, 266, L"Heavy drizzle"}, {56, 281, L"Freezing drizzle"}, {57, 284, L"Heavy freezing drizzle"},
+        {61, 296, L"Light rain"}, {63, 302, L"Moderate rain"}, {65, 308, L"Heavy rain"},
+        {66, 311, L"Light freezing rain"}, {67, 314, L"Freezing rain"}, {71, 326, L"Light snow"},
+        {73, 332, L"Moderate snow"}, {75, 338, L"Heavy snow"}, {77, 326, L"Snow grains"},
+        {80, 353, L"Light rain shower"}, {81, 356, L"Rain shower"}, {82, 359, L"Torrential rain shower"},
+        {85, 368, L"Light snow showers"}, {86, 371, L"Snow showers"}, {95, 389, L"Thunderstorm"},
+        {96, 395, L"Thunderstorm with hail"}, {99, 395, L"Thunderstorm with heavy hail"},
+    };
+    for (const Map& m : kMap)
+        if (m.wmo == wmo) {
+            *desc = (wmo == 0 && !day) ? L"Clear" : m.text;
+            return m.wwo;
+        }
+    *desc = L"Cloudy";
+    return 119;
+}
+
+const wchar_t* CompassPoint(double degrees) {
+    static const wchar_t* kPoints[] = {L"N", L"NNE", L"NE", L"ENE", L"E", L"ESE", L"SE", L"SSE",
+                                       L"S", L"SSW", L"SW", L"WSW", L"W", L"WNW", L"NW", L"NNW"};
+    const int i = static_cast<int>(std::floor(std::fmod(degrees + 371.25, 360.0) / 22.5)) % 16;
+    return kPoints[i];
+}
+
+// This PC's position from Windows' location service (Wi-Fi based, usually a
+// second or two), and its place name from the coordinates, cached for 30
+// minutes. False when location is off for desktop apps (Settings → Privacy &
+// security → Location).
+bool DeviceLocation(double* lat, double* lon, std::wstring* city, std::wstring* country) {
+    static std::mutex s_mutex;
+    static double s_at = -1e9, s_lat = 0, s_lon = 0;
+    static std::wstring s_city, s_country;
+    std::lock_guard lock(s_mutex);
+    if (NowSeconds() - s_at > 1800) {
+        try {
+            try {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            } catch (...) {
+            }  // this thread already has one
+            namespace geo = winrt::Windows::Devices::Geolocation;
+            geo::Geolocator locator;
+            locator.DesiredAccuracy(geo::PositionAccuracy::Default);
+            const geo::Geoposition pos = locator.GetGeopositionAsync(std::chrono::minutes(30), std::chrono::seconds(10)).get();
+            const geo::BasicGeoposition p = pos.Coordinate().Point().Position();
+            s_lat = p.Latitude;
+            s_lon = p.Longitude;
+            s_at = NowSeconds();
+        } catch (...) {
+            Wh_Log(L"Weather: Windows location isn't available (off for desktop apps?)");
+            if (s_at < 0) return false;  // never had a position
+        }
+        // The place's name, from the coordinates only.
+        wchar_t path[256];
+        swprintf(path, 256, L"/data/reverse-geocode-client?latitude=%.4f&longitude=%.4f&localityLanguage=en", s_lat, s_lon);
+        bb::json::Value v;
+        const std::string res = HttpGet(L"api.bigdatacloud.net", path, true);
+        if (!res.empty() && bb::json::Parse(res, &v)) {
+            std::string name = v.getString("city");
+            if (name.empty()) name = v.getString("locality");
+            s_city = bb::todos::FromUtf8(name);
+            s_country = bb::todos::FromUtf8(v.getString("countryName"));
+        }
+    }
+    *lat = s_lat;
+    *lon = s_lon;
+    *city = s_city;
+    *country = s_country;
+    return true;
+}
+
+// Where to look: a place name through Open-Meteo's geocoder, or (empty) here.
+bool LocateForWeather(const std::wstring& place, double* lat, double* lon, std::wstring* city, std::wstring* country,
+                      bool* noLocation) {
+    if (place.empty()) {
+        const bool ok = DeviceLocation(lat, lon, city, country);
+        if (noLocation) *noLocation = !ok;
+        return ok;
+    }
+    const std::wstring path = L"/v1/search?count=1&language=en&format=json&name=" + PercentEncodeUtf8(place);
+    const std::string res = HttpGet(L"geocoding-api.open-meteo.com", path.c_str(), true);
+    bb::json::Value v;
+    if (res.empty() || !bb::json::Parse(res, &v)) return false;
+    const bb::json::Value* results = v.find("results");
+    if (!results || !results->isArray() || results->arr.empty()) return false;
+    const bb::json::Value& r = results->arr.front();
+    *lat = r.getNumber("latitude", 1000);
+    *lon = r.getNumber("longitude", 1000);
+    *city = bb::todos::FromUtf8(r.getString("name"));
+    *country = bb::todos::FromUtf8(r.getString("country"));
+    return *lat < 1000 && *lon < 1000;
+}
+
+bool FetchOpenMeteo(const std::wstring& place, bool fahrenheit, OpenMeteoReport* out, bool* noLocation = nullptr) {
+    double lat = 0, lon = 0;
+    if (!LocateForWeather(place, &lat, &lon, &out->city, &out->country, noLocation)) {
+        Wh_Log(L"Weather: couldn't locate \"%s\"", place.c_str());
+        return false;
+    }
+    wchar_t path[512];
+    swprintf(path, 512,
+             L"/v1/forecast?latitude=%.4f&longitude=%.4f&timezone=auto&forecast_days=2"
+             L"&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m"
+             L"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code%ls",
+             lat, lon, fahrenheit ? L"&temperature_unit=fahrenheit&wind_speed_unit=mph" : L"");
+    const std::string res = HttpGet(L"api.open-meteo.com", path, true);
+    bb::json::Value v;
+    if (res.empty() || !bb::json::Parse(res, &v)) return false;
+    const bb::json::Value* cur = v.find("current");
+    const bb::json::Value* daily = v.find("daily");
+    if (!cur || !cur->isObject() || !cur->find("temperature_2m")) return false;
+    out->temp = static_cast<float>(cur->getNumber("temperature_2m"));
+    out->feels = static_cast<float>(cur->getNumber("apparent_temperature"));
+    out->humidity = static_cast<int>(std::lround(cur->getNumber("relative_humidity_2m")));
+    out->wwo = WmoToWwo(static_cast<int>(cur->getNumber("weather_code")), cur->getNumber("is_day", 1) != 0, &out->desc);
+    out->wind = std::to_wstring(std::lround(cur->getNumber("wind_speed_10m")));
+    out->windDir = CompassPoint(cur->getNumber("wind_direction_10m"));
+    auto day = [&](const char* key, size_t i) -> double {
+        const bb::json::Value* a = daily ? daily->find(key) : nullptr;
+        return a && a->isArray() && a->arr.size() > i && a->arr[i].isNumber() ? a->arr[i].num : 0.0;
+    };
+    for (size_t i = 0; i < 2; ++i) {
+        out->hi[i] = static_cast<float>(day("temperature_2m_max", i));
+        out->lo[i] = static_cast<float>(day("temperature_2m_min", i));
+        out->rain[i] = static_cast<int>(day("precipitation_probability_max", i));
+        out->dayWwo[i] = WmoToWwo(static_cast<int>(day("weather_code", i)), true, &out->dayDesc[i]);
+    }
+    return true;
+}
+
+// Bunbun: Ask Bun "weather", "weather in Mumbai", "rain tomorrow in Pune".
+// `place` empty = the Weather city setting, else here. Day 0 today, 1 tomorrow.
+// Blocking: call it from a worker thread.
 bool FetchWeatherReport(const std::wstring& place, int days, std::wstring* title, std::wstring* subtitle, std::wstring* body) {
     const Settings settings = GetSettingsCopy();
     const bool f = settings.weatherFahrenheit;
     const std::wstring where = place.empty() ? settings.weatherCity : place;
-    const std::wstring encoded = PercentEncodeUtf8(where);
-    const std::wstring path = (encoded.empty() ? std::wstring(L"/") : L"/" + encoded) + L"?format=j1";
-    const std::string res = HttpGet(L"wttr.in", path.c_str(), true);
-    bb::json::Value v;
-    if (res.empty() || !bb::json::Parse(res, &v) || !v.isObject()) return false;
-    auto first = [](const bb::json::Value* a) -> const bb::json::Value* {
-        return a && a->isArray() && !a->arr.empty() ? &a->arr.front() : nullptr;
-    };
-    auto text = [](const bb::json::Value* o, const char* key) -> std::wstring {  // [{"value": "..."}]
-        const bb::json::Value* a = o ? o->find(key) : nullptr;
-        if (!a || !a->isArray() || a->arr.empty()) return {};
-        return bb::todos::FromUtf8(a->arr.front().getString("value"));
-    };
-    const bb::json::Value* now = first(v.find("current_condition"));
-    const bb::json::Value* forecast = v.find("weather");
-    if (!now || !forecast || !forecast->isArray() || forecast->arr.size() <= static_cast<size_t>(days)) return false;
-    const bb::json::Value& day = forecast->arr[static_cast<size_t>(days)];
-
-    // "Mumbai, India": the place as asked (wttr.in's nearest area is often a
-    // neighbourhood, "Ballard Estate"), with wttr.in's country so a misheard place shows.
-    const bb::json::Value* area = first(v.find("nearest_area"));
-    std::wstring name;
-    if (place.empty()) {
-        name = text(area, "areaName");
-    } else {
-        name = place;
-        for (size_t i = 0; i < name.size(); ++i)
-            if (i == 0 || name[i - 1] == L' ') name[i] = towupper(name[i]);
+    OpenMeteoReport r;
+    bool noLocation = false;
+    if (!FetchOpenMeteo(where, f, &r, &noLocation)) {
+        if (!noLocation) return false;
+        *title = L"Weather";
+        *subtitle = L"Location is off";
+        *body = L"Turn on location for desktop apps (Settings → Privacy & security → Location), or ask for a city: "
+                L"“weather in Mumbai”.";
+        return true;
     }
-    const std::wstring country = text(area, "country");
-    if (name.empty()) name = where.empty() ? std::wstring(L"Here") : where;
-    if (!country.empty() && country != name) name += L", " + country;
+    // "Mumbai, India": the place as asked, with the country so a misheard place shows.
+    std::wstring name = where.empty() ? r.city : where;
+    for (size_t i = 0; i < name.size(); ++i)
+        if (i == 0 || name[i - 1] == L' ') name[i] = towupper(name[i]);
+    if (name.empty()) name = L"Here";
+    if (!r.country.empty() && r.country != name) name += L", " + r.country;
     *title = name;
-
     const wchar_t* unit = f ? L"F" : L"C";
-    const std::wstring hi = bb::todos::FromUtf8(day.getString(f ? "maxtempF" : "maxtempC"));
-    const std::wstring lo = bb::todos::FromUtf8(day.getString(f ? "mintempF" : "mintempC"));
     wchar_t buf[512];
     if (days == 0) {
-        *subtitle = L"Weather now · wttr.in";
-        std::wstring desc = text(now, "weatherDesc");
-        while (!desc.empty() && desc.back() == L' ') desc.pop_back();
-        swprintf(buf, 512, L"%ls°%ls and %ls. Feels like %ls°, humidity %ls%%. Today %ls° / %ls°.",
-                 bb::todos::FromUtf8(now->getString(f ? "temp_F" : "temp_C")).c_str(), unit, desc.c_str(),
-                 bb::todos::FromUtf8(now->getString(f ? "FeelsLikeF" : "FeelsLikeC")).c_str(),
-                 bb::todos::FromUtf8(now->getString("humidity")).c_str(), hi.c_str(), lo.c_str());
+        *subtitle = L"Weather now · Open-Meteo";
+        swprintf(buf, 512, L"%.0f°%ls and %ls. Feels like %.0f°, humidity %d%%. Today %.0f° / %.0f°.", r.temp, unit,
+                 r.desc.c_str(), r.feels, r.humidity, r.hi[0], r.lo[0]);
     } else {
-        *subtitle = L"Tomorrow · wttr.in";
-        // Midday (the 12:00 slot of the 3-hourly list) describes the day best.
-        std::wstring desc;
-        int rain = 0;
-        if (const bb::json::Value* hourly = day.find("hourly"); hourly && hourly->isArray() && !hourly->arr.empty()) {
-            const bb::json::Value& noon = hourly->arr[std::min<size_t>(4, hourly->arr.size() - 1)];
-            desc = text(&noon, "weatherDesc");
-            for (const bb::json::Value& h : hourly->arr) rain = std::max(rain, atoi(h.getString("chanceofrain").c_str()));
-        }
-        while (!desc.empty() && desc.back() == L' ') desc.pop_back();
-        swprintf(buf, 512, L"%ls° / %ls°%ls, %ls. Chance of rain up to %d%%.", hi.c_str(), lo.c_str(), unit,
-                 desc.empty() ? L"no description" : desc.c_str(), rain);
+        *subtitle = L"Tomorrow · Open-Meteo";
+        swprintf(buf, 512, L"%.0f° / %.0f°%ls, %ls. Chance of rain up to %d%%.", r.hi[1], r.lo[1], unit, r.dayDesc[1].c_str(),
+                 r.rain[1]);
     }
     *body = buf;
-    return !hi.empty();
+    return true;
 }
 
 DWORD WINAPI WeatherThreadProc(void*) {
     // Initial delay to avoid slowing down startup
     WaitForSingleObject(g_stopEvent, 3000);
+    // Bunbun: Windows' location service is a WinRT API.
+    try {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    } catch (...) {
+    }
 
     while (WaitForSingleObject(g_stopEvent, 0) == WAIT_TIMEOUT) {
         std::wstring cityOverride;
@@ -259,151 +389,29 @@ DWORD WINAPI WeatherThreadProc(void*) {
             continue;
         }
 
-        std::wstring url = L"/?format=j1";
-        if (!cityOverride.empty()) {
-            const std::wstring encodedCity = PercentEncodeUtf8(cityOverride);
-            if (!encodedCity.empty()) {
-                url = L"/" + encodedCity + L"?format=j1";
-            }
-        }
-
-        Wh_Log(L"Weather: Requesting weather from wttr.in/host: wttr.in, path: %s", url.c_str());
-        std::string wRes = HttpGet(L"wttr.in", url.c_str(), true);
-
-        bool weatherCommitted = false;
-
-        if (!wRes.empty()) {
-            Wh_Log(L"Weather: Received response from wttr.in (size: %zu bytes)", wRes.size());
-            float temp = 0.0f;
-            int code = 0;
-            std::wstring desc = L"";
-            std::wstring windSpeed = L"";
-            std::wstring windDir = L"";
-            std::wstring humidity = L"";
-            std::wstring feelsLike = L"";
-            std::wstring cityLabel = L"Local Weather";
-
-            const char* areaStr = strstr(wRes.c_str(), "\"areaName\":");
-            if (areaStr) {
-                const char* valStr = strstr(areaStr, "\"value\":");
-                if (valStr) {
-                    valStr += 8;
-                    while (*valStr == ' ' || *valStr == '\"') valStr++;
-                    const char* end = strchr(valStr, '\"');
-                    if (end) {
-                        std::string cityA(valStr, end - valStr);
-                        int wchars_num = MultiByteToWideChar(CP_UTF8, 0, cityA.c_str(), -1, NULL, 0);
-                        if (wchars_num > 0) {
-                            std::vector<wchar_t> wstr(wchars_num);
-                            MultiByteToWideChar(CP_UTF8, 0, cityA.c_str(), -1, &wstr[0], wchars_num);
-                            cityLabel = wstr.data();
-                        }
-                    }
-                }
-            }
-
-            const char* currentStr = strstr(wRes.c_str(), "\"current_condition\":");
-            if (currentStr) {
-                auto ParseStringField = [&](const char* key, std::wstring& out) {
-                    const char* kStr = strstr(currentStr, key);
-                    if (kStr) {
-                        kStr += strlen(key);
-                        while (*kStr == ' ' || *kStr == '\"' || *kStr == ':') kStr++;
-                        const char* end = strchr(kStr, '\"');
-                        if (end) {
-                            std::string valA(kStr, end - kStr);
-                            int wchars_num = MultiByteToWideChar(CP_UTF8, 0, valA.c_str(), -1, NULL, 0);
-                            if (wchars_num > 0) {
-                                std::vector<wchar_t> wstr(wchars_num);
-                                MultiByteToWideChar(CP_UTF8, 0, valA.c_str(), -1, &wstr[0], wchars_num);
-                                out = wstr.data();
-                            }
-                        }
-                    }
-                };
-
-                const char* tempStr = strstr(currentStr, isFahrenheit ? "\"temp_F\":" : "\"temp_C\":");
-                if (tempStr) {
-                    tempStr += 9;
-                    while (*tempStr == ' ' || *tempStr == '\"') tempStr++;
-                    sscanf(tempStr, "%f", &temp);
-                }
-                const char* codeStr = strstr(currentStr, "\"weatherCode\":");
-                if (codeStr) {
-                    codeStr += 14;
-                    while (*codeStr == ' ' || *codeStr == '\"') codeStr++;
-                    sscanf(codeStr, "%d", &code);
-                }
-
-                const char* descStr = strstr(currentStr, "\"weatherDesc\":");
-                if (descStr) {
-                    const char* valStr = strstr(descStr, "\"value\":");
-                    if (valStr) {
-                        valStr += 8;
-                        while (*valStr == ' ' || *valStr == '\"') valStr++;
-                        const char* end = strchr(valStr, '\"');
-                        if (end) {
-                            std::string valA(valStr, end - valStr);
-                            int wchars_num = MultiByteToWideChar(CP_UTF8, 0, valA.c_str(), -1, NULL, 0);
-                            if (wchars_num > 0) {
-                                std::vector<wchar_t> wstr(wchars_num);
-                                MultiByteToWideChar(CP_UTF8, 0, valA.c_str(), -1, &wstr[0], wchars_num);
-                                desc = wstr.data();
-                                while(!desc.empty() && desc.back() == L' ') desc.pop_back();
-                            }
-                        }
-                    }
-                }
-
-                ParseStringField(isFahrenheit ? "\"windspeedMiles\"" : "\"windspeedKmph\"", windSpeed);
-                ParseStringField("\"winddir16Point\"", windDir);
-                ParseStringField("\"humidity\"", humidity);
-                ParseStringField(isFahrenheit ? "\"FeelsLikeF\"" : "\"FeelsLikeC\"", feelsLike);
-
-                // Treat the response as usable only if a real reading came out
-                // of it. wttr.in answers rate limiting and unknown locations
-                // with a page that contains no current_condition (or an empty
-                // one); committing that regardless is what made the island
-                // display a confident, wrong "0 degrees".
-                // 0 is not a valid WWO weather code, so it doubles as a
-                // "nothing was parsed" sentinel here.
-                weatherCommitted = (code != 0) || !desc.empty();
-
-                std::wstring finalCity = cityOverride.empty() ? cityLabel : cityOverride;
-                if (weatherCommitted) {
-                    Wh_Log(L"Weather parsed success: city=%s, temp=%.1f, feelsLike=%s, humidity=%s%%, desc=%s",
-                           finalCity.c_str(), temp, feelsLike.c_str(), humidity.c_str(), desc.c_str());
-                } else {
-                    Wh_Log(L"Weather: response had no usable reading, keeping previous data.");
-                }
-            } else {
-                Wh_Log(L"Weather: Failed to find \"current_condition\" in response.");
-            }
-
-            if (weatherCommitted) {
-                std::lock_guard lock(g_stateMutex);
-                g_state.weather.hasData = true;
-                g_state.weather.temperature = temp;
-                g_state.weather.weatherCode = code;
-                if (!cityOverride.empty()) g_state.weather.city = cityOverride;
-                else g_state.weather.city = cityLabel;
-                g_state.weather.weatherDesc = desc;
-                g_state.weather.windSpeed = windSpeed;
-                g_state.weather.windDir = windDir;
-                g_state.weather.humidity = humidity;
-                g_state.weather.feelsLike = feelsLike;
-                g_state.weather.lastUpdated = NowSeconds();
-            }
-        } else {
-            Wh_Log(L"Weather: HttpGet returned empty response.");
+        // Bunbun: Open-Meteo for the set city, or for here (Windows location).
+        OpenMeteoReport r;
+        const bool weatherCommitted = FetchOpenMeteo(cityOverride, isFahrenheit, &r);
+        if (weatherCommitted) {
+            Wh_Log(L"Weather: city=%s, temp=%.1f, desc=%s", r.city.c_str(), r.temp, r.desc.c_str());
+            std::lock_guard lock(g_stateMutex);
+            g_state.weather.hasData = true;
+            g_state.weather.temperature = r.temp;
+            g_state.weather.weatherCode = r.wwo;
+            g_state.weather.city = cityOverride.empty() ? (r.city.empty() ? std::wstring(L"Local Weather") : r.city) : cityOverride;
+            g_state.weather.weatherDesc = r.desc;
+            g_state.weather.windSpeed = r.wind;
+            g_state.weather.windDir = r.windDir;
+            g_state.weather.humidity = std::to_wstring(r.humidity);
+            wchar_t feels[16];
+            swprintf(feels, 16, L"%.0f", r.feels);
+            g_state.weather.feelsLike = feels;
+            g_state.weather.lastUpdated = NowSeconds();
         }
 
         // Retry soon after a failure instead of leaving the dashboard empty for
-        // a full refresh interval, but back off on repeated failures. wttr.in is
-        // a free community service and rate limiting is one of the failures being
-        // recovered from here, so a flat fast retry would sustain the very
-        // condition it is reacting to.
-        static const DWORD kBackoffMs[] = {60 * 1000, 2 * 60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000};
+        // a full refresh interval, but back off on repeated failures.
+        static const DWORD kBackoffMs[] = {30 * 1000, 2 * 60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000};
         static size_t backoffIndex = 0;
 
         DWORD waitMs;

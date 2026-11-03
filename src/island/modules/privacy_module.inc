@@ -324,9 +324,12 @@ void UpdatePrivacyIndicators() {
     static std::vector<std::wstring> s_mic, s_cam, s_screen;
     std::wstring alert;
     int alertKind = 0;
+    // Bunbun: no alert for Bunbun's own use (the Mirror page's camera); the dot still lights.
+    static const std::wstring s_self = ProcessName(GetCurrentProcessId());
     auto started = [&](const std::vector<std::wstring>& now, const std::vector<std::wstring>& before, int kind, const wchar_t* what) {
         for (const std::wstring& app : now) {
             if (std::find(before.begin(), before.end(), app) != before.end() || !alert.empty()) continue;
+            if (_wcsicmp(app.c_str(), s_self.c_str()) == 0 || _wcsnicmp(app.c_str(), L"bunbun", 6) == 0) continue;
             alert = app + L" " + Loc(L"is using your") + L" " + Loc(what);
             alertKind = kind;
         }

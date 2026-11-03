@@ -16,6 +16,10 @@
 //     Outcome LookupXxx(const std::wstring& query, Result* out)
 // and add one line to LookupText().
 
+// Forward declarations for Local AI helper
+void BrainWarmup();
+bool BrainTryAnswer(const std::wstring& question, uint64_t lookupId);
+
 // Wikimedia asks API clients to send a descriptive User-Agent with contact info.
 constexpr wchar_t kLookupUserAgent[] =
     BUNBUN_USER_AGENT L" QuickLookup";
@@ -53,6 +57,9 @@ struct Result {
     bool weatherFetch = false;
     std::wstring weatherPlace;
     int weatherDays = 0;
+    // Bunbun: encyclopedia or dictionary lookup: fetched in the background.
+    bool lookupFetch = false;
+    std::wstring lookupTopic;
 };
 
 // Failed means "could not get a real answer" (timeout, 429, 5xx, no network).
@@ -471,6 +478,10 @@ std::wstring StripHtml(const std::wstring& in) {
                 else if (ent == L"quot") rep = L'"';
                 else if (ent == L"apos") rep = L'\'';
                 else if (ent == L"nbsp") rep = L' ';
+                else if (ent == L"bull") rep = L'\u2022';
+                else if (ent == L"hellip") rep = L'\u2026';
+                else if (ent == L"mdash") rep = L'\u2014';
+                else if (ent == L"ndash") rep = L'\u2013';
                 else if (ent.size() > 1 && ent[0] == L'#') {
                     const unsigned long code =
                         (ent[1] == L'x' || ent[1] == L'X')
@@ -629,10 +640,198 @@ Outcome LookupWiktionary(const std::wstring& word, Result* out) {
     return Outcome::NotFound;
 }
 
+// ---- source 4: Wikipedia search API (finds the right article even for loose queries)
+Outcome LookupWikipediaSearch(const std::wstring& query, Result* out) {
+    const std::wstring path = L"/w/api.php?action=query&list=search&srsearch=" +
+                              AsciiToWide(UrlEncodeComponent(query)) + L"&format=json&utf8=1";
+    const HttpResult res = HttpGetEx(L"en.wikipedia.org", path.c_str(), true, kLookupUserAgent);
+    if (!res.IsDefinitive()) {
+        return Outcome::Failed;
+    }
+    if (res.status != 200) {
+        return Outcome::NotFound;
+    }
+
+    bb::json::Value v;
+    if (!bb::json::Parse(res.body, &v) || !v.isObject()) {
+        return Outcome::NotFound;
+    }
+    const bb::json::Value* qObj = v.find("query");
+    if (!qObj || !qObj->isObject()) {
+        return Outcome::NotFound;
+    }
+    const bb::json::Value* searchArr = qObj->find("search");
+    if (!searchArr || !searchArr->isArray() || searchArr->arr.empty()) {
+        return Outcome::NotFound;
+    }
+
+    // Try summary on top matching article title (1 request max to stay snappy)
+    if (!searchArr->arr.empty()) {
+        const std::string titleUtf8 = searchArr->arr[0].getString("title");
+        if (!titleUtf8.empty()) {
+            const std::wstring title = bb::todos::FromUtf8(titleUtf8);
+            if (LookupWikipedia(title, out) == Outcome::Found) {
+                return Outcome::Found;
+            }
+        }
+    }
+
+    // If summary wasn't found, use the search snippet directly
+    const auto& topItem = searchArr->arr.front();
+    const std::string titleUtf8 = topItem.getString("title");
+    const std::string snipUtf8 = topItem.getString("snippet");
+    if (titleUtf8.empty() || snipUtf8.empty()) {
+        return Outcome::NotFound;
+    }
+
+    Result r;
+    r.title = bb::todos::FromUtf8(titleUtf8);
+    r.subtitle = L"Wikipedia";
+    r.body = StripHtml(bb::todos::FromUtf8(snipUtf8));
+    r.source = L"Wikipedia";
+    *out = std::move(r);
+    return Outcome::Found;
+}
+
+// ---- source 5: Web Search (Bing + DuckDuckGo fallback for dates, news, and live questions)
+Outcome LookupWebSearch(const std::wstring& query, Result* out) {
+    constexpr wchar_t kBrowserUserAgent[] =
+        L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+    constexpr wchar_t kBingHeaders[] = L"Accept-Language: en-US,en;q=0.9\r\n";
+
+    const std::wstring path = L"/search?q=" + AsciiToWide(UrlEncodeComponent(query)) + L"&setlang=en&cc=US";
+    const HttpResult res = HttpGetEx(L"www.bing.com", path.c_str(), true, kBrowserUserAgent, kBingHeaders);
+    if (res.ok && res.status == 200 && !res.body.empty()) {
+        const std::string& html = res.body;
+        size_t pos = 0;
+        while ((pos = html.find("<li class=\"b_algo\"", pos)) != std::string::npos) {
+            size_t end = html.find("</li>", pos);
+            if (end == std::string::npos) break;
+            std::string block = html.substr(pos, end - pos);
+            pos = end + 5;
+
+            size_t h2 = block.find("<h2");
+            if (h2 == std::string::npos) continue;
+            size_t aOpen = block.find('>', h2);
+            if (aOpen == std::string::npos) continue;
+            size_t h2End = block.find("</h2>", aOpen);
+            if (h2End == std::string::npos) continue;
+            std::wstring title = StripHtml(bb::todos::FromUtf8(block.substr(aOpen + 1, h2End - aOpen - 1)));
+
+            size_t pOpen = block.find("<p", h2End);
+            if (pOpen == std::string::npos) continue;
+            size_t pText = block.find('>', pOpen);
+            if (pText == std::string::npos) continue;
+            size_t pEnd = block.find("</p>", pText);
+            if (pEnd == std::string::npos) continue;
+            std::wstring snip = StripHtml(bb::todos::FromUtf8(block.substr(pText + 1, pEnd - pText - 1)));
+
+            if (!title.empty() && !snip.empty() && snip.size() > 15) {
+                Result r;
+                r.title = ClipToChars(title, 80);
+                r.subtitle = L"Web Search";
+                r.body = ClipToChars(snip, kMaxBodyChars);
+                r.source = L"Web Search";
+                *out = std::move(r);
+                return Outcome::Found;
+            }
+        }
+    }
+
+    // DuckDuckGo Lite fallback
+    const std::wstring ddgPath = L"/lite/?q=" + AsciiToWide(UrlEncodeComponent(query));
+    const HttpResult ddgRes = HttpGetEx(L"lite.duckduckgo.com", ddgPath.c_str(), true, kBrowserUserAgent);
+    if (ddgRes.ok && ddgRes.status == 200 && !ddgRes.body.empty()) {
+        const std::string& html = ddgRes.body;
+        size_t tOpen = html.find("class=\"result-link\"");
+        if (tOpen != std::string::npos) {
+            size_t tStart = html.find('>', tOpen);
+            size_t tEnd = html.find("</a>", tStart);
+            size_t sOpen = html.find("class=\"result-snippet\"", tEnd);
+            if (tStart != std::string::npos && tEnd != std::string::npos && sOpen != std::string::npos) {
+                size_t sStart = html.find('>', sOpen);
+                size_t sEnd = html.find("</td>", sStart);
+                if (sStart != std::string::npos && sEnd != std::string::npos) {
+                    std::wstring title = StripHtml(bb::todos::FromUtf8(html.substr(tStart + 1, tEnd - tStart - 1)));
+                    std::wstring snip = StripHtml(bb::todos::FromUtf8(html.substr(sStart + 1, sEnd - sStart - 1)));
+                    if (!title.empty() && !snip.empty()) {
+                        Result r;
+                        r.title = ClipToChars(title, 80);
+                        r.subtitle = L"Web Search";
+                        r.body = ClipToChars(snip, kMaxBodyChars);
+                        r.source = L"Web Search";
+                        *out = std::move(r);
+                        return Outcome::Found;
+                    }
+                }
+            }
+        }
+    }
+
+    return Outcome::NotFound;
+}
+
+std::wstring CleanSearchQuery(const std::wstring& raw) {
+    std::wstring q = ToLowerCopy(raw);
+    static const wchar_t* const kPrefixes[] = {
+        L"who was the main star in ", L"who was the star in ", L"who was the main ", L"who was the ",
+        L"who is the main star in ", L"who is the star in ", L"who is the ", L"who are the ",
+        L"who was ", L"who is ", L"who were ",
+        L"what is the date of ", L"what is the date for ", L"what is the ", L"what was the ",
+        L"what are the ", L"when is the ", L"when was the ", L"when is ", L"when was ",
+        L"where is the ", L"where is ", L"where was ",
+        L"tell me about the ", L"tell me about ",
+        L"can you tell me about ", L"can you tell me "
+    };
+    for (const wchar_t* p : kPrefixes) {
+        const size_t n = wcslen(p);
+        if (q.size() > n && q.compare(0, n, p) == 0) {
+            std::wstring res = raw.substr(n);
+            while (!res.empty() && (res.back() == L'?' || res.back() == L'.' || res.back() == L'!')) res.pop_back();
+            return res;
+        }
+    }
+    std::wstring res = raw;
+    while (!res.empty() && (res.back() == L'?' || res.back() == L'.' || res.back() == L'!')) res.pop_back();
+    return res;
+}
+
+// Fetches live search evidence snippets (combining Wikipedia & Web Search in parallel) for grounding the local AI.
+std::wstring FetchLiveSearchEvidence(const std::wstring& query) {
+    const std::wstring clean = CleanSearchQuery(query);
+
+    // Fetch Web Search and Wikipedia in parallel threads to cut network latency in half
+    auto futWeb = std::async(std::launch::async, [clean, query]() -> std::wstring {
+        Result rWeb;
+        if (LookupWebSearch(query, &rWeb) == Outcome::Found) {
+            return L"- Web Search (" + rWeb.title + L"): " + rWeb.body + L"\n";
+        } else if (clean != query && LookupWebSearch(clean, &rWeb) == Outcome::Found) {
+            return L"- Web Search (" + rWeb.title + L"): " + rWeb.body + L"\n";
+        }
+        return L"";
+    });
+
+    auto futWiki = std::async(std::launch::async, [clean, query]() -> std::wstring {
+        Result rWiki;
+        if (clean != query && LookupWikipediaSearch(clean, &rWiki) == Outcome::Found) {
+            return L"- Wikipedia (" + rWiki.title + L"): " + rWiki.body + L"\n";
+        } else if (LookupWikipediaSearch(query, &rWiki) == Outcome::Found) {
+            return L"- Wikipedia (" + rWiki.title + L"): " + rWiki.body + L"\n";
+        }
+        return L"";
+    });
+
+    std::wstring evidence = futWeb.get();
+    const std::wstring wWiki = futWiki.get();
+    if (!wWiki.empty()) {
+        evidence += wWiki;
+    }
+    return evidence;
+}
+
 // ---- router -----------------------------------------------------------------------
-// Single words:  Wiktionary -> dictionaryapi.dev (backup) -> Wikipedia
-// Phrases:       Wikipedia  -> Wiktionary (idioms like "kick the bucket")
-// To add a source: write LookupXxx() above and add one attempt() line below.
+// Single words:  Wiktionary -> dictionaryapi.dev (backup) -> Wikipedia -> Web Search
+// Phrases:       Wikipedia  -> Wikipedia Search -> Web Search -> Wiktionary
 Outcome LookupText(const std::wstring& query, Result* out) {
     const bool singleWord = query.find(L' ') == std::wstring::npos;
 
@@ -647,8 +846,12 @@ Outcome LookupText(const std::wstring& query, Result* out) {
         if (attempt(LookupWiktionary(query, out))) return Outcome::Found;
         if (attempt(LookupDictionary(query, out))) return Outcome::Found;
         if (attempt(LookupWikipedia(query, out))) return Outcome::Found;
+        if (attempt(LookupWikipediaSearch(query, out))) return Outcome::Found;
+        if (attempt(LookupWebSearch(query, out))) return Outcome::Found;
     } else {
         if (attempt(LookupWikipedia(query, out))) return Outcome::Found;
+        if (attempt(LookupWikipediaSearch(query, out))) return Outcome::Found;
+        if (attempt(LookupWebSearch(query, out))) return Outcome::Found;
         if (attempt(LookupWiktionary(query, out))) return Outcome::Found;
     }
 
@@ -666,9 +869,9 @@ Outcome LookupText(const std::wstring& query, Result* out) {
 
 constexpr size_t kMaxDictionaryChars = 80;
 
-// Strips a "define " / "wiki " prefix. Returns true when the query is for Bun.
+// Strips a "define " / "wiki " / "lookup " prefix. Returns true when the query is for Bun.
 bool RouteToBun(std::wstring* query) {
-    for (const wchar_t* prefix : {L"define ", L"wiki ", L"dict "}) {
+    for (const wchar_t* prefix : {L"define ", L"wiki ", L"dict ", L"lookup ", L"wikipedia "}) {
         const size_t n = wcslen(prefix);
         if (query->size() > n && _wcsnicmp(query->c_str(), prefix, n) == 0) {
             query->erase(0, n);
@@ -792,6 +995,7 @@ void ForceForeground(HWND hwnd) {
 // The island is WS_EX_NOACTIVATE so it never steals focus. While the search box is
 // open it has to be able to receive keys, so the flag is dropped for the session.
 void BeginLookupSession(HWND hwnd) {
+    BrainWarmup();  // Pre-warm local AI helper in background so first query has 0ms cold-start
     HWND previous = GetForegroundWindow();
     g_lookupUi.prevForeground = (previous && previous != hwnd) ? previous : nullptr;
 
@@ -805,7 +1009,11 @@ void BeginLookupSession(HWND hwnd) {
     ForceForeground(hwnd);
 }
 
+bool SubmitCompose(const std::wstring& raw);  // Bunbun: text aimed at an agent (studio_module.inc)
+void ClearCompose();
+
 void EndLookupSession(HWND hwnd) {
+    ClearCompose();  // Bunbun: closing the box drops a half-written reply's target
     if (!g_lookupUi.open) return;
     HWND previous = g_lookupUi.prevForeground;
     const bool hadFocus = GetForegroundWindow() == hwnd;
@@ -833,6 +1041,7 @@ QuickLookup::Result RunBun(const std::wstring& question);  // Bunbun, defined wi
 bool BrainTryAnswer(const std::wstring& question, uint64_t lookupId);  // Bunbun: brain_module.inc
 
 void SubmitLookup(const std::wstring& rawText) {
+    if (SubmitCompose(rawText)) return;  // Bunbun: plan feedback, a reply, a typed answer
     const std::wstring query = QuickLookup::NormalizeQuery(rawText);
     if (query.empty() || query.size() > QuickLookup::kMaxQueryChars) {
         return;
@@ -880,20 +1089,61 @@ void SubmitLookup(const std::wstring& rawText) {
             }).detach();
             return;
         }
-        if (result.unknown && GetSettingsCopy().localAi) {
-            // Bunbun: nothing matched, so the local AI takes it; its reply streams
-            // into this card (brain_module.inc). Off or not set up: the usual reply.
-            QuickLookup::Result thinking = result;
-            thinking.body = Loc(L"Thinking…");
-            thinking.unknown = false;  // not puzzled yet: the local AI is on it
-            QuickLookup::FillSnapshot(snap, query, true, &thinking, now);
+        if (result.lookupFetch) {
+            // Bunbun: online encyclopedia or dictionary lookup from Bun.
+            snap.status = LookupStatus::Loading;
+            snap.source = L"Bun";
+            snap.expiresAt = now + QuickLookup::kLoadingTimeoutSeconds;
             const uint64_t id = PublishNewLookup(snap, false);
-            if (BrainTryAnswer(query, id)) {
-                ui.historyPos = -1;
-                std::lock_guard lock(g_stateMutex);
-                QuickLookup::PushRecentLocked(g_state, query, result);
-                return;
+            ui.historyPos = -1;
+            std::thread([id, query, topic = result.lookupTopic]() {
+                QuickLookup::Result r;
+                r.source = L"Bun";
+                const QuickLookup::Outcome outcome = QuickLookup::LookupText(topic, &r);
+                if (outcome == QuickLookup::Outcome::Found) {
+                    QuickLookup::ApplyResult(id, query, true, r);
+                } else {
+                    r.confused = true;
+                    r.title = topic;
+                    r.body = L"Couldn’t find an encyclopedia or dictionary entry for “" + topic + L"”.";
+                    QuickLookup::ApplyResult(id, query, true, r);
+                }
+            }).detach();
+            return;
+        }
+        if (result.unknown) {
+            if (GetSettingsCopy().localAi) {
+                // Bunbun: nothing matched, so the local AI takes it; its reply streams
+                // into this card (brain_module.inc). Off or not set up: fall back to internet lookup.
+                QuickLookup::Result thinking = result;
+                thinking.body = Loc(L"Thinking…");
+                thinking.unknown = false;  // not puzzled yet: the local AI is on it
+                QuickLookup::FillSnapshot(snap, query, true, &thinking, now);
+                const uint64_t id = PublishNewLookup(snap, false);
+                if (BrainTryAnswer(query, id)) {
+                    ui.historyPos = -1;
+                    std::lock_guard lock(g_stateMutex);
+                    QuickLookup::PushRecentLocked(g_state, query, result);
+                    return;
+                }
             }
+            // Bunbun: Local AI is off or unavailable; seamlessly fall back to internet lookup
+            // (Wikipedia / Wiktionary) so the user still gets a real answer.
+            snap.status = LookupStatus::Loading;
+            snap.source = L"Bun";
+            snap.expiresAt = now + QuickLookup::kLoadingTimeoutSeconds;
+            const uint64_t id = PublishNewLookup(snap, false);
+            ui.historyPos = -1;
+            std::thread([id, query, fallback = result]() {
+                QuickLookup::Result r;
+                const QuickLookup::Outcome outcome = QuickLookup::LookupText(query, &r);
+                if (outcome == QuickLookup::Outcome::Found) {
+                    QuickLookup::ApplyResult(id, query, true, r);
+                } else {
+                    QuickLookup::ApplyResult(id, query, true, fallback);
+                }
+            }).detach();
+            return;
         }
         QuickLookup::FillSnapshot(snap, query, true, &result, now);
         // Bunbun: a command that ran (open, dnd, volume, timer…) only flashes its

@@ -6,7 +6,7 @@
 
 **A native Dynamic Island for Windows and Linux, with a small bunny named Bun who keeps an eye on your coding agents.**
 
-[Get started](#get-started) · [Features](#features) · [Settings](#the-settings-app) · [Docs](#documentation)
+[Get started](#get-started) · [Studio](#the-studio-island) · [Features](#features) · [Settings](#the-settings-app) · [Docs](#documentation)
 
 </div>
 
@@ -22,8 +22,33 @@ It's C++20, Win32 and Direct2D: no Electron, about **30 MB of memory** and **1�
 while idle.
 
 <p align="center">
-  <img src="docs/images/settings-overview.png" alt="The Bunbun settings app: overview page with a live island preview" width="820">
+  <img src="docs/images/studio-home.png" alt="The Studio island: date and time, the Claude Code, Music and Focus cards, and the tab bar" width="640">
 </p>
+
+## The Studio island
+
+Open the island and it becomes a small dashboard: the date and time on top, your **Home cards** (by
+default your coding agent, what's playing and a focus timer), and a tab bar along the bottom with
+every page and a volume slider. Scroll or click a tab to move between pages. Titles, tabs and
+highlights follow the colour of the album you're playing; each coding agent keeps its own colour.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/studio-music.png" alt="Studio Music page"><br><sub><b>Music.</b> Cover, controls, a seek bar and live bars that move with the song.</sub></td>
+    <td width="50%"><img src="docs/images/studio-lyrics.png" alt="Studio Lyrics page"><br><sub><b>Lyrics.</b> Synced lyrics, with the line being sung lighting up.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/studio-agent.png" alt="Studio Agent page"><br><sub><b>Agent.</b> What your coding agent is doing, tasks done today and your usage limits.</sub></td>
+    <td width="50%"><img src="docs/images/studio-calendar.png" alt="Studio Calendar page"><br><sub><b>Calendar.</b> The month, and your next meeting and to-dos beside it.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/studio-focus.png" alt="Studio Focus page"><br><sub><b>Focus.</b> Pick hours and minutes, or a preset, and start.</sub></td>
+    <td width="50%"><img src="docs/images/studio-apps.png" alt="Studio All apps page"><br><sub><b>All apps.</b> Every page, the colour picker and Settings in one grid.</sub></td>
+  </tr>
+</table>
+
+Choose which pages the island has, put them in any order and pick the three Home cards in
+**Settings → Island pages**. Prefer the original look? Switch to **Classic** on the same screen.
 
 ## Features
 
@@ -56,13 +81,20 @@ settles in with a snack when you turn on mascot do-not-disturb. You can also loa
 
 | | |
 |---|---|
-| **Music** | Album art, controls, waveform, synced lyrics, and the song title on the collapsed pill |
+| **Music** | Album art, controls, live bars, synced lyrics, and the song title or the current lyric line on the small island (it sizes itself to the song) |
 | **Dashboards** | Hover to expand, scroll to switch: calendar, weather, hardware monitor (CPU, RAM, GPU, disk, network speed), connectivity (tap Wi-Fi or Bluetooth to toggle, hold it to pick a network or device; battery on laptops), file shelf |
 | **System flyouts** | Volume, brightness, battery, Bluetooth devices, Caps Lock |
 | **To-dos & reminders** | Ask Bun `add buy milk`, `remind me at 3pm to call Sam` or `remind me every weekday at 9 to stand up`; a To-do tab, a reminder pill with Snooze and Done (quiet in full screen, presentations and meetings), and a To-dos page in Settings to edit and reschedule. Stored on your PC only |
 | **Focus mode** | `focus 50`: a timer, the mascot on do-not-disturb, notifications held back, and a summary of what you ticked off |
 | **Meetings** | Paste your calendar's private iCal link (Google or Outlook) and the island counts down to your next meeting with a **Join** button |
 | **Downloads** | Browser downloads show as they arrive (name, size, speed), then "Downloaded" |
+| **Studio layout** | The default ([see above](#the-studio-island)): a header, Home cards, an icon tab bar with a volume slider, and Ask Bun as a chat. Classic, the original island, is one click away |
+| **Clipboard & note** | Your last 8 copies (click to copy again) and one quick note with checkboxes |
+| **Colour picker** | Pick any pixel on screen with a magnifier and copy it as HEX, RGB or HSL |
+| **Focus** | A focus page with an hours/minutes picker, presets, +5 min and an optional nudge when a distracting app comes up |
+| **Home your way** | Pick what each Home card shows (agent, music, focus, weather, calendar, battery or system), add up to four links under them, and open any page from All apps |
+| **Mirror** | An optional camera preview before a call; the camera runs only while it's on |
+| **Tuck away** | Ctrl+Alt+H folds the island to a thin status line; point at it to bring it back. It can also tuck itself while a video or game is full screen |
 | **Notifications & clipboard** | App toasts and a peek at what you copy |
 | **Local AI (optional)** | Turn on a small language model that runs offline on your PC. Bun then answers free-form questions and works like an agent: "get me ready for a meeting" turns on DND, lowers the volume and opens Teams; "is it warmer in Delhi or Mumbai?" looks both up and compares. No account, no keys; you download the model yourself ([guide](docs/local-ai.md)) |
 | **Privacy dots** | Orange while the microphone is in use, green for the camera, blue while the screen is recorded, and a short note naming the app ("Discord is using your microphone") |
@@ -70,16 +102,29 @@ settles in with a snack when you turn on mascot do-not-disturb. You can also loa
 
 ## The settings app
 
-Every option has a home, and changes apply to the island the moment you make them.
+Every option has a home, and changes reach the island the moment you make them. If a change ever
+can't be saved, a banner says so and offers to try again.
+
+<p align="center">
+  <img src="docs/images/settings-pages.png" alt="Island pages: layout, and the Home cards with a real picture of your island" width="820">
+</p>
+
+**Island pages** shows real pictures of your own island. Pick Studio or Classic, choose what each
+Home card shows, then switch pages on or off and drag them into order. The pictures keep themselves
+up to date: the island saves one whenever you look at a page.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/settings-appearance.png" alt="Appearance: shapes and themes"><br><sub><b>Appearance.</b> Pill, macOS-style notch or Windows 11 shape, themes, and a live preview of your real island on your wallpaper.</sub></td>
-    <td width="50%"><img src="docs/images/settings-displays.png" alt="Position and displays"><br><sub><b>Position & displays.</b> Any screen, or all of them, with its own top or bottom position per display.</sub></td>
+    <td width="50%"><img src="docs/images/settings-pages-list.png" alt="Island pages: every page with its picture, a switch and a drag handle"><br><sub><b>Pages.</b> Every page with its picture, a switch, and a handle to drag it into place.</sub></td>
+    <td width="50%"><img src="docs/images/settings-features.png" alt="Features: a grid of feature switches"><br><sub><b>Features.</b> Grouped switches; click one for its options. What you turn off stops completely.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/settings-animations.png" alt="Animations with spring previews"><br><sub><b>Animations.</b> Four motion styles, each previewed with the island's real spring and an overshoot trace.</sub></td>
-    <td width="50%"><img src="docs/images/settings-features.png" alt="Features"><br><sub><b>Features.</b> Turn on what you use; disabled features stop their background work completely.</sub></td>
+    <td width="50%"><img src="docs/images/settings-assistant.png" alt="Assistant and agents"><br><sub><b>Assistant & agents.</b> Ask Bun, optional local AI, and connecting Claude Code, Antigravity, Cursor, Copilot and Codex.</sub></td>
+    <td width="50%"><img src="docs/images/settings-mascot.png" alt="Mascot studio"><br><sub><b>Mascot studio.</b> Characters, moods, eyes or mascot on the idle island, and your own skin packs.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/settings-appearance.png" alt="Appearance: shapes and themes"><br><sub><b>Appearance.</b> Pill, notch or Windows 11 shape, themes, and a live preview of your island on your wallpaper.</sub></td>
+    <td width="50%"><img src="docs/images/settings-displays.png" alt="Position and displays"><br><sub><b>Position & displays.</b> Any screen, or all of them, top or bottom per display.</sub></td>
   </tr>
 </table>
 
@@ -137,6 +182,7 @@ modules are still being ported. See [Bunbun on Linux](docs/linux.md) for what wo
 |---|---|
 | Ctrl+Alt+B | Opens Ask Bun |
 | Ctrl+Alt+D | Hides or shows the island |
+| Ctrl+Alt+H | Tucks the island into a thin line; point at it to bring it back |
 
 Hover the island to expand it, scroll to step through activities and dashboards, and right-click it
 for quick options. Settings live in `%APPDATA%\Bunbun\settings.ini`.
@@ -159,7 +205,9 @@ for quick options. Settings live in `%APPDATA%\Bunbun\settings.ini`.
 
 No telemetry and no AI service. The optional local AI runs entirely on your PC. The network is used only by the weather, lyrics and dictionary
 modules (and weather for a city you ask about), by the calendar link you add (fetched every 5 minutes), by web searches you ask Bun for, and by a once-a-day update check that asks GitHub for the
-latest release (turn it off in **Settings → General → Updates**). Agent hooks talk to the island
+latest release (turn it off in **Settings → General → Updates**). Weather comes from Open-Meteo; with
+no city set, the location comes from Windows' own location service (never from your IP address),
+and its coordinates are sent to Open-Meteo and to BigDataCloud for the place name. Agent hooks talk to the island
 over a local pipe that only your user account can open.
 
 ## Updates

@@ -6,14 +6,14 @@ Comment=A Dynamic Island with a mascot that watches your coding agents
 Exec=bunbun
 Icon=bunbun
 Terminal=false
-Categories=Utility;Development;
+Categories=Utility;
 Keywords=island;notch;media;agents;claude;mascot;
 StartupNotify=false
 Actions=Settings;Quit;
 
 [Desktop Action Settings]
 Name=Settings
-Exec=sh -c 'exec "$(dirname "$(readlink -f "$(command -v bunbun)")")/bunbun-settings"'
+Exec=bunbun --settings
 
 [Desktop Action Quit]
 Name=Quit Bunbun

@@ -47,6 +47,7 @@ enum class Action {
     BrightnessUp,
     BrightnessDown,
     Undo,           // put back what the last command changed
+    Lookup,         // Bunbun: online encyclopedia / dictionary lookup (Wikipedia / Wiktionary)
     Info,         // `info` says which
 };
 

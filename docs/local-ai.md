@@ -109,7 +109,7 @@ steps, and every step is an ordinary Ask Bun command, so `undo` reverts the last
    yourself. It can't lock the PC, take screenshots or undo. If the command isn't one Bun knows,
    the model is asked again for a plain answer instead. Steps that look something up (weather,
    battery, your list, what's playing) send their results back to the model, which then answers.
-   Weather for another city is the only step that uses the network (wttr.in).
+   Weather for another city is the only step that uses the network (Open-Meteo).
 5. After 5 idle minutes (**Free the model's memory after**) the helper closes and its memory is
    freed. It closes with Bunbun too.
 

@@ -97,27 +97,37 @@ constexpr const char* kSystem =
     "timer <N> min | focus <N> | stop focus | add <to-do> | remind me at <time> to <thing> | remind me in <N> min to <thing>\n"
     "remind me every day at <time> to <thing> | remind me every <weekday> at <time> to <thing> | done <to-do>\n"
     "wifi on | wifi off | bluetooth on | bluetooth off | brightness <0-100> | brighter | dim the screen | dnd on | dnd off\n"
-    "search <words>\n"
-    "Lookups (you get the results back, then answer): weather | weather in <city> | weather tomorrow | battery | cpu |\n"
+    "Lookups (you get the results back, then answer): search <topic> | wiki <topic> | weather | weather in <city> | weather tomorrow | battery | cpu |\n"
     "what's playing | my list | what time is it\n"
     "Questions about the user's day (time, meetings, to-dos, music) are answered with SAY using the facts given.\n"
+    "Answer calculations, arithmetic, and general reasoning directly with SAY.\n"
     "Never invent facts. If you don't know, say so.";
 
 const std::pair<const char*, const char*> kExamples[] = {
     {"remind me before my 3pm meeting to grab my charger", "RUN: remind me at 2:55pm to grab my charger"},
     {"it's way too loud", "RUN: volume down"},
     {"what should I name my grey cat?", "SAY: How about Smokey, Ash or Pebble? Smokey suits a grey cat nicely."},
+    {"what is 45 times 12?", "SAY: 45 times 12 is 540."},
     {"I need to concentrate for an hour", "RUN: focus 60"},
     {"who are you?", "SAY: I'm Bun, your little assistant in the island. I can set reminders, control music and volume, and answer quick questions."},
     {"put eggs on my shopping list", "RUN: add buy eggs"},
     {"[Now: Monday 9:10am. Next meeting: Design review at 11:00am.] when's my next meeting?", "SAY: Your next meeting is Design review at 11:00am."},
     {"explain what a dynamic island is", "SAY: It's a pill at the top of the screen that grows to show what's going on: music, timers, calls and alerts."},
+    {"when is diwali in 2026?", "RUN: search diwali 2026 date"},
+    {"[Results for: when is diwali in 2026?]\n- Web Search: Diwali 2026 falls on Sunday, 8 November (Lakshmi Puja).\nAnswer with SAY.",
+     "SAY: Diwali in 2026 is celebrated on Sunday, November 8."},
+    {"who walked in victoria's secret 2026?", "RUN: search victoria's secret 2026"},
+    {"[Results for: who walked in victoria's secret 2026?]\n- Wikipedia (Victoria's Secret Fashion Show 2026): The show featured models Gigi Hadid, Bella Hadid, Adriana Lima, and Kylie Jenner.\nAnswer with SAY.",
+     "SAY: The 2026 Victoria's Secret show featured stars including Kylie Jenner, Bella Hadid, Gigi Hadid, and Adriana Lima."},
     // Agent: several steps at once, and lookups whose results come back for the answer.
     {"get me ready for a meeting", "RUN: dnd on\nRUN: volume 20\nRUN: open teams\nSAY: You're all set. Good luck!"},
     {"wind down for the night", "RUN: dim the screen\nRUN: volume 15\nRUN: dnd on\nSAY: Lights low and quiet. Sleep well!"},
     {"is it warmer in delhi or mumbai right now?", "RUN: weather in delhi\nRUN: weather in mumbai"},
     {"[Results for: is it warmer in delhi or mumbai right now?]\n- weather in delhi: 34°C and Sunny.\n- weather in mumbai: 29°C and Light rain.\nAnswer with SAY.",
      "SAY: Delhi is warmer: 34°C and sunny, while Mumbai is 29°C with light rain."},
+    {"tell me about the james webb telescope", "RUN: wiki james webb space telescope"},
+    {"[Results for: tell me about the james webb telescope]\n- wiki james webb space telescope: James Webb Space Telescope (Wikipedia): The James Webb Space Telescope is a space telescope designed primarily to conduct infrared astronomy.\nAnswer with SAY.",
+     "SAY: The James Webb Space Telescope is an advanced space observatory that conducts infrared astronomy to study the early universe and distant galaxies."},
 };
 
 // What Bun knows right now, for questions about the user's day.
@@ -153,7 +163,7 @@ std::wstring Context() {
 
 // `results`: the lookups a plan ran ("- weather in pune: 31°C…" lines). Then
 // the model only writes the answer, from those results.
-std::string Request(int id, const std::wstring& question, bool sayOnly, const std::wstring& results = {}) {
+std::string Request(int id, uint64_t lookupId, const std::wstring& question, bool sayOnly, const std::wstring& results = {}) {
     using bb::json::Value;
     Value msgs = Value::Array();
     auto add = [&](const char* role, const std::string& content) {
@@ -162,20 +172,43 @@ std::string Request(int id, const std::wstring& question, bool sayOnly, const st
         m["content"] = Value::String(content);
         msgs.push(std::move(m));
     };
+    if (!results.empty()) {
+        // Lean, lightning-fast grounded prompt (evaluates in ~30ms instead of 1000ms)
+        add("system", "You are Bun, the little assistant inside the user's desktop dynamic island.\n"
+                      "Answer the question concisely in 1-2 sentences using only the search results provided.\n"
+                      "Always answer directly with SAY: <answer>.");
+        add("user", "[Results for: when is diwali in 2026?]\n- Web Search: Diwali 2026 is celebrated on Sunday, November 8, 2026.\nAnswer with SAY.");
+        add("assistant", "SAY: Diwali in 2026 is celebrated on Sunday, November 8.");
+        add("user", "[Results for: " + Utf8(question) + "]\n" + Utf8(results) + "Answer with SAY.");
+        Value req = Value::Object();
+        req["id"] = Value::Number(id);
+        req["messages"] = std::move(msgs);
+        req["max_tokens"] = Value::Number(90);
+        req["mode"] = Value::String("say");
+        return bb::json::Serialize(req) + "\n";
+    }
+
     add("system", kSystem);
     for (const auto& [q, a] : kExamples) {
         add("user", q);
         add("assistant", a);
     }
-    if (!results.empty())
-        add("user", "[Results for: " + Utf8(question) + "]\n" + Utf8(results) + "Answer with SAY.");
-    else
-        add("user", "[Now: " + Utf8(Context()) + "] " + Utf8(question) + (sayOnly ? " (Answer in words.)" : ""));
+    // Multi-turn conversational context: include up to 3 previous completed turns from g_chat
+    const size_t nTurns = g_chat.size();
+    const size_t startTurn = (nTurns > 3) ? (nTurns - 3) : 0;
+    for (size_t k = startTurn; k < nTurns; ++k) {
+        const auto& t = g_chat[k];
+        if (t.seq == lookupId) continue;
+        if (t.question.empty() || t.answer.body.empty() || t.answer.status != LookupStatus::Found) continue;
+        add("user", Utf8(t.question));
+        add("assistant", "SAY: " + Utf8(t.answer.body));
+    }
+    add("user", "[Now: " + Utf8(Context()) + "] " + Utf8(question) + (sayOnly ? " (Answer in words.)" : ""));
     Value req = Value::Object();
     req["id"] = Value::Number(id);
     req["messages"] = std::move(msgs);
-    req["max_tokens"] = Value::Number(220);
-    if (sayOnly || !results.empty()) req["mode"] = Value::String("say");
+    req["max_tokens"] = Value::Number(120);
+    if (sayOnly) req["mode"] = Value::String("say");
     return bb::json::Serialize(req) + "\n";
 }
 
@@ -197,6 +230,10 @@ void ShowInCard(uint64_t lookupId, const std::wstring& body, bool final, bool ta
         lk.subtitle = L"Bun · local AI";
         // Keep the card up while it's being written, and long enough to read after.
         lk.expiresAt = std::max(lk.expiresAt, NowSeconds() + (final ? QuickLookup::kResultSeconds : 30.0));
+    }
+    if (!g_chat.empty() && g_chat.back().seq == lookupId) {
+        g_chat.back().answer.body = body;
+        g_chat.back().answer.status = LookupStatus::Found;
     }
     g_layoutDirty = true;
     if (g_hwnd) PostMessageW(g_hwnd, WM_APP_NEW_EVENT, 0, 0);
@@ -348,6 +385,17 @@ bool Send(const std::string& line) {
     return WriteFile(g_in, line.data(), static_cast<DWORD>(line.size()), &written, nullptr) && written == line.size();
 }
 
+// Pre-warms the local AI helper in the background so the model is loaded when the user enters text
+void Warmup() {
+    const Settings settings = GetSettingsCopy();
+    if (!settings.localAi) return;
+    const std::wstring model = ModelPath(settings);
+    if (model.empty() || GetFileAttributesW(HelperPath().c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    if (!Running()) {
+        Start(model);
+    }
+}
+
 // Starts a question (or its "say only" retry). Window thread.
 bool Ask(const std::wstring& question, uint64_t lookupId, bool sayOnly, const std::wstring& results = {},
          const std::wstring& prefix = {}) {
@@ -372,7 +420,7 @@ bool Ask(const std::wstring& question, uint64_t lookupId, bool sayOnly, const st
         g_pending.prefix = prefix;
         g_lastUse = NowSeconds();
     }
-    if (!Send(Request(id, question, sayOnly, results))) {
+    if (!Send(Request(id, lookupId, question, sayOnly, results))) {
         Stop();
         return false;
     }
@@ -381,12 +429,48 @@ bool Ask(const std::wstring& question, uint64_t lookupId, bool sayOnly, const st
 
 }  // namespace Brain
 
+void BrainWarmup() {
+    Brain::Warmup();
+}
+
 // Ask Bun: a question the parser didn't understand. Returns false when Local AI
 // is off or not set up (no helper, no model), so the usual reply is shown.
 bool BrainTryAnswer(const std::wstring& question, uint64_t lookupId) {
-    if (!GetSettingsCopy().localAi) return false;
-    if (!Brain::Ask(question, lookupId, false)) return false;
-    Brain::ShowInCard(lookupId, Loc(L"Thinking…"), false);
+    const Settings settings = GetSettingsCopy();
+    if (!settings.localAi) return false;
+    const std::wstring model = Brain::ModelPath(settings);
+    if (model.empty() || GetFileAttributesW(Brain::HelperPath().c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+
+    Brain::ShowInCard(lookupId, Loc(L"Thinking…"), false, true);
+    Brain::g_busyLookup = lookupId;
+
+    const std::wstring lower = ToLowerCopy(question);
+    const bool isGreeting = (lower == L"hi" || lower == L"hello" || lower == L"hey" ||
+                             lower == L"who are you" || lower == L"who are you?" ||
+                             lower == L"tell me a joke" || lower == L"tell a joke");
+
+    const bool isCreativeOrMath = (lower.find(L"haiku") != std::wstring::npos ||
+                                   lower.find(L"poem") != std::wstring::npos ||
+                                   lower.find(L"story") != std::wstring::npos ||
+                                   lower.find(L"joke") != std::wstring::npos ||
+                                   lower.find(L"advice") != std::wstring::npos ||
+                                   lower.find(L"calc") != std::wstring::npos ||
+                                   lower.find(L"sqrt(") != std::wstring::npos);
+
+    if (isGreeting || isCreativeOrMath) {
+        if (!Brain::Ask(question, lookupId, false)) return false;
+        return true;
+    }
+
+    std::thread([question, lookupId]() {
+        std::wstring evidence = QuickLookup::FetchLiveSearchEvidence(question);
+        if (!evidence.empty()) {
+            Brain::Ask(question, lookupId, true, evidence);
+        } else {
+            Brain::Ask(question, lookupId, false);
+        }
+    }).detach();
+
     return true;
 }
 
@@ -444,7 +528,17 @@ void BrainOnReply(WPARAM what) {
         Brain::g_lastUse = NowSeconds();
     }
     if (!p.error.empty()) {
-        Brain::ShowInCard(p.lookupId, L"Local AI: " + p.error, true, false, true);
+        const uint64_t lookupId = p.lookupId;
+        const std::wstring q = p.question;
+        std::thread([lookupId, q, err = p.error]() {
+            QuickLookup::Result r;
+            const QuickLookup::Outcome outcome = QuickLookup::LookupText(q, &r);
+            if (outcome == QuickLookup::Outcome::Found) {
+                QuickLookup::ApplyResult(lookupId, q, true, r);
+            } else {
+                Brain::ShowInCard(lookupId, L"Local AI: " + err, true, false, true);
+            }
+        }).detach();
         return;
     }
     if (p.answering || p.text.rfind("RUN: ", 0) != 0) {
@@ -483,7 +577,13 @@ void BrainOnReply(WPARAM what) {
         return;
     }
 
-    struct Fetch { std::wstring command, place; int days; };
+    struct Fetch {
+        std::wstring command;
+        std::wstring place;
+        int days = 0;
+        bool isLookup = false;
+        std::wstring topic;
+    };
     std::vector<Fetch> fetches;
     for (const auto& [command, in] : steps) {
         const QuickLookup::Result r = RunBun(command);
@@ -492,7 +592,11 @@ void BrainOnReply(WPARAM what) {
             Brain::Ask(p.question, p.lookupId, true))
             return;
         if (r.weatherFetch) {
-            fetches.push_back({command, r.weatherPlace, r.weatherDays});
+            fetches.push_back({command, r.weatherPlace, r.weatherDays, false, L""});
+        } else if (r.lookupFetch) {
+            fetches.push_back({command, L"", 0, true, r.lookupTopic});
+        } else if (in.action == as::Action::WebSearch) {
+            fetches.push_back({command, L"", 0, true, in.label.empty() ? command : in.label});
         } else if (in.action == as::Action::Info || in.action == as::Action::TodoList) {
             plan.results += L"- " + command + L": " + r.body + L"\n";
         } else {
@@ -503,17 +607,30 @@ void BrainOnReply(WPARAM what) {
         BrainFinishPlan(plan);
         return;
     }
-    // Weather elsewhere comes from the network: fetch on a worker, then finish
+    // Weather or lookups elsewhere come from the network: fetch on a worker, then finish
     // back here (WM_APP_BRAIN, wParam 1). The mascot thinks meanwhile.
     Brain::ShowInCard(p.lookupId, plan.done + Loc(L"Looking it up…"), false);
     Brain::g_busyLookup = p.lookupId;
     std::thread([plan, fetches]() mutable {
         for (const Fetch& f : fetches) {
-            std::wstring title, subtitle, body;
-            plan.results += L"- " + f.command + L": " +
-                            (FetchWeatherReport(f.place, f.days, &title, &subtitle, &body) ? title + L": " + body
-                                                                                           : std::wstring(L"couldn't get the weather")) +
-                            L"\n";
+            if (f.isLookup) {
+                QuickLookup::Result lr;
+                const QuickLookup::Outcome outcome = QuickLookup::LookupText(f.topic, &lr);
+                if (outcome == QuickLookup::Outcome::Found) {
+                    plan.results += L"- " + f.command + L": " + lr.title + L" (" + lr.source + L"): " + lr.body + L"\n";
+                    plan.done += L"✓ Looked up " + lr.title + L"\n";
+                } else {
+                    plan.results += L"- " + f.command + L": No result found for " + f.topic + L".\n";
+                    plan.done += L"✗ No entry found for " + f.topic + L"\n";
+                }
+            } else {
+                std::wstring title, subtitle, body;
+                plan.results += L"- " + f.command + L": " +
+                                (FetchWeatherReport(f.place, f.days, &title, &subtitle, &body) ? title + L": " + body
+                                                                                               : std::wstring(L"couldn't get the weather")) +
+                                L"\n";
+                if (!title.empty()) plan.done += L"✓ Weather for " + title + L"\n";
+            }
         }
         {
             std::lock_guard lock(Brain::g_mutex);

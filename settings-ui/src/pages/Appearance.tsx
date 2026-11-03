@@ -1,3 +1,4 @@
+import { IdleFaceSettings } from "../ui/IdleFace";
 import { Check } from "lucide-react";
 import { useStore } from "../store";
 import { PageHead, Section, Setting } from "../ui/controls";
@@ -48,6 +49,13 @@ export function Appearance() {
           ))}
         </div>
       </section>
+
+      <Section title="Layout">
+        <Setting k="Bunbun.Layout" />
+        <Setting k="Bunbun.TuckHotkey" />
+      </Section>
+
+      <IdleFaceSettings />
 
       <Section title="Size & text">
         <Setting k="Appearance.SizeScale" />

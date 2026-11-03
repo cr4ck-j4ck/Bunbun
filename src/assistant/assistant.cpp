@@ -241,6 +241,29 @@ struct Calc {
             if (i < s.size() && s[i] == L')') ++i; else ok = false;
             return v;
         }
+        if (s.compare(i, 5, L"sqrt(") == 0) {
+            i += 5;
+            const double v = Expr();
+            Ws();
+            if (i < s.size() && s[i] == L')') ++i; else ok = false;
+            if (v < 0) ok = false;
+            return v >= 0 ? std::sqrt(v) : 0.0;
+        }
+        if (s.compare(i, 4, L"abs(") == 0) {
+            i += 4;
+            const double v = Expr();
+            Ws();
+            if (i < s.size() && s[i] == L')') ++i; else ok = false;
+            return std::fabs(v);
+        }
+        if (s.compare(i, 2, L"pi") == 0 && (i + 2 == s.size() || !iswalnum(s[i + 2]))) {
+            i += 2;
+            return 3.14159265358979323846;
+        }
+        if (i < s.size() && s[i] == L'π') {
+            i += 1;
+            return 3.14159265358979323846;
+        }
         const size_t st = i;
         while (i < s.size() && (iswdigit(s[i]) || s[i] == L'.' || s[i] == L',')) ++i;
         if (i == st) { ok = false; return 0; }
@@ -269,9 +292,9 @@ bool Evaluate(const std::wstring& expr, double* out) {
     bool digit = false;
     for (wchar_t c : expr) {
         if (iswdigit(c)) digit = true;
-        else if (!(iswspace(c) || wcschr(L"+-*/%^().,x×", c))) return false;
+        else if (!(iswspace(c) || wcschr(L"+-*/%^().,x×π", c) || (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z'))) return false;
     }
-    if (!digit) return false;
+    if (!digit && expr.find(L"pi") == std::wstring::npos && expr.find(L"π") == std::wstring::npos) return false;
     Calc c{expr};
     const double v = c.Expr();
     c.Ws();
@@ -477,14 +500,43 @@ Intent Parse(const std::wstring& raw, const std::wstring& searchEngine) {
         return in;
     }
 
-    // Arithmetic: "12*7", "what is 2^10", "calc (3+4)/2"
+    // Arithmetic: "12*7", "what is 2^10", "calc (3+4)/2", "15% of 200", "how much is 50+20"
     {
         std::wstring e = t;
-        Strip(&e, {L"what is ", L"what's ", L"whats ", L"calc ", L"calculate ", L"compute "});
+        Strip(&e, {L"what is ", L"what's ", L"whats ", L"how much is ", L"calc ", L"calculate ", L"compute ", L"eval "});
+        // Percentage of: "15% of 200", "20 percent of 150"
+        size_t pctPos = e.find(L"% of ");
+        size_t pctLen = 5;
+        if (pctPos == std::wstring::npos) {
+            pctPos = e.find(L" percent of ");
+            pctLen = 12;
+        }
+        if (pctPos != std::wstring::npos) {
+            std::wstring pStr = e.substr(0, pctPos);
+            std::wstring totalStr = e.substr(pctPos + pctLen);
+            double pVal = 0.0, totalVal = 0.0;
+            if (Evaluate(pStr, &pVal) && Evaluate(totalStr, &totalVal)) {
+                const double ans = (pVal / 100.0) * totalVal;
+                in.action = Action::Reply;
+                in.reply = e + L" = " + FormatNumber(ans);
+                return in;
+            }
+        }
         double v;
         if (Evaluate(e, &v)) {
             in.action = Action::Reply;
             in.reply = e + L" = " + FormatNumber(v);
+            return in;
+        }
+    }
+
+    // Lookups: "wiki <topic>", "lookup <topic>", "define <word>"
+    {
+        std::wstring q = t;
+        if (Strip(&q, {L"wiki ", L"wikipedia ", L"lookup ", L"look up ", L"define ", L"dict ", L"meaning of ", L"definition of "}) && !q.empty()) {
+            in.action = Action::Lookup;
+            in.target = q;
+            in.label = q;
             return in;
         }
     }

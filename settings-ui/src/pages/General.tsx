@@ -75,6 +75,12 @@ export function General() {
           {autostartError && <small className="err-text">Couldn't change it: {autostartError}</small>}
         </Row>
       </Section>
+      <Section title="Sounds">
+        <Setting k="Bunbun.Sounds" />
+        <Setting k="Bunbun.SoundVolume" />
+        <Setting k="Bunbun.SoundOpenClose" />
+      </Section>
+
       <Section title="Language & time">
         <Setting k="Modules.Language" />
         <Setting k="Modules.ClockFormat" />

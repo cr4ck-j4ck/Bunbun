@@ -8,8 +8,8 @@ awk '
 /==BunbunSettings==/ { on = 1; next }
 /==\/BunbunSettings==/ { on = 0 }
 !on { next }
-/^- [A-Za-z]+:[ ]*$/ { sub(/^- /, ""); sub(/:.*/, ""); section = $0; next }
-/^  - [A-Za-z]+:/ {
+/^- [A-Za-z0-9]+:[ ]*$/ { sub(/^- /, ""); sub(/:.*/, ""); section = $0; next }
+/^  - [A-Za-z0-9]+:/ {
     line = $0; sub(/^  - /, "", line)
     key = line; sub(/:.*/, "", key)
     val = line; sub(/^[^:]*:[ ]*/, "", val)

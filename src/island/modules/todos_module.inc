@@ -361,8 +361,7 @@ namespace TodoLayout {
 
 int TodoTabIndex(const Settings& settings) {
     if (!settings.todoModule) return -1;
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0) + (settings.connectivityModule ? 1 : 0) +
-           (settings.fileTrayModule ? 1 : 0) + MediaTabIndex(settings);
+    return DashboardPageIndex(StudioPage::Todo, settings);
 }
 
 // What the To-do tab shows, in order: open to-dos (soonest due first), then
