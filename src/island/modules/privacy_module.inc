@@ -348,7 +348,8 @@ void UpdatePrivacyIndicators() {
     // Screen capture, shared or recorded, lights one blue dot: Windows' capture
     // API (Snipping Tool's recorder, browsers sharing a screen, Teams), OBS's
     // outputs, and the dedicated recorders above.
-    if (settings.privacyDots && settings.privacyDotsScreen) {
+    const bool screenDot = settings.privacyDots && settings.privacyDotsScreen;
+    if (screenDot || settings.liveMood) {  // Bunbun: Live needs it even with the dots off
         ObsOutputs(&screen);
         BrowserSharingBars(&screen);
         ScreenRecorders(&screen);
@@ -383,7 +384,7 @@ void UpdatePrivacyIndicators() {
     };
     started(cam, s_cam, 1, L"camera");
     started(mic, s_mic, 0, L"microphone");
-    started(screen, s_screen, 2, L"screen");
+    if (screenDot) started(screen, s_screen, 2, L"screen");  // no alert for Live alone
     const bool changed = mic != s_mic || cam != s_cam || screen != s_screen;
     s_mic = mic;
     s_cam = cam;

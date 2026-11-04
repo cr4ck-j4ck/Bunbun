@@ -33,7 +33,9 @@ export const LINUX_SETTINGS = new Set([
   // features_linux.cpp: placement, hiding, motion, the music pill, alerts, the date, the eyes, lyrics
   "Appearance.Position", "Appearance.TargetMonitor", "Appearance.Displays", "Appearance.MirrorPosition", "Appearance.DisplayPositions", "Appearance.OffsetX", "Appearance.SeparateExpandedOffsetY",
   "Appearance.OffsetYExpanded", "Appearance.BorderMergedMode", "Appearance.ProgressStyle", "Appearance.SpectrumStyle",
-  "Behavior.AlwaysOnTop", "Behavior.AutoHideIdleSeconds", "Behavior.FullscreenMode",
+  "Behavior.AlwaysOnTop", "Behavior.AutoHideIdleSeconds", "Behavior.FullscreenMode", "Behavior.FullscreenShowApps", "Behavior.FullscreenTuckApps",
+  "Behavior.FullscreenHideApps", "Bunbun.TuckRevealMs", "Bunbun.DndFollowSystem", "Bunbun.AfkMinutes",
+  "Bunbun.MusicApps", "Bunbun.VideoApps",
   "Behavior.UnhideOnHover", "Shortcuts.HideShowHotkeyEnabled", "Shortcuts.HideShowModifiers", "Shortcuts.HideShowKey",
   "Bunbun.TuckHotkey",
   "Animations.AnimationStyle", "Animations.AnimationSpeed", "Animations.TargetFPS", "Animations.PowerSaver",

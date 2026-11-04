@@ -34,6 +34,8 @@ struct Feat {
     bool hideHotkey = true;   // Ctrl+Alt+D by default (X11)
     std::wstring hideMods = L"ctrl_alt", hideKey = L"D";
     bool tuckHotkey = true;   // Ctrl+Alt+H (X11) and the menu item
+    int tuckRevealMs = 450;   // Bunbun.TuckRevealMs: pointing at the line this long brings it back
+    std::wstring fsShowApps, fsTuckApps, fsHideApps;  // Behavior.Fullscreen*Apps
 
     // Motion (Animations.*, Bunbun.AmbientFps)
     double stiffness = 260, damping = 32;  // the resize spring (AnimationStyle, AnimationSpeed)
@@ -71,6 +73,8 @@ struct Feat {
     bool eyeStatus = false;
     int strip = 0;            // IdleStripItems: 0 time-weather, 1 time, 2 weather, 3 nothing
     bool mascotDnd = false;
+    bool dndFollowSystem = false;  // Bunbun.DndFollowSystem: the desktop's DND puts the mascot in DND
+    int afkMinutes = 3;            // Bunbun.AfkMinutes: AFK after this long without input (0 = off)
 
     // Lyrics (Modules.*)
     bool karaoke = true, karaokeGlow = true, neighbours = false;
@@ -92,7 +96,11 @@ void Start(std::function<void(const std::string&, const std::string&, double, do
 struct _GdkMonitor* TargetMonitor(struct _GdkDisplay* display);
 
 // ── Hiding ──────────────────────────────────────────────────────────────────
-bool FullscreenAppActive();   // X11: the active window is full screen
+bool FullscreenAppActive();   // X11: the active window is full screen and the island tucks or hides
+bool FullscreenTuckNow();     // ... and it tucks (else hides): In full screen and the per-app lists
+// Seconds since the last keyboard or mouse input, from GNOME (Mutter) or KDE / the
+// freedesktop ScreenSaver over D-Bus; -1 while unknown.
+double IdleSeconds();
 void NoteInteraction();       // the pointer, an agent or new media: resets auto-hide
 bool AutoHidden();            // hidden by Behavior.AutoHideIdleSeconds
 bool Tucked();

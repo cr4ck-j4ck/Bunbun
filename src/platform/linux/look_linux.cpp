@@ -104,6 +104,7 @@ void LoadSettings() {
     l.dotMic = s::GetBool(L"Indicators.PrivacyDotsMic");
     l.dotCam = s::GetBool(L"Indicators.PrivacyDotsCam");
     l.dotScreen = s::GetBool(L"Indicators.PrivacyDotsScreen");
+    l.liveMood = s::GetBool(L"Bunbun.LiveMood");
     Hex(s::Get(L"Indicators.PrivacyDotsScreenHex"), l.screenColor);
     Hex(s::Get(L"Indicators.PrivacyDotsMicHex"), l.micColor);
     Hex(s::Get(L"Indicators.PrivacyDotsCamHex"), l.camColor);
@@ -391,7 +392,7 @@ void StartPrivacy(std::function<void()> changed) {
                 std::lock_guard lock(g_lookMutex);
                 wantMic = g_look.dots && g_look.dotMic;
                 wantCam = g_look.dots && g_look.dotCam;
-                wantScreen = g_look.dots && g_look.dotScreen;
+                wantScreen = (g_look.dots && g_look.dotScreen) || g_look.liveMood;
             }
             const bool mic = wantMic && MicRecording();
             const bool cam = wantCam && CameraOpen();
@@ -409,6 +410,10 @@ void StartPrivacy(std::function<void()> changed) {
 bool MicInUse() { return g_mic.load(); }
 bool CamInUse() { return g_cam.load(); }
 bool ScreenInUse() { return g_screen.load(); }
+bool ScreenDotOn() {
+    std::lock_guard lock(g_lookMutex);
+    return g_screen.load() && g_look.dots && g_look.dotScreen;
+}
 void SetSharingWindow(bool shown) { g_sharingWindow.store(shown); }
 std::string ScreenText() {
     std::lock_guard lock(g_screenTextMutex);

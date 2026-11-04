@@ -290,6 +290,24 @@
    }
   ]
  },
+ "Behavior.FullscreenShowApps": {
+  "default": "",
+  "name": "Always show over these apps",
+  "description": "Apps where the island stays as usual in full screen, whatever In full screen says. Names separated by commas, for example chrome, vlc. A part of the name is enough.",
+  "options": []
+ },
+ "Behavior.FullscreenTuckApps": {
+  "default": "",
+  "name": "Always tuck over these apps",
+  "description": "Apps where the island tucks into a line in full screen. Names separated by commas.",
+  "options": []
+ },
+ "Behavior.FullscreenHideApps": {
+  "default": "",
+  "name": "Always hide over these apps",
+  "description": "Apps where the island hides in full screen, for example games. Names separated by commas.",
+  "options": []
+ },
  "Behavior.UnhideOnHover": {
   "default": "true",
   "name": "Unhide on hover",
@@ -1362,6 +1380,12 @@
   "description": "Ctrl+Alt+H, or Tuck away in the right-click menu, hides the island to a thin line at the top of the screen, coloured by what's going on. Point at the line for a moment to bring the island back. It comes back by itself when an agent needs you.",
   "options": []
  },
+ "Bunbun.TuckRevealMs": {
+  "default": "450",
+  "name": "Point at the tucked line for",
+  "description": "How long the pointer rests on the tucked line before the island comes back, in milliseconds. Longer helps in games where the mouse passes over the top of the screen.",
+  "options": []
+ },
  "Bunbun.AgentTab": {
   "default": "true",
   "name": "Agent page",
@@ -1392,16 +1416,34 @@
   "description": "While a video plays (YouTube, Netflix, an anime site, VLC...), the small island shows your mascot munching popcorn and \"Streaming\" instead of the title and cover. Music apps (Spotify, YouTube Music, Apple Music and the like) keep the song and the headphones.",
   "options": []
  },
+ "Bunbun.MusicApps": {
+  "default": "",
+  "name": "Always music",
+  "description": "Apps or sites always treated as music (song and headphones), when Bunbun guesses wrong. Names separated by commas, matched against the player's name, for example podcasts, foobar.",
+  "options": []
+ },
+ "Bunbun.VideoApps": {
+  "default": "",
+  "name": "Always video",
+  "description": "Apps always treated as video (Streaming Shows). Names separated by commas, for example plex, jellyfin.",
+  "options": []
+ },
  "Bunbun.LiveMood": {
   "default": "true",
   "name": "Live mood while the screen is shared",
-  "description": "While an app streams, shares or records your screen, the mascot goes Live, with a pulsing REC badge. Uses the screen privacy dot's detection, so Privacy dots and their Screen dot need to be on.",
+  "description": "While an app streams, shares or records your screen, the mascot goes Live, with a pulsing REC badge. Works with the privacy dots turned off too.",
   "options": []
  },
  "Bunbun.AfkMinutes": {
   "default": "3",
   "name": "AFK after (minutes)",
   "description": "With no keyboard or mouse for this long, the mascot goes AFK and munches its favourite snack until you're back. 0 turns it off.",
+  "options": []
+ },
+ "Bunbun.DndFollowSystem": {
+  "default": "false",
+  "name": "Follow the system's Do Not Disturb",
+  "description": "The mascot goes Do Not Disturb whenever Windows' Do Not Disturb (or your Linux desktop's) is on, as well as with its own switch.",
   "options": []
  },
  "Bunbun.MusicSwipe": {

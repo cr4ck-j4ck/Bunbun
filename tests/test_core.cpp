@@ -12,6 +12,7 @@
 #include "../src/common/update.h"
 #include "../src/common/todos.h"
 #include "../src/common/chime_wav.h"
+#include "../src/common/applist.h"
 
 #include <algorithm>
 #include <cwchar>
@@ -371,6 +372,19 @@ static void TestLyricsText() {
     CHECK(TextMatch(L"Get Lucky", L"get lucky!") == 2);
 }
 
+// App lists typed in Settings (full screen per app, always music / always video).
+static void TestAppList() {
+    using bb::applist::Matches;
+    CHECK(Matches(std::wstring(L"chrome, vlc.exe; steam"), std::wstring(L"chrome")));
+    CHECK(Matches(std::wstring(L"chrome, vlc.exe; steam"), std::wstring(L"vlc")));            // ".exe" ignored
+    CHECK(Matches(std::wstring(L"  Steam  "), std::wstring(L"steamwebhelper")));              // part of the name, any case
+    CHECK(Matches(std::wstring(L"spotify\nplex"), std::wstring(L"Plex Media Player")));
+    CHECK(!Matches(std::wstring(L"chrome"), std::wstring(L"firefox")));
+    CHECK(!Matches(std::wstring(L""), std::wstring(L"chrome")));
+    CHECK(!Matches(std::wstring(L" , ;"), std::wstring(L"chrome")));                          // empty entries match nothing
+    CHECK(Matches(std::string("mpv, celluloid"), std::string("io.github.celluloid_player.celluloid")));  // narrow too
+}
+
 static void TestStudioChat() {
     // 1. Text formatting logic
     auto formatAnswer = [](int status, const std::wstring& title, const std::wstring& source,
@@ -450,6 +464,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTodos();
     TestLyricsText();
     TestStudioChat();
+    TestAppList();
     TestChimes();
     std::printf(g_failed ? "%d check(s) failed\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;

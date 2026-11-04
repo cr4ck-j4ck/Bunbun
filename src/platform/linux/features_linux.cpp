@@ -16,11 +16,15 @@
 #include <signal.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstring>
 #include <ctime>
 #include <map>
 
+#include "../../common/applist.h"
 #include "look_linux.h"
 #include "mpris.h"
 #include "platform.h"
@@ -100,6 +104,12 @@ void LoadSettings() {
     f.hideMods = s::Get(L"Shortcuts.HideShowModifiers");
     f.hideKey = s::Get(L"Shortcuts.HideShowKey");
     f.tuckHotkey = s::GetBool(L"Bunbun.TuckHotkey");
+    f.tuckRevealMs = std::clamp(s::GetInt(L"Bunbun.TuckRevealMs"), 0, 5000);
+    f.fsShowApps = s::Get(L"Behavior.FullscreenShowApps");
+    f.fsTuckApps = s::Get(L"Behavior.FullscreenTuckApps");
+    f.fsHideApps = s::Get(L"Behavior.FullscreenHideApps");
+    f.dndFollowSystem = s::GetBool(L"Bunbun.DndFollowSystem");
+    f.afkMinutes = std::clamp(s::GetInt(L"Bunbun.AfkMinutes"), 0, 240);
 
     SpringFor(s::Get(L"Animations.AnimationStyle"), s::Get(L"Animations.AnimationSpeed"), &f.stiffness, &f.damping);
     const std::wstring fps = s::Get(L"Animations.TargetFPS");
@@ -331,6 +341,41 @@ void UpdateHotkeys() {
 }  // namespace
 
 bool FullscreenAppActive() { return g_fullscreen; }
+bool g_fullscreenTuck = false;
+bool FullscreenTuckNow() { return g_fullscreen && g_fullscreenTuck; }
+
+// ── Idle time (AFK) ─────────────────────────────────────────────────────────
+// Asked every 5 s on a worker thread: GNOME's Mutter IdleMonitor (milliseconds),
+// else the freedesktop ScreenSaver's GetSessionIdleTime (KDE and others, seconds).
+std::atomic<double> g_idleSeconds{-1.0};
+double IdleSeconds() { return g_idleSeconds.load(); }
+
+void StartIdleWatch() {
+    std::thread([] {
+        GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+        if (!bus) return;
+        for (;;) {
+            double secs = -1.0;
+            if (GVariant* r = g_dbus_connection_call_sync(bus, "org.gnome.Mutter.IdleMonitor", "/org/gnome/Mutter/IdleMonitor/Core",
+                                                          "org.gnome.Mutter.IdleMonitor", "GetIdletime", nullptr,
+                                                          G_VARIANT_TYPE("(t)"), G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr)) {
+                guint64 ms = 0;
+                g_variant_get(r, "(t)", &ms);
+                secs = ms / 1000.0;
+                g_variant_unref(r);
+            } else if (GVariant* r2 = g_dbus_connection_call_sync(bus, "org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver",
+                                                                  "org.freedesktop.ScreenSaver", "GetSessionIdleTime", nullptr,
+                                                                  G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr)) {
+                guint32 s = 0;
+                g_variant_get(r2, "(u)", &s);
+                secs = s;
+                g_variant_unref(r2);
+            }
+            g_idleSeconds.store(secs);
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+    }).detach();
+}
 void NoteInteraction() { g_lastInteraction = Mono(); }
 bool AutoHidden() { return g_feat.autoHideIdle > 0 && Mono() - g_lastInteraction > g_feat.autoHideIdle; }
 bool Tucked() { return g_tucked; }
@@ -932,6 +977,7 @@ void CheckAudioOutput() {
 bool BluetoothAudio() { return g_btAudio; }
 
 void Start(std::function<void(const std::string&, const std::string&, double, double)> toast, std::function<void()> changed) {
+    StartIdleWatch();  // AFK
     g_toast = std::move(toast);
     g_changed = std::move(changed);
     g_lastInteraction = Mono();
@@ -958,9 +1004,21 @@ void Start(std::function<void(const std::string&, const std::string&, double, do
     }, nullptr);
     g_timeout_add_seconds(1, [](gpointer) -> gboolean {
 #ifdef GDK_WINDOWING_X11
-        const bool full = (g_feat.hideFullscreen || g_feat.tuckFullscreen) && X11FullscreenNow();
-        if (full != g_fullscreen) {
+        // In full screen plus the per-app lists (matched on the window's class and title).
+        int action = 0;  // 0 nothing, 1 tuck, 2 hide
+        const bool watched = g_feat.hideFullscreen || g_feat.tuckFullscreen || !g_feat.fsTuckApps.empty() ||
+                             !g_feat.fsHideApps.empty();
+        if (watched && X11FullscreenNow()) {
+            const std::wstring app = bb::plat::Wide(X11ActiveWindowText());
+            if (bb::applist::Matches(g_feat.fsShowApps, app)) action = 0;
+            else if (bb::applist::Matches(g_feat.fsHideApps, app)) action = 2;
+            else if (bb::applist::Matches(g_feat.fsTuckApps, app)) action = 1;
+            else action = g_feat.tuckFullscreen ? 1 : g_feat.hideFullscreen ? 2 : 0;
+        }
+        const bool full = action != 0;
+        if (full != g_fullscreen || (action == 1) != g_fullscreenTuck) {
             g_fullscreen = full;
+            g_fullscreenTuck = action == 1;
             if (g_changed) g_changed();
         }
 #endif

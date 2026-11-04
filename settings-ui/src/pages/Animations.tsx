@@ -123,6 +123,10 @@ export function Animations() {
         <Setting k="Behavior.ExpandOnHover" />
         <Setting k="Behavior.AutoHideIdleSeconds" />
         <Setting k="Behavior.FullscreenMode" />
+        <Setting k="Behavior.FullscreenShowApps" />
+        <Setting k="Behavior.FullscreenTuckApps" />
+        <Setting k="Behavior.FullscreenHideApps" />
+        <Setting k="Bunbun.TuckRevealMs" />
         <Setting k="Behavior.UnhideOnHover" />
         <Setting k="Behavior.AlwaysOnTop" />
       </Section>

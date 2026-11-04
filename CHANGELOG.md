@@ -21,8 +21,18 @@ colour picker, and the island is a notch by default everywhere.
   dot's detection; switch: *Live while the screen is shared*). **AFK**: after 3 minutes without
   keyboard or mouse (*AFK after*, 0 turns it off), the mascot munches its favourite snack, then naps
   after 20. The movie mood is now called **Streaming Shows**. Skin packs can add `dnd` and `live`
-  frames (falling back to `sleepy` and `working`), and Mascot studio's importer lists them. On
-  Linux: Do Not Disturb and Live; AFK is Windows-only for now.
+  frames (falling back to `sleepy` and `working`), and Mascot studio's importer lists them. All four
+  work on Linux too; AFK reads the idle time from GNOME or KDE.
+- **Full screen per app:** *Always show / tuck / hide over these apps* (Settings → Animations) override
+  *In full screen* for the apps you name, say Show over the browser and Hide in games.
+- **Tucked line delay:** *Point at the tucked line for* sets how long you point before the island
+  comes back (450 ms by default), so a mouse passing over the top in a game doesn't open it.
+- **Moods in one place:** a Moods section in Mascot studio with Do not disturb, *Follow the system's
+  Do Not Disturb* (new: the mascot goes DND with Windows' or your desktop's DND), AFK, Live,
+  Streaming Shows, battery moods, and *Always music* / *Always video* lists for when Bunbun guesses
+  a player wrong.
+- **Live without the dots:** the Live mood no longer needs the privacy dots switched on; the blue dot
+  and its alert still follow their own switches.
 
 ### Changed
 - **The Notch is the default shape**, on Windows and Linux: the island hangs from the top edge of the

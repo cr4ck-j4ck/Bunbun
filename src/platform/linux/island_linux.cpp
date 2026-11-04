@@ -45,6 +45,7 @@
 #include "compat/d2d1.h"
 #include "../../mascot/mascot.h"
 #include "island_api.h"
+#include "../../common/applist.h"
 #include "island_linux.h"
 #include "../../island/studio_pages.h"
 #include "mascot_png.h"
@@ -87,6 +88,7 @@ bool g_agentPill = true;    // Bunbun.AgentPill: the pill while an agent works (
 bool g_mediaOn = true;      // Modules.Media: what's playing
 bool g_streamingMood = true;  // Bunbun.StreamingMood: a video shows the popcorn mascot and "Streaming"
 bool g_liveMood = true;       // Bunbun.LiveMood: the Live mood while the screen is shared or recorded
+std::wstring g_musicApps, g_videoApps;  // Bunbun.MusicApps / VideoApps: overrides for IsVideoTrack
 bool g_expandOnHover = true;  // Behavior.ExpandOnHover; off: a click opens and closes the island
 bool g_pinned = false;      // opened by a click (ExpandOnHover off)
 std::string g_toastTitle, g_toastText;  // a reminder or the focus timer, until g_toastUntil
@@ -170,6 +172,8 @@ void LoadSettings() {
     g_agentPill = s::GetBool(L"Bunbun.AgentPill");
     g_mediaOn = s::GetBool(L"Modules.Media");
     g_streamingMood = s::GetBool(L"Bunbun.StreamingMood");
+    g_musicApps = s::Get(L"Bunbun.MusicApps");
+    g_videoApps = s::Get(L"Bunbun.VideoApps");
     g_liveMood = s::GetBool(L"Bunbun.LiveMood");
     g_expandOnHover = s::GetBool(L"Behavior.ExpandOnHover");
     if (g_expandOnHover) g_pinned = false;
@@ -254,6 +258,9 @@ double TextWidth(cairo_t* cr, const std::string& text, double size, bool bold) {
 bool IsVideoTrack(const bb::mpris::Track& t) {
     std::string id = t.player;
     for (char& c : id) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::wstring wid = bb::plat::Wide(id);
+    if (bb::applist::Matches(g_videoApps, wid)) return true;   // your own lists first
+    if (bb::applist::Matches(g_musicApps, wid)) return false;
     for (const char* m : {"spotify", "rhythmbox", "elisa", "lollypop", "amarok", "clementine", "strawberry", "audacious",
                           "deadbeef", "cmus", "quod libet", "youtube music", "youtube-music", "tidal", "deezer", "amberol",
                           "g4music", "tauon", "musikcube", "cider", "apple music"})
@@ -440,11 +447,11 @@ Kind CurrentKind() {
         // hidden in full screen; hidden after a while without anything happening.
         // Pointing at a tucked line for a moment brings the island back.
         const bool fullscreen = bb::lfeat::FullscreenAppActive();
-        const bool reveal = g_hover && Now() - g_hoverSince > 0.45;
+        const bool reveal = g_hover && Now() - g_hoverSince > f.tuckRevealMs / 1000.0;
         if (bb::lfeat::HiddenByHotkey()) return Kind::Hidden;
         if (bb::lfeat::Tucked() && reveal) bb::lfeat::SetTucked(false);
-        if (bb::lfeat::Tucked() || (fullscreen && f.tuckFullscreen && !reveal)) return Kind::Tuck;
-        if (fullscreen && f.hideFullscreen && !(f.unhideOnHover && g_hover)) return Kind::Hidden;
+        if (bb::lfeat::Tucked() || (fullscreen && bb::lfeat::FullscreenTuckNow() && !reveal)) return Kind::Tuck;
+        if (fullscreen && !bb::lfeat::FullscreenTuckNow() && !(f.unhideOnHover && g_hover)) return Kind::Hidden;
         if (bb::lfeat::AutoHidden() && !toast && !(f.unhideOnHover && g_hover)) return Kind::Hidden;
     }
     if (g_agentsOn && g_agent.phase != AgentPhase::None) {
@@ -479,7 +486,14 @@ mascot::Mood MoodFor(Kind k) {
     if (g_liveMood && bb::llook::ScreenInUse()) return mascot::Mood::Live;  // streaming / sharing / recording
     if ((k == Kind::Media || k == Kind::Studio) && g_track.playing)
         return StreamingNow() ? mascot::Mood::Streaming : mascot::Mood::Music;
-    if (bb::lfeat::Get().mascotDnd) return mascot::Mood::Dnd;  // headphones on, a muted bell
+    const auto& feat = bb::lfeat::Get();
+    const auto& radios = bb::lsrc::RadioState();
+    if (feat.mascotDnd || (feat.dndFollowSystem && radios.dndKnown && radios.dnd))
+        return mascot::Mood::Dnd;  // headphones on, a DND badge (also the desktop's DND)
+    if (feat.afkMinutes > 0) {  // away from the keyboard: a snack, then a nap after 20 minutes
+        const double idle = bb::lfeat::IdleSeconds();
+        if (idle >= feat.afkMinutes * 60.0) return idle >= 1200.0 ? mascot::Mood::Sleepy : mascot::Mood::Snack;
+    }
     if (k == Kind::Toast || Now() < g_pokeUntil || bb::lfeat::BatteryCheer()) return mascot::Mood::Happy;
     if (bb::lfeat::BatteryDrowsy()) return mascot::Mood::Sleepy;
     return mascot::Mood::Idle;
@@ -495,7 +509,7 @@ int CardLines(cairo_t* cr, const AgentView& a) {
 
 // Privacy dots on the right of the small island, as on Windows: outermost the
 // screen (blue, shared or recorded), then the camera (green), then the microphone (orange).
-int DotCount() { return (bb::llook::ScreenInUse() ? 1 : 0) + (bb::llook::CamInUse() ? 1 : 0) + (bb::llook::MicInUse() ? 1 : 0); }
+int DotCount() { return (bb::llook::ScreenDotOn() ? 1 : 0) + (bb::llook::CamInUse() ? 1 : 0) + (bb::llook::MicInUse() ? 1 : 0); }
 double DotsRoom() { const int n = DotCount(); return n ? 8.0 + n * 13.0 : 0.0; }
 
 void PaintDots(cairo_t* cr, const Rect& p) {
@@ -507,7 +521,7 @@ void PaintDots(cairo_t* cr, const Rect& p) {
         cairo_fill(cr);
         x -= 13;
     };
-    if (bb::llook::ScreenInUse()) dot(l.screenColor);
+    if (bb::llook::ScreenDotOn()) dot(l.screenColor);
     if (bb::llook::CamInUse()) dot(l.camColor);
     if (bb::llook::MicInUse()) dot(l.micColor);
 }
@@ -1832,7 +1846,7 @@ int main(int argc, char** argv) {
     bb::llook::StartPrivacy([] {
         // The screen dot came on: say who and how, as Windows does.
         static bool screenWas = false;
-        const bool screen = bb::llook::ScreenInUse();
+        const bool screen = bb::llook::ScreenDotOn();  // the toast goes with the dot, not with Live alone
         if (screen && !screenWas) ShowToast("Screen", bb::llook::ScreenText(), 3.5);
         screenWas = screen;
         Redraw();

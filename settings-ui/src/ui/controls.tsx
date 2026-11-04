@@ -137,6 +137,7 @@ const SLIDER_RANGES: Record<string, [number, number, number, string]> = {
   "Bunbun.MascotHop": [0, 200, 5, "%"],
   "Bunbun.MascotBlinkEvery": [0, 12, 1, " s"],
   "Bunbun.AfkMinutes": [0, 30, 1, " min"],
+  "Bunbun.TuckRevealMs": [0, 2000, 50, " ms"],
 };
 
 /** A row for any setting, with the control chosen from its schema entry. */

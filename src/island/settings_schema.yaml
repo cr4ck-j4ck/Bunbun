@@ -111,6 +111,15 @@
       - tuck: Tuck
       - show: Show
       - hide: Hide
+  - FullscreenShowApps: ""
+    $name: Always show over these apps
+    $description: Apps where the island stays as usual in full screen, whatever In full screen says. Names separated by commas, for example chrome, vlc. A part of the name is enough.
+  - FullscreenTuckApps: ""
+    $name: Always tuck over these apps
+    $description: Apps where the island tucks into a line in full screen. Names separated by commas.
+  - FullscreenHideApps: ""
+    $name: Always hide over these apps
+    $description: Apps where the island hides in full screen, for example games. Names separated by commas.
   - UnhideOnHover: true
     $name: Unhide on hover
     $description: Allow the hidden island to reappear when you hover your mouse over it.
@@ -582,6 +591,9 @@
   - TuckHotkey: true
     $name: Tuck away (Ctrl+Alt+H)
     $description: Ctrl+Alt+H, or Tuck away in the right-click menu, hides the island to a thin line at the top of the screen, coloured by what's going on. Point at the line for a moment to bring the island back. It comes back by itself when an agent needs you.
+  - TuckRevealMs: 450
+    $name: Point at the tucked line for
+    $description: How long the pointer rests on the tucked line before the island comes back, in milliseconds. Longer helps in games where the mouse passes over the top of the screen.
   - AgentTab: true
     $name: Agent page
     $description: An Agent page in the scroll loop with a live timer, Read / Edit / Test / Done progress, the last command and its output, tasks done today, recent tasks, and your Claude Code usage limits (connect Claude Code to see them).
@@ -597,12 +609,21 @@
   - StreamingMood: true
     $name: Streaming mode for videos
     $description: While a video plays (YouTube, Netflix, an anime site, VLC...), the small island shows your mascot munching popcorn and "Streaming" instead of the title and cover. Music apps (Spotify, YouTube Music, Apple Music and the like) keep the song and the headphones.
+  - MusicApps: ""
+    $name: Always music
+    $description: Apps or sites always treated as music (song and headphones), when Bunbun guesses wrong. Names separated by commas, matched against the player's name, for example podcasts, foobar.
+  - VideoApps: ""
+    $name: Always video
+    $description: Apps always treated as video (Streaming Shows). Names separated by commas, for example plex, jellyfin.
   - LiveMood: true
     $name: Live mood while the screen is shared
-    $description: While an app streams, shares or records your screen, the mascot goes Live, with a pulsing REC badge. Uses the screen privacy dot's detection, so Privacy dots and their Screen dot need to be on.
+    $description: While an app streams, shares or records your screen, the mascot goes Live, with a pulsing REC badge. Works with the privacy dots turned off too.
   - AfkMinutes: 3
     $name: AFK after (minutes)
     $description: With no keyboard or mouse for this long, the mascot goes AFK and munches its favourite snack until you're back. 0 turns it off.
+  - DndFollowSystem: false
+    $name: Follow the system's Do Not Disturb
+    $description: The mascot goes Do Not Disturb whenever Windows' Do Not Disturb (or your Linux desktop's) is on, as well as with its own switch.
   - MusicSwipe: true
     $name: Swipe for the next song
     $description: Swipe sideways on the small music pill, or scroll sideways on a touchpad, to skip to the next or previous song.

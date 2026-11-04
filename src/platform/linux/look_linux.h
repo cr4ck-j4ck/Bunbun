@@ -32,6 +32,7 @@ struct Look {
     bool sounds = true, soundOpenClose = false;
     int soundVolume = 40;
     bool dots = true, dotMic = true, dotCam = true, dotScreen = true;
+    bool liveMood = true;  // Bunbun.LiveMood: watch the screen for the Live mood even with the dots off
     double micColor[3] = {1.0, 0.584, 0.0}, camColor[3] = {0.204, 0.780, 0.349}, screenColor[3] = {0.31, 0.55, 1.0};
 };
 
@@ -62,7 +63,8 @@ void PlayChime(bb::chime::Chime c);
 void StartPrivacy(std::function<void()> changed);
 bool MicInUse();
 bool CamInUse();
-bool ScreenInUse();
+bool ScreenInUse();   // being streamed, shared or recorded (watched for the dot or the Live mood)
+bool ScreenDotOn();   // ... and the blue dot is on (Privacy dots and their Screen dot)
 // A browser's "is sharing your screen" window is up (X11; set by features_linux).
 void SetSharingWindow(bool shown);
 // Who uses the screen and how, e.g. "OBS Studio is streaming your screen"; empty

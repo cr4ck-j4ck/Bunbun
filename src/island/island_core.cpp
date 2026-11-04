@@ -16,6 +16,7 @@
 #include "../assistant/assistant.h"
 #include "../common/todos.h"  // Bunbun: to-do file and repeats, shared with the settings app
 #include "../common/json.h"   // Bunbun: talking to the local AI helper
+#include "../common/applist.h"  // Bunbun: app lists typed in Settings (full screen, music / video)
 #include "../common/chime_wav.h"  // Bunbun: the UI chimes, shared with Linux
 #include "../common/ics.h"        // Bunbun: calendar links (.ics), shared with Linux
 #include "../common/ag_quota.h"   // Bunbun: Antigravity's quota, shared with Linux
@@ -672,6 +673,7 @@ struct Settings {
     int autoHideIdleSeconds = 0;
     bool autoHideFullscreen = true;
     bool fullscreenTuck = false;  // Bunbun: tuck to a line in full screen instead of hiding
+    std::wstring fullscreenShowApps, fullscreenTuckApps, fullscreenHideApps;  // Bunbun: per-app full screen
     bool borderMergedMode = false;
     bool unhideOnHover = true;
     bool alwaysOnTop = true;
@@ -729,6 +731,9 @@ struct Settings {
     bool streamingMood = true;      // Bunbun: videos show the Streaming mascot, not title and cover
     bool liveMood = true;           // Bunbun: the Live mood while the screen is shared or recorded
     int afkMinutes = 3;             // Bunbun: no input this long = AFK (snack); 0 = off
+    bool dndFollowSystem = false;   // Bunbun: Windows' Do Not Disturb puts the mascot in DND too
+    int tuckRevealMs = 450;         // Bunbun: pointing at the tucked line this long brings the island back
+    std::wstring musicApps, videoApps;  // Bunbun: overrides for the music / video guess
     bool dateFirst = false;
     int firstDayOfWeek = -1;        // 0 = Sunday .. 6 = Saturday, -1 = follow Windows
 
@@ -2361,6 +2366,43 @@ D2D1_COLOR_F EnsureContrastAgainstBackground(D2D1_COLOR_F candidate, D2D1_COLOR_
 }
 
 // Returns true if the currently active foreground window is in full screen mode
+bool IsForegroundFullscreen(HWND targetHwnd);
+
+// Bunbun: the program behind the foreground window, lower case without ".exe".
+std::wstring ForegroundAppName() {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    HANDLE proc = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+    if (!proc) return {};
+    wchar_t path[MAX_PATH];
+    DWORD size = MAX_PATH;
+    std::wstring name;
+    if (QueryFullProcessImageNameW(proc, 0, path, &size)) {
+        name = path;
+        name = name.substr(name.find_last_of(L'\\') + 1);
+        if (name.size() > 4 && _wcsicmp(name.c_str() + name.size() - 4, L".exe") == 0) name.resize(name.size() - 4);
+    }
+    CloseHandle(proc);
+    return bb::applist::Lower(name);
+}
+
+// Bunbun: does anything need full screen watched at all (In full screen, or a per-app list)?
+bool FullscreenWatched(const Settings& s) {
+    return s.autoHideFullscreen || !s.fullscreenTuckApps.empty() || !s.fullscreenHideApps.empty();
+}
+
+// Bunbun: what the island does for the app in full screen right now: 0 = nothing
+// (not full screen, or Show), 1 = tuck, 2 = hide. The per-app lists win over
+// In full screen.
+int FullscreenAction(HWND islandHwnd, const Settings& s) {
+    if (!IsForegroundFullscreen(islandHwnd)) return 0;
+    const std::wstring app = ForegroundAppName();
+    if (bb::applist::Matches(s.fullscreenShowApps, app)) return 0;
+    if (bb::applist::Matches(s.fullscreenHideApps, app)) return 2;
+    if (bb::applist::Matches(s.fullscreenTuckApps, app)) return 1;
+    return !s.autoHideFullscreen ? 0 : s.fullscreenTuck ? 1 : 2;
+}
+
 bool IsForegroundFullscreen(HWND targetHwnd) {
     HWND fg = GetForegroundWindow();
     if (!fg || fg == targetHwnd || fg == GetDesktopWindow() || fg == GetShellWindow()) {
@@ -2837,6 +2879,10 @@ void LoadSettings() {
     next.streamingMood = Wh_GetIntSetting(L"Bunbun.StreamingMood") != 0;     // Bunbun
     next.liveMood = Wh_GetIntSetting(L"Bunbun.LiveMood") != 0;               // Bunbun
     next.afkMinutes = std::clamp(Wh_GetIntSetting(L"Bunbun.AfkMinutes"), 0, 240);  // Bunbun
+    next.dndFollowSystem = Wh_GetIntSetting(L"Bunbun.DndFollowSystem") != 0;          // Bunbun
+    next.tuckRevealMs = std::clamp(Wh_GetIntSetting(L"Bunbun.TuckRevealMs"), 0, 5000);  // Bunbun
+    next.musicApps = GetStringSettingCopy(L"Bunbun.MusicApps");                      // Bunbun
+    next.videoApps = GetStringSettingCopy(L"Bunbun.VideoApps");
 
     // ── Localization (#35) ───────────────────────────────────────────────────
     {
@@ -3125,6 +3171,9 @@ void LoadSettings() {
         next.autoHideFullscreen = !EqualsNoCase(mode, L"show");  // watch for full screen at all
         next.fullscreenTuck = !EqualsNoCase(mode, L"hide") && !EqualsNoCase(mode, L"show");  // tuck (the default)
     }
+    next.fullscreenShowApps = GetStringSettingCopy(L"Behavior.FullscreenShowApps");  // Bunbun
+    next.fullscreenTuckApps = GetStringSettingCopy(L"Behavior.FullscreenTuckApps");
+    next.fullscreenHideApps = GetStringSettingCopy(L"Behavior.FullscreenHideApps");
     next.hardwareMonitorModule = Wh_GetIntSetting(L"Modules.HardwareMonitorModule") != 0;
     next.connectivityModule = Wh_GetIntSetting(L"Modules.ConnectivityModule") != 0;  // Bunbun
     next.todoModule = Wh_GetIntSetting(L"Modules.TodoModule") != 0;                          // Bunbun
@@ -5034,9 +5083,13 @@ winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession Select
 // everything alike, so there a track with an album is music (YouTube Music,
 // Spotify on the web) and one without is a video (YouTube, streaming sites).
 // Music apps always count as music.
-bool IsVideoMedia(const std::wstring& aumid, int playbackType, const std::wstring& albumTitle) {
+bool IsVideoMedia(const std::wstring& aumid, int playbackType, const std::wstring& albumTitle,
+                  const std::wstring& musicApps, const std::wstring& videoApps) {
     std::wstring id = aumid;
     for (wchar_t& c : id) c = static_cast<wchar_t>(towlower(c));
+    // Your own lists first (Bunbun.MusicApps / VideoApps), for when the guess below is wrong.
+    if (bb::applist::Matches(videoApps, id)) return true;
+    if (bb::applist::Matches(musicApps, id)) return false;
     static const wchar_t* kMusicApps[] = {L"spotify", L"applemusic", L"apple music", L"itunes", L"youtube music", L"youtube-music",
                                           L"th-ch", L"tidal", L"deezer", L"amazon music", L"amazonmusic", L"foobar", L"musicbee",
                                           L"aimp", L"winamp", L"soundcloud", L"pandora", L"qobuz", L"audacious"};
@@ -5380,7 +5433,9 @@ DWORD WINAPI MediaThreadProc(void*) {
                             if (auto pt = playback.PlaybackType()) type = static_cast<int>(pt.Value());
                         } catch (...) {
                         }
-                        next.video = IsVideoMedia(next.sourceAppUserModelId, type, next.albumTitle);
+                        const Settings appLists = GetSettingsCopy();
+                        next.video = IsVideoMedia(next.sourceAppUserModelId, type, next.albumTitle, appLists.musicApps,
+                                                  appLists.videoApps);
                     }
 
                     // Fallback for VLC, which often exposes a session with no
@@ -17767,7 +17822,8 @@ class Renderer {
             mood = bb::mascot::Mood::Sleepy;
         } else if (music) {
             mood = MediaMascotMood(state.media, settings);  // Bunbun: popcorn for a video
-        } else if (settings.mascotDnd || FocusModeActive()) {  // Bunbun: Focus mode too
+        } else if (settings.mascotDnd || FocusModeActive() ||  // Bunbun: Focus mode too
+                   (settings.dndFollowSystem && g_isDnDActive.load(std::memory_order_relaxed))) {  // and Windows' DND
             // Bunbun: the mascot's own do-not-disturb (settings or Ask Bun): headphones
             // on, eyes closed, a muted bell. Deliberately independent of Windows' DND.
             mood = bb::mascot::Mood::Dnd;
@@ -22097,8 +22153,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 setHighResTimer(false);
                 if (parkedForFullscreen) {
                     MsgWaitForMultipleObjects(1, &g_stopEvent, FALSE, 1500, QS_ALLINPUT);
-                    const bool stillFullscreen =
-                        g_settings.autoHideFullscreen && IsForegroundFullscreen(hwnd);
+                    const bool stillFullscreen =  // Bunbun: still a full screen that hides
+                        FullscreenWatched(g_settings) && FullscreenAction(hwnd, g_settings) == 2;
                     g_isFullscreen.store(stillFullscreen, std::memory_order_relaxed);
                     if (!stillFullscreen) {
                         g_fullscreenOverrideVisible = false;
@@ -22439,9 +22495,13 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         static bool isFullscreen = false;
+        static bool s_fullscreenTuckNow = false;  // Bunbun: this full screen tucks (else hides)
         static double lastFullscreenCheck = -1.0;  // -1.0 guarantees the very first iteration checks
         if (now - lastFullscreenCheck > 0.5) {
-            const bool newFullscreen = g_settings.autoHideFullscreen && IsForegroundFullscreen(hwnd);
+            // Bunbun: per app (the Show / Tuck / Hide lists) on top of In full screen.
+            const int fsAction = FullscreenWatched(g_settings) ? FullscreenAction(hwnd, g_settings) : 0;
+            const bool newFullscreen = fsAction != 0;
+            s_fullscreenTuckNow = fsAction == 1;
             if (isFullscreen && !newFullscreen) {
                 // Fullscreen ended — re-arm so the next fullscreen session
                 // hides again even if the hotkey was used to reveal the
@@ -22451,7 +22511,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             // Bunbun: with "Tuck instead of hiding", full screen folds the island to a
             // line, and leaving full screen unfolds it again (only if we folded it).
             static bool s_fullscreenTucked = false;
-            if (g_settings.fullscreenTuck && newFullscreen && !isFullscreen && !g_tucked.load()) {
+            if (s_fullscreenTuckNow && newFullscreen && !isFullscreen && !g_tucked.load()) {
                 SetTucked(true);
                 s_fullscreenTucked = true;
             } else if (!newFullscreen && isFullscreen && s_fullscreenTucked) {
@@ -22601,7 +22661,7 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         const bool fullscreenSuppressed =
             isFullscreen && !g_fullscreenOverrideVisible.load(std::memory_order_relaxed) &&
-            !g_settings.fullscreenTuck;  // Bunbun: tucked instead (see the full screen check)
+            !s_fullscreenTuckNow;  // Bunbun: tucked instead (see the full screen check)
         if ((isHidden || fullscreenSuppressed) && !privacyActive && !pinned && !isHoverExpanded && !isTransientAlert) {
             primary.width = 0.0f;
             primary.height = 0.0f;
@@ -22627,7 +22687,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             } else if (g_tuckPointerLeft && g_tuckHoverSince <= 0.0) {
                 g_tuckHoverSince = now;
             }
-            if (needsYou || (g_tuckHoverSince > 0.0 && now - g_tuckHoverSince > 0.45)) {
+            if (needsYou || (g_tuckHoverSince > 0.0 && now - g_tuckHoverSince > g_settings.tuckRevealMs / 1000.0)) {
                 SetTucked(false);
             } else {
                 primary.width = 60.0f * g_settings.sizeScale;
