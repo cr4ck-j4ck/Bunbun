@@ -74,18 +74,13 @@
       - orb: Pulse Orb
   - SizeScale: '1.0'
     $name: Size scale
-    $description: Makes the entire island and its contents larger or smaller.
-    $options:
-      - '0.8': 0.8x
-      - '1.0': 1.0x
-      - '1.2': 1.2x
-      - '1.5': 1.5x
-      - '1.8': 1.8x
-      - '2.0': 2.0x
-      - '2.5': 2.5x
+    $description: Makes the whole island larger or smaller, its cards, text and icons together, from 0.6x to 2.5x.
   - AutoDpiScale: true
     $name: Auto DPI scaling
     $description: Automatically scales the island to match your monitor's DPI. Recommended for 4K screens.
+  - MatchScreenSize: false
+    $name: Match screen size
+    $description: The island grows with bigger screens, so it takes the same share of each one. A 1080p screen is 1x, 1440p about 1.3x, 4K 2x, and it re-sizes when it moves to another monitor. It never goes below your display scaling (Auto DPI scaling), and Size scale still fine-tunes it.
   $name: Appearance & Position
 - Behavior:
   - AlwaysOnTop: true
@@ -621,6 +616,9 @@
   - AfkMinutes: 3
     $name: AFK after (minutes)
     $description: With no keyboard or mouse for this long, the mascot goes AFK and munches its favourite snack until you're back. 0 turns it off.
+  - SleepMinutes: 10
+    $name: Sleep after (minutes)
+    $description: With no keyboard or mouse for this long, the mascot falls asleep until you're back. On Windows it also naps after this long without you touching the island. 0 keeps it awake.
   - DndFollowSystem: false
     $name: Follow the system's Do Not Disturb
     $description: The mascot goes Do Not Disturb whenever Windows' Do Not Disturb (or your Linux desktop's) is on, as well as with its own switch.

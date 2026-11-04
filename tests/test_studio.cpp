@@ -114,9 +114,13 @@ static void TestAgentCards() {
     a.requestId = 7;
     a.questions.push_back({L"Colour?", L"Pick", false, {L"Red", L"Blue"}});
     a.options = {L"Red", L"Blue"};
-    CHECK(!st::NeedsQuestionCard(a));  // one plain question: the quick buttons do
+    CHECK(st::NeedsQuestionCard(a));  // every question: the text wraps, options are rows
+    CHECK(st::AnswersOnPick(a));      // one single choice: a pick answers it
+    CHECK(st::QuestionCardHeight(0, false, 2) == 58 + 60 + 62);
+    CHECK(st::QuestionOptionsTop(200, true) == 27 + st::kQuestionTextMax + 4 + 16 + 6);
     a.questions.push_back({L"Sizes?", L"", true, {L"S", L"M", L"L"}});
     CHECK(st::NeedsQuestionCard(a));
+    CHECK(!st::AnswersOnPick(a));
 
     st::Answers ans;
     ans.Sync(a);

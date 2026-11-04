@@ -925,8 +925,8 @@
             for (const auto& l : a.output) row(l, SFMono, a.commandFailed ? SCol(0xff6961) : SCol(0xaeaeb2));
             if (a.output.empty() && busy) row(L"running\x2026", SFMono, SCol(0x636366));
         } else if (!a.diffOld.empty() || !a.diffNew.empty()) {
-            if (!a.diffOld.empty()) row(L"\x2212 " + a.diffOld, SFMono, SCol(0xff8a80), D2D1::ColorF(1.0f, 0.27f, 0.23f, 0.13f));
-            if (!a.diffNew.empty()) row(L"+ " + a.diffNew, SFMono, SCol(0x7ee787), D2D1::ColorF(0.2f, 0.84f, 0.29f, 0.12f));
+            if (!a.diffOld.empty()) row(L"\x2212 " + bb::FirstDiffLine(a.diffOld), SFMono, SCol(0xff8a80), D2D1::ColorF(1.0f, 0.27f, 0.23f, 0.13f));
+            if (!a.diffNew.empty()) row(L"+ " + bb::FirstDiffLine(a.diffNew), SFMono, SCol(0x7ee787), D2D1::ColorF(0.2f, 0.84f, 0.29f, 0.12f));
             if (a.added >= 0) row(L"+" + std::to_wstring(a.added) + L"  \x2212" + std::to_wstring(a.removed) + L" lines", SFSmall, SCol(0x8e8e93));
         } else if (busy || a.phase == bb::AgentPhase::Approval) {
             if (!a.prompt.empty()) row(L"\x201C" + a.prompt + L"\x201D", SFBody, SCol(0xffffff));
@@ -1378,15 +1378,20 @@
             swprintf_s(step, L"%d of %d", idx + 1, count);
             SText(step, D2D1::RectF(R - 60, T, R, T + 16), SFSmall, grey, 2);
         }
-        SText(q.text.empty() ? std::wstring(L"Has a question for you") : q.text, D2D1::RectF(tx, T + 15, R, T + 36), SFTitle, white);
-        if (!q.header.empty() || q.multi)
+        // Bunbun: the question wraps in full (the card is measured to fit it, see
+        // MeasureQuestionCard), then the hint line, then one row per option.
+        const std::wstring qText = q.text.empty() ? std::wstring(L"Has a question for you") : q.text;
+        const float qH = static_cast<float>(bb::studio::QuestionTextShown(SWrapHeight(qText, SFAsk, R - tx)));
+        SText(qText, D2D1::RectF(tx, rect.top + 27, R, rect.top + 27 + qH + 1), SFAsk, white);
+        const bool subLine = !q.header.empty() || q.multi;
+        if (subLine)
             SText(q.multi ? (q.header.empty() ? std::wstring(L"Pick any") : q.header + L" \x00B7 pick any") : q.header,
-                  D2D1::RectF(tx, T + 34, R, T + 48), SFSmall, grey);
+                  D2D1::RectF(tx, rect.top + 31 + qH, R, rect.top + 45 + qH), SFSmall, grey);
 
-        float y = T + 54;
+        float y = rect.top + static_cast<float>(bb::studio::QuestionOptionsTop(qH, subLine));
         const auto& picks = g_questions.picks[static_cast<size_t>(idx)];
         const std::wstring& typed = g_questions.other[static_cast<size_t>(idx)];
-        for (size_t i = 0; i < q.options.size() && i < 6; ++i) {
+        for (size_t i = 0; i < q.options.size() && i < static_cast<size_t>(bb::studio::kQuestionRowsMax); ++i) {
             const bool on = std::find(picks.begin(), picks.end(), static_cast<int>(i)) != picks.end();
             const D2D1_RECT_F row = D2D1::RectF(L, y, R, y + 26);
             const int index = static_cast<int>(g_agentButtons.size());
@@ -1495,6 +1500,21 @@
     }
 
     // ── Ask Bun as a chat (Studio) ──
+
+  public:
+    // Bunbun: the question card's height for the question on screen: its wrapped text
+    // decides where the options start (bb::studio::QuestionCardHeight). The render loop sizes the card with it.
+    float MeasureQuestionCard(const SharedState& state, const Settings& settings) {
+        const bb::AgentView& a = state.agent;
+        if (a.questions.empty()) return 128.0f;
+        SyncQuestions(a);
+        const size_t idx = std::min<size_t>(static_cast<size_t>(std::max(0, g_questions.index)), a.questions.size() - 1);
+        const auto& q = a.questions[idx];
+        const float textW = 440.0f - 32.0f - (settings.bunbunMascot ? 44.0f : 0.0f);
+        const float textH = SWrapHeight(q.text.empty() ? std::wstring(L"Has a question for you") : q.text, SFAsk, textW);
+        return static_cast<float>(bb::studio::QuestionCardHeight(textH, !q.header.empty() || q.multi, bb::studio::QuestionRows(q)));
+    }
+  private:
 
     float SWrapHeight(const std::wstring& text, StudioFontId font, float width) {
         IDWriteTextFormat* f = SFont(font);

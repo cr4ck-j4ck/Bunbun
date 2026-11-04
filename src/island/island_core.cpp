@@ -21,6 +21,7 @@
 #include "../common/ics.h"        // Bunbun: calendar links (.ics), shared with Linux
 #include "../common/ag_quota.h"   // Bunbun: Antigravity's quota, shared with Linux
 #include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
+#include "../agents/agent_diff.h"      // Bunbun: the approval card's diff lines, shared with Linux
 #include "../updater.h"  // Bunbun: one-click updates from the island's update notice
 #include "studio_icons.h"  // Bunbun: Studio page model and icons, shared with the Linux island
 #include <windows.h>
@@ -679,6 +680,7 @@ struct Settings {
     bool alwaysOnTop = true;
     bool expandOnHover = true;
     bool autoDpiScale = true;
+    bool matchScreenSize = false;   // Bunbun: Appearance.MatchScreenSize (MonitorScale)
     bool w11Style = false;
     bool notchStyle = false;
     // Color customization
@@ -731,6 +733,7 @@ struct Settings {
     bool streamingMood = true;      // Bunbun: videos show the Streaming mascot, not title and cover
     bool liveMood = true;           // Bunbun: the Live mood while the screen is shared or recorded
     int afkMinutes = 3;             // Bunbun: no input this long = AFK (snack); 0 = off
+    int sleepMinutes = 10;          // Bunbun: no input (or no island touch) this long = asleep; 0 = never
     bool dndFollowSystem = false;   // Bunbun: Windows' Do Not Disturb puts the mascot in DND too
     int tuckRevealMs = 450;         // Bunbun: pointing at the tucked line this long brings the island back
     std::wstring musicApps, videoApps;  // Bunbun: overrides for the music / video guess
@@ -2495,6 +2498,23 @@ inline float GetMonitorDpiScale(HMONITOR monitor) {
     return static_cast<float>(dpiX) / 96.0f;
 }
 
+// Bunbun: the island's scale for a monitor, before Size scale. Auto DPI scaling follows
+// the monitor's DPI. Match screen size gives the same share of every screen (1080
+// pixels high = 1x; the process is per-monitor DPI aware, so these are real pixels);
+// with Auto DPI on too, the larger of the two, so a 1080p screen at 125% isn't shrunk.
+inline float MonitorScale(HMONITOR monitor, bool autoDpi, bool matchScreen) {
+    if (!monitor) monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    const float dpi = autoDpi ? GetMonitorDpiScale(monitor) : 1.0f;
+    if (matchScreen) {
+        MONITORINFO mi{sizeof(mi)};
+        if (monitor && GetMonitorInfoW(monitor, &mi)) {
+            const float share = std::clamp(static_cast<float>(mi.rcMonitor.bottom - mi.rcMonitor.top) / 1080.0f, 0.75f, 3.0f);
+            return autoDpi ? std::max(dpi, share) : share;
+        }
+    }
+    return dpi;
+}
+
 
 int GetMonitorRefreshRate(HWND hwnd) {
     HMONITOR monitor = nullptr;
@@ -2598,6 +2618,7 @@ void LoadSettings() {
     // Auto DPI scaling: multiply sizeScale by monitor DPI factor for the target display.
     // On mixed-DPI setups or a 4K 200% display this scales the island to the right physical size.
     next.autoDpiScale = (Wh_GetIntSetting(L"Appearance.AutoDpiScale") != 0);
+    next.matchScreenSize = Wh_GetIntSetting(L"Appearance.MatchScreenSize") != 0;  // Bunbun
     next.bunbunAgents = Wh_GetIntSetting(L"Bunbun.Agents") != 0;
     next.bunbunMascot = Wh_GetIntSetting(L"Bunbun.Mascot") != 0;
     next.bunbunAmbientFps = ClampInt(Wh_GetIntSetting(L"Bunbun.AmbientFps"), 15, 240);
@@ -2656,8 +2677,8 @@ void LoadSettings() {
         Wh_GetIntSetting(L"Bunbun.MascotBlinkEvery") * 10, Wh_GetIntSetting(L"Bunbun.MascotEyesFollow") != 0,
         Wh_GetIntSetting(L"Bunbun.MascotCelebrate") != 0));
     HMONITOR anchorMon = GetAnchorMonitorFor(next.targetMonitor);
-    const float dpi = next.autoDpiScale ? GetMonitorDpiScale(anchorMon) : 1.0f;
-    next.sizeScale = next.baseSizeScale * dpi;
+    // Bunbun: Match screen size, or Auto DPI scaling (MonitorScale).
+    next.sizeScale = next.baseSizeScale * MonitorScale(anchorMon, next.autoDpiScale, next.matchScreenSize);
 
     std::wstring fontSetting = GetStringSettingWithFallback(L"Themes.FontFamily", L"Appearance.FontFamily");
     size_t firstChar = fontSetting.find_first_not_of(L" \t\r\n\"'");
@@ -2879,6 +2900,7 @@ void LoadSettings() {
     next.streamingMood = Wh_GetIntSetting(L"Bunbun.StreamingMood") != 0;     // Bunbun
     next.liveMood = Wh_GetIntSetting(L"Bunbun.LiveMood") != 0;               // Bunbun
     next.afkMinutes = std::clamp(Wh_GetIntSetting(L"Bunbun.AfkMinutes"), 0, 240);  // Bunbun
+    next.sleepMinutes = std::clamp(Wh_GetIntSetting(L"Bunbun.SleepMinutes"), 0, 480);  // Bunbun
     next.dndFollowSystem = Wh_GetIntSetting(L"Bunbun.DndFollowSystem") != 0;          // Bunbun
     next.tuckRevealMs = std::clamp(Wh_GetIntSetting(L"Bunbun.TuckRevealMs"), 0, 5000);  // Bunbun
     next.musicApps = GetStringSettingCopy(L"Bunbun.MusicApps");                      // Bunbun
@@ -17827,14 +17849,16 @@ class Renderer {
             // Bunbun: the mascot's own do-not-disturb (settings or Ask Bun): headphones
             // on, eyes closed, a muted bell. Deliberately independent of Windows' DND.
             mood = bb::mascot::Mood::Dnd;
+        } else if (settings.sleepMinutes > 0 && awaySeconds >= settings.sleepMinutes * 60.0) {
+            mood = bb::mascot::Mood::Sleepy;  // Bunbun: away for Sleep after: asleep
         } else if (settings.afkMinutes > 0 && awaySeconds >= settings.afkMinutes * 60.0) {
-            // Bunbun: you're away: a snack while you're gone, a nap after 20 minutes.
-            mood = awaySeconds >= 1200.0 ? bb::mascot::Mood::Sleepy : bb::mascot::Mood::Snack;
+            mood = bb::mascot::Mood::Snack;  // Bunbun: away for AFK after: a snack while you're gone
         } else {
-            // Idle life cycle: after 8 minutes of idle inactivity, mascot takes a cozy nap
+            // Idle life cycle: after Sleep after (Bunbun: was a fixed 8 minutes) without
+            // touching the island, the mascot takes a cozy nap.
             extern std::atomic<double> g_lastIslandInteractionTime;
             const double lastActive = g_lastIslandInteractionTime.load(std::memory_order_relaxed);
-            if (lastActive > 0.0 && (now - lastActive > 480.0)) {
+            if (settings.sleepMinutes > 0 && lastActive > 0.0 && (now - lastActive > settings.sleepMinutes * 60.0)) {
                 mood = bb::mascot::Mood::Sleepy;
             }
         }
@@ -18085,21 +18109,39 @@ class Renderer {
         
         const bool hasDiff = !a.diffOld.empty() || !a.diffNew.empty();
         if (hasDiff) {
-            const float wellMid = (well.top + well.bottom) * 0.5f;
-            const float textH = (well.bottom - well.top - 10.0f) * 0.33f;
-            // File / Tool info
+            // Bunbun: the file, then every − and + line on a tinted row, in a mono font.
+            // Longer than the card (see ActivityForKind) and the wheel scrolls it.
             textBrush_->SetOpacity(0.92f);
-            DrawAgentText(a.detail, D2D1::RectF(well.left + 10.0f, well.top + 4.0f, well.right - 10.0f, well.top + 4.0f + textH),
-                          smallTextFormat_.Get(), textBrush_.Get());
-            // - Red deletion line
-            if (!a.diffOld.empty()) {
-                DrawAgentText(L"− " + a.diffOld, D2D1::RectF(well.left + 10.0f, well.top + 4.0f + textH, well.right - 10.0f, well.top + 4.0f + 2.0f * textH),
-                              smallTextFormat_.Get(), AgentInk(D2D1::ColorF(0xFF6B5E)));
+            DrawEllipsizedText(a.detail, D2D1::RectF(well.left + 10.0f, well.top + 6.0f, well.right - 10.0f, well.top + 22.0f),
+                               smallTextFormat_.Get(), textBrush_.Get());
+            const std::vector<bb::DiffRow> rows = bb::DiffRows(a);
+            if (g_diffScrollFor != a.requestId) { g_diffScrollFor = a.requestId; g_diffScroll = 0.0f; }
+            const D2D1_RECT_F view = D2D1::RectF(well.left + 4.0f, well.top + 26.0f, well.right - 4.0f, well.bottom - 4.0f);
+            const float viewH = view.bottom - view.top;
+            const float h = kDiffRowH * static_cast<float>(rows.size());
+            g_diffScrollMax = std::max(0.0f, h - viewH);
+            g_diffScroll = Clamp(g_diffScroll, 0.0f, g_diffScrollMax);
+            target_->PushAxisAlignedClip(view, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            float y = view.top - g_diffScroll;
+            for (const bb::DiffRow& r : rows) {
+                if (y + kDiffRowH >= view.top && y <= view.bottom) {
+                    const bool del = r.sign < 0;
+                    const D2D1_RECT_F rr = D2D1::RectF(view.left, y, view.right - (g_diffScrollMax > 0.0f ? 8.0f : 0.0f), y + kDiffRowH);
+                    if (ID2D1SolidColorBrush* bg = AcquireBrush(del ? D2D1::ColorF(1.0f, 0.27f, 0.23f, 0.13f)
+                                                                    : D2D1::ColorF(0.2f, 0.84f, 0.29f, 0.12f)))
+                        target_->FillRectangle(rr, bg);
+                    SText(std::wstring(del ? L"\x2212 " : L"+ ") + r.text, D2D1::RectF(rr.left + 6.0f, rr.top, rr.right - 4.0f, rr.bottom),
+                          SFMono, del ? D2D1::ColorF(0xFF8A80) : D2D1::ColorF(0x7EE787));
+                }
+                y += kDiffRowH;
             }
-            // + Green addition line
-            if (!a.diffNew.empty()) {
-                DrawAgentText(L"+ " + a.diffNew, D2D1::RectF(well.left + 10.0f, well.top + 4.0f + 2.0f * textH, well.right - 10.0f, well.bottom - 3.0f),
-                              smallTextFormat_.Get(), AgentInk(D2D1::ColorF(0x34C759)));
+            target_->PopAxisAlignedClip();
+            if (g_diffScrollMax > 0.0f) {
+                // A thin scroll bar on the right edge, as on the plan card.
+                const float thumbH = std::max(18.0f, viewH * viewH / h);
+                const float ty = view.top + (viewH - thumbH) * (g_diffScroll / g_diffScrollMax);
+                if (ID2D1SolidColorBrush* b = AcquireBrush(D2D1::ColorF(1, 1, 1, 0.3f)))
+                    target_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(view.right - 4.0f, ty, view.right - 1.0f, ty + thumbH), 1.5f, 1.5f), b);
             }
         } else {
             textBrush_->SetOpacity(0.88f);
@@ -19874,6 +19916,12 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
                     const size_t rows = std::min<size_t>(state.agent.questions[idx].options.size(), 6);
                     activity.width = 440.0f;
                     activity.height = 128.0f + 30.0f * static_cast<float>(rows);
+                } else if (!state.agent.diffOld.empty() || !state.agent.diffNew.empty()) {
+                    // Bunbun: an edit grows the card to its lines (up to kDiffRowsShown; the
+                    // wheel scrolls the rest): the file row, then the − and + lines.
+                    const int rows = std::min<int>(static_cast<int>(bb::DiffRows(state.agent).size()), kDiffRowsShown);
+                    activity.width = 480.0f;
+                    activity.height = AgentLayout::kCardHeight - 28.0f + 30.0f + kDiffRowH * static_cast<float>(rows);
                 }
             } else {
                 activity.width = AgentLayout::kCompactWidth;
@@ -21792,6 +21840,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 }
             }
+            // Bunbun: over an approval card with a long edit, the wheel scrolls the diff.
+            if (g_diffScrollMax > 0.0f) {
+                bool diffShown = false;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    const bb::AgentView& a = g_state.agent;
+                    diffShown = AgentLayout::IsCard(a.phase) && a.requestId == g_diffScrollFor &&
+                                (!a.diffOld.empty() || !a.diffNew.empty());
+                }
+                if (diffShown) {
+                    g_diffScroll = Clamp(g_diffScroll - (s_wheelAccum > 0 ? 3.0f : -3.0f) * kDiffRowH, 0.0f, g_diffScrollMax);
+                    s_wheelAccum = 0;
+                    g_layoutDirty = true;
+                    return 0;
+                }
+            }
             // Bunbun: in Ask Bun chat (Studio), the wheel scrolls the transcript.
             if (g_settings.studioLayout && g_chatScrollMax > 0.0f) {
                 bool chatShown = g_lookupUi.open;
@@ -22496,6 +22560,9 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         static bool isFullscreen = false;
         static bool s_fullscreenTuckNow = false;  // Bunbun: this full screen tucks (else hides)
+        static bool s_fullscreenTucked = false;   // Bunbun: we folded it for this full screen
+        static bool s_tuckPeek = false;           // Bunbun: shown from the line in full screen; folds back
+        static double s_peekLeftAt = 0.0;         // Bunbun: when the pointer left the peeking island
         static double lastFullscreenCheck = -1.0;  // -1.0 guarantees the very first iteration checks
         if (now - lastFullscreenCheck > 0.5) {
             // Bunbun: per app (the Show / Tuck / Hide lists) on top of In full screen.
@@ -22510,7 +22577,6 @@ DWORD WINAPI RenderThreadProc(void*) {
             }
             // Bunbun: with "Tuck instead of hiding", full screen folds the island to a
             // line, and leaving full screen unfolds it again (only if we folded it).
-            static bool s_fullscreenTucked = false;
             if (s_fullscreenTuckNow && newFullscreen && !isFullscreen && !g_tucked.load()) {
                 SetTucked(true);
                 s_fullscreenTucked = true;
@@ -22643,6 +22709,11 @@ DWORD WINAPI RenderThreadProc(void*) {
 
         if (primary.kind == IslandKind::Agent && AgentLayout::IsCard(snapshot.agent.phase)) {
             secondary.reset();  // the approval card stands alone; its buttons own the clicks
+            // Bunbun: a question card is as tall as its wrapped question needs.
+            if (NeedsQuestionCard(snapshot.agent)) {
+                const Settings questionSettings = GetSettingsCopy();
+                primary.height = renderer.MeasureQuestionCard(snapshot, questionSettings) * questionSettings.sizeScale;
+            }
         }
 
         if (primary.kind == IslandKind::Lookup) {
@@ -22689,11 +22760,34 @@ DWORD WINAPI RenderThreadProc(void*) {
             }
             if (needsYou || (g_tuckHoverSince > 0.0 && now - g_tuckHoverSince > g_settings.tuckRevealMs / 1000.0)) {
                 SetTucked(false);
+                // Bunbun: in a full screen that tucks, this is only a peek: the island
+                // folds back to the line once the pointer leaves it (see below).
+                s_tuckPeek = isFullscreen && s_fullscreenTucked;
+                s_peekLeftAt = 0.0;
             } else {
                 primary.width = 60.0f * g_settings.sizeScale;
                 primary.height = 6.0f * g_settings.sizeScale;
                 secondary.reset();
                 if (g_tuckHoverSince > 0.0 || now - g_tuckedAt < 0.3) needsRender = true;
+            }
+        } else if (s_tuckPeek) {
+            // Bunbun: a full-screen peek. 0.8 s after the pointer leaves the island (and
+            // no agent is waiting for an answer), it folds back to the line.
+            const bool waiting = snapshot.agent.phase == bb::AgentPhase::Approval ||
+                                 snapshot.agent.phase == bb::AgentPhase::Question;
+            if (!isFullscreen || !s_fullscreenTuckNow) {
+                s_tuckPeek = false;
+            } else if (hover || waiting || g_lookupUi.open) {
+                s_peekLeftAt = 0.0;
+            } else if (s_peekLeftAt <= 0.0) {
+                s_peekLeftAt = now;
+                needsRender = true;
+            } else if (now - s_peekLeftAt > 0.8) {
+                SetTucked(true);
+                s_tuckPeek = false;
+                needsRender = true;
+            } else {
+                needsRender = true;  // keep ticking until it folds
             }
         }
 
@@ -22841,18 +22935,22 @@ DWORD WINAPI RenderThreadProc(void*) {
         {
             HMONITOR currentAnchor = nullptr;
             GetAnchorWorkRect(&currentAnchor);
-            const float currentDpi = GetMonitorDpiScale(currentAnchor);
-            static HMONITOR s_lastAnchorMon = nullptr;
-            static float s_lastDpi = 0.0f;
-            if (currentAnchor != s_lastAnchorMon || currentDpi != s_lastDpi) {
-                s_lastAnchorMon = currentAnchor;
-                s_lastDpi = currentDpi;
+            // Bunbun: the monitor's scale (Match screen size or Auto DPI), so a new
+            // monitor, DPI or resolution re-sizes the island.
+            bool autoDpi = true, matchScreen = false;
+            {
                 std::lock_guard lock(g_settingsMutex);
-                if (g_settings.autoDpiScale) {
-                    g_settings.sizeScale = g_settings.baseSizeScale * currentDpi;
-                } else {
-                    g_settings.sizeScale = g_settings.baseSizeScale;
-                }
+                autoDpi = g_settings.autoDpiScale;
+                matchScreen = g_settings.matchScreenSize;
+            }
+            const float currentScale = MonitorScale(currentAnchor, autoDpi, matchScreen);
+            static HMONITOR s_lastAnchorMon = nullptr;
+            static float s_lastScale = 0.0f;
+            if (currentAnchor != s_lastAnchorMon || currentScale != s_lastScale) {
+                s_lastAnchorMon = currentAnchor;
+                s_lastScale = currentScale;
+                std::lock_guard lock(g_settingsMutex);
+                g_settings.sizeScale = g_settings.baseSizeScale * currentScale;
                 g_layoutDirty = true;
             }
         }

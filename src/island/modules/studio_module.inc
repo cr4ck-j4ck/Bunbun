@@ -465,6 +465,13 @@ float g_planScroll = 0.0f;      // plan card: scrolled distance (wheel), render 
 float g_planScrollMax = 0.0f;   // set while drawing; 0 = nothing to scroll
 uint64_t g_planScrollFor = 0;   // the request the scroll belongs to
 
+// The approval card's diff: it grows to kDiffRowsShown lines, and the wheel scrolls the rest.
+constexpr int kDiffRowsShown = 12;
+constexpr float kDiffRowH = 16.0f;
+float g_diffScroll = 0.0f;      // render thread, like the plan's
+float g_diffScrollMax = 0.0f;
+uint64_t g_diffScrollFor = 0;
+
 void SyncQuestions(const bb::AgentView& a) { g_questions.Sync(a); }
 bool NeedsQuestionCard(const bb::AgentView& a) { return bb::studio::NeedsQuestionCard(a); }
 bool QuestionAnswered(int i) { return g_questions.Answered(i); }
@@ -523,6 +530,11 @@ void HandleAgentAction(int action, int arg) {
         case ActToggle: {
             SyncQuestions(a);
             g_questions.Toggle(a, arg);
+            // One single-choice question: the pick is the answer.
+            if (bb::studio::AnswersOnPick(a) && QuestionAnswered(0)) {
+                const std::string reply = QuestionsReply(a);
+                if (!reply.empty()) bb::agents::DecideRaw(a.requestId, reply);
+            }
             break;
         }
         case ActNext: {

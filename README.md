@@ -152,7 +152,9 @@ release page if you like.
 
 Each release also has **`Bunbun-<version>-amd64.deb`** for Debian, Ubuntu and their derivatives
 (`sudo apt install ./Bunbun-<version>-amd64.deb`) and **`Bunbun-<version>-x86_64.AppImage`** for
-most other distributions. It runs on GNOME and KDE, on Wayland and X11. The Linux version has the
+most other distributions. It needs a 64-bit PC with glibc 2.35 or newer: Ubuntu 22.04, Debian 12,
+openSUSE Leap 15.6 or newer, current Fedora, Arch, Linux Mint and Kali all qualify, and are tested
+(RHEL 9 and its rebuilds are too old). It runs on GNOME and KDE, on Wayland and X11. The Linux version has the
 Studio island with its pages (Home, music, lyrics, calendar, weather, system, quick toggles, to-dos,
 agents, clipboard, note, focus), the mascot, coding agents with plans, questions and replies, and the
 settings app. Ask Bun and the tray icon aren't on Linux yet. See

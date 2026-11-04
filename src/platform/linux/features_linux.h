@@ -75,6 +75,7 @@ struct Feat {
     bool mascotDnd = false;
     bool dndFollowSystem = false;  // Bunbun.DndFollowSystem: the desktop's DND puts the mascot in DND
     int afkMinutes = 3;            // Bunbun.AfkMinutes: AFK after this long without input (0 = off)
+    int sleepMinutes = 10;         // Bunbun.SleepMinutes: asleep after this long without input (0 = never)
 
     // Lyrics (Modules.*)
     bool karaoke = true, karaokeGlow = true, neighbours = false;

@@ -190,42 +190,19 @@
  "Appearance.SizeScale": {
   "default": "1.0",
   "name": "Size scale",
-  "description": "Makes the entire island and its contents larger or smaller.",
-  "options": [
-   {
-    "value": "0.8",
-    "label": "0.8x"
-   },
-   {
-    "value": "1.0",
-    "label": "1.0x"
-   },
-   {
-    "value": "1.2",
-    "label": "1.2x"
-   },
-   {
-    "value": "1.5",
-    "label": "1.5x"
-   },
-   {
-    "value": "1.8",
-    "label": "1.8x"
-   },
-   {
-    "value": "2.0",
-    "label": "2.0x"
-   },
-   {
-    "value": "2.5",
-    "label": "2.5x"
-   }
-  ]
+  "description": "Makes the whole island larger or smaller, its cards, text and icons together, from 0.6x to 2.5x.",
+  "options": []
  },
  "Appearance.AutoDpiScale": {
   "default": "true",
   "name": "Auto DPI scaling",
   "description": "Automatically scales the island to match your monitor's DPI. Recommended for 4K screens.",
+  "options": []
+ },
+ "Appearance.MatchScreenSize": {
+  "default": "false",
+  "name": "Match screen size",
+  "description": "The island grows with bigger screens, so it takes the same share of each one. A 1080p screen is 1x, 1440p about 1.3x, 4K 2x, and it re-sizes when it moves to another monitor. It never goes below your display scaling (Auto DPI scaling), and Size scale still fine-tunes it.",
   "options": []
  },
  "Behavior.AlwaysOnTop": {
@@ -1438,6 +1415,12 @@
   "default": "3",
   "name": "AFK after (minutes)",
   "description": "With no keyboard or mouse for this long, the mascot goes AFK and munches its favourite snack until you're back. 0 turns it off.",
+  "options": []
+ },
+ "Bunbun.SleepMinutes": {
+  "default": "10",
+  "name": "Sleep after (minutes)",
+  "description": "With no keyboard or mouse for this long, the mascot falls asleep until you're back. On Windows it also naps after this long without you touching the island. 0 keeps it awake.",
   "options": []
  },
  "Bunbun.DndFollowSystem": {

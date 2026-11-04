@@ -40,6 +40,7 @@
 #include <string>
 #include <vector>
 
+#include "../../agents/agent_diff.h"  // the approval card's diff lines, shared with Windows
 #include "../../agents/agent_view.h"
 #include "../../agents/hook_installer.h"
 #include "compat/d2d1.h"
@@ -80,7 +81,9 @@ constexpr double kOpenDelay = 0.15;                 // the pointer rests this lo
 
 GtkWidget* g_window = nullptr;
 bool g_layerShell = false;
-double g_scale = 1.0;       // Appearance.SizeScale
+double g_scale = 1.0;       // what everything is drawn at: g_baseScale, times the screen's share
+double g_baseScale = 1.0;   // Appearance.SizeScale
+bool g_matchScreen = false; // Appearance.MatchScreenSize
 double g_offsetY = 0;       // Appearance.OffsetY
 bool g_mascotOn = true;     // Bunbun.Mascot and MascotOnIsland
 bool g_agentsOn = true;     // Bunbun.Agents
@@ -160,8 +163,10 @@ void RebuildMirrors();
 void LoadSettings() {
     namespace s = bb::settings;
     s::Invalidate();
-    g_scale = std::clamp(s::GetDouble(L"Appearance.SizeScale"), 0.6, 2.0);
-    if (g_scale <= 0) g_scale = 1.0;
+    g_baseScale = std::clamp(s::GetDouble(L"Appearance.SizeScale"), 0.6, 2.5);
+    if (g_baseScale <= 0) g_baseScale = 1.0;
+    g_matchScreen = s::GetBool(L"Appearance.MatchScreenSize");
+    g_scale = g_baseScale;  // PlaceWindow adds the screen's share
     g_offsetY = s::GetInt(L"Appearance.OffsetY");
     bb::llook::LoadSettings();  // shape, theme, colours, font, sounds, privacy dots
     bb::lfeat::LoadSettings();  // placement, hiding, motion, alerts, the date, eyes, lyrics
@@ -490,13 +495,24 @@ mascot::Mood MoodFor(Kind k) {
     const auto& radios = bb::lsrc::RadioState();
     if (feat.mascotDnd || (feat.dndFollowSystem && radios.dndKnown && radios.dnd))
         return mascot::Mood::Dnd;  // headphones on, a DND badge (also the desktop's DND)
-    if (feat.afkMinutes > 0) {  // away from the keyboard: a snack, then a nap after 20 minutes
+    if (feat.afkMinutes > 0 || feat.sleepMinutes > 0) {  // away from the keyboard: a snack, then asleep
         const double idle = bb::lfeat::IdleSeconds();
-        if (idle >= feat.afkMinutes * 60.0) return idle >= 1200.0 ? mascot::Mood::Sleepy : mascot::Mood::Snack;
+        if (feat.sleepMinutes > 0 && idle >= feat.sleepMinutes * 60.0) return mascot::Mood::Sleepy;
+        if (feat.afkMinutes > 0 && idle >= feat.afkMinutes * 60.0) return mascot::Mood::Snack;
     }
     if (k == Kind::Toast || Now() < g_pokeUntil || bb::lfeat::BatteryCheer()) return mascot::Mood::Happy;
     if (bb::lfeat::BatteryDrowsy()) return mascot::Mood::Sleepy;
     return mascot::Mood::Idle;
+}
+
+// The approval card's diff: up to kDiffRowsShown lines, the wheel scrolls the rest (as on Windows).
+constexpr int kDiffRowsShown = 12;
+constexpr double kDiffRowH = 16;
+double g_diffScroll = 0, g_diffScrollMax = 0;
+uint64_t g_diffScrollFor = 0;
+
+int DiffRowsShown(const AgentView& a) {
+    return std::min<int>(static_cast<int>(bb::DiffRows(a).size()), kDiffRowsShown);
 }
 
 // How many lines the card's detail takes (at most 3, or 2 above a diff).
@@ -594,7 +610,7 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
         case Kind::AgentCard: {
             *w = 460;
             double body = 18.0 * CardLines(cr, g_agent);
-            if (!g_agent.diffOld.empty() || !g_agent.diffNew.empty()) body += 40;
+            if (!g_agent.diffOld.empty() || !g_agent.diffNew.empty()) body += kDiffRowH * DiffRowsShown(g_agent) + 10;
             *h = 54 + body + 52;
             return;
         }
@@ -741,6 +757,14 @@ void PaintMedia(cairo_t* cr, Rect p) {
     IconButton(cr, tx + 56, cy, 34, Action::PlayPause, g_track.playing);
     IconButton(cr, tx + 96, cy, 30, Action::Next, g_track.playing);
     Bars(cr, p.x + p.w - 34, cy, 18);
+    // Where the song is, beside the buttons; a click there jumps to that point.
+    const double barX = tx + 124, barW = p.x + p.w - 56 - barX;
+    if (g_track.length > 0 && barW > 40) {
+        static const double kBlue[3] = {0.47, 0.78, 1.0};
+        const double pos = std::clamp(bb::mpris::Position(), 0.0, g_track.length);
+        bb::lfeat::Progress(cr, barX, cy, barW, pos / g_track.length, kBlue, g_track.playing, Now());
+        g_hits.push_back({{barX, cy - 10, barW, 20}, Action::Seek});
+    }
 }
 
 void PaintAgent(cairo_t* cr, const Rect& p) {
@@ -779,9 +803,39 @@ void PaintCard(cairo_t* cr, const Rect& p) {
         y += 18.0 * lines;
     }
     if (!a.diffOld.empty() || !a.diffNew.empty()) {
-        Text(cr, "\xE2\x88\x92 " + bb::plat::Utf8(a.diffOld), p.x + 16, y + 2, p.w - 32, 11, false, 1.0, 0.5, 0.5, 0.95, true);
-        Text(cr, "+ " + bb::plat::Utf8(a.diffNew), p.x + 16, y + 20, p.w - 32, 11, false, 0.5, 0.92, 0.6, 0.95, true);
-        y += 40;
+        // Every − and + line on a tinted row; longer than the card and the wheel scrolls it.
+        const std::vector<bb::DiffRow> rows = bb::DiffRows(a);
+        if (g_diffScrollFor != a.requestId) { g_diffScrollFor = a.requestId; g_diffScroll = 0; }
+        const double vx = p.x + 14, vw = p.w - 28, vy = y + 2, vh = kDiffRowH * DiffRowsShown(a);
+        const double total = kDiffRowH * rows.size();
+        g_diffScrollMax = std::max(0.0, total - vh);
+        g_diffScroll = std::clamp(g_diffScroll, 0.0, g_diffScrollMax);
+        cairo_save(cr);
+        cairo_rectangle(cr, vx, vy, vw, vh);
+        cairo_clip(cr);
+        double ry = vy - g_diffScroll;
+        for (const bb::DiffRow& r : rows) {
+            if (ry + kDiffRowH >= vy && ry <= vy + vh) {
+                const bool del = r.sign < 0;
+                const double rw = vw - (g_diffScrollMax > 0 ? 8 : 0);
+                if (del) cairo_set_source_rgba(cr, 1.0, 0.27, 0.23, 0.13);
+                else cairo_set_source_rgba(cr, 0.2, 0.84, 0.29, 0.12);
+                cairo_rectangle(cr, vx, ry, rw, kDiffRowH);
+                cairo_fill(cr);
+                Text(cr, std::string(del ? "\xE2\x88\x92 " : "+ ") + bb::plat::Utf8(r.text), vx + 6, ry + 1, rw - 10, 11, false,
+                     del ? 1.0 : 0.49, del ? 0.54 : 0.91, del ? 0.5 : 0.53, 0.95, true);
+            }
+            ry += kDiffRowH;
+        }
+        cairo_restore(cr);
+        if (g_diffScrollMax > 0) {
+            const double thumb = std::max(18.0, vh * vh / total);
+            const double ty = vy + (vh - thumb) * (g_diffScroll / g_diffScrollMax);
+            cairo_set_source_rgba(cr, 1, 1, 1, 0.3);
+            RoundRect(cr, vx + vw - 4, ty, 3, thumb, 1.5);
+            cairo_fill(cr);
+        }
+        y += vh + 10;
     }
     const double bh = 32, gap = 8, by = p.y + p.h - bh - 12, left = p.x + 14, right = p.x + p.w - 14;
     if (a.phase == AgentPhase::Question && !a.options.empty()) {
@@ -1204,17 +1258,20 @@ void Do(const Hit& h) {
 
 gboolean OnButtonPress(GtkWidget*, GdkEventButton* e, gpointer) {
     if (e->type != GDK_BUTTON_PRESS) return TRUE;
-    if (e->button == 3) {
-        ShowMenu(reinterpret_cast<GdkEvent*>(e));
-        return TRUE;
-    }
-    if (e->button != 1) return TRUE;
+    if (e->button != 1) return TRUE;  // the menu opens on release (OnButtonRelease)
     const int i = HitAt(e->x, e->y);
     const Kind kind = CurrentKind();
     if (i >= 0 && g_hits[i].action == Action::ShelfOpen) {  // decided on release or on a drag
         g_shelfPress = g_hits[i].index;
         g_shelfPressX = e->x;
         g_shelfPressY = e->y;
+        return TRUE;
+    }
+    if (i >= 0 && g_hits[i].action == Action::Seek) {  // the progress bar: jump to where it was clicked
+        const Rect& r = g_hits[i].r;
+        if (g_track.length > 0 && r.w > 0)
+            bb::mpris::SeekTo(std::clamp((e->x / g_scale - r.x) / r.w, 0.0, 1.0) * g_track.length);
+        Redraw();
         return TRUE;
     }
     if (kind == Kind::Color && i < 0) g_colorUntil = 0;  // a click off its rows puts it away
@@ -1249,6 +1306,12 @@ gboolean OnMotion(GtkWidget*, GdkEventMotion* e, gpointer) {
 }
 
 gboolean OnButtonRelease(GtkWidget*, GdkEventButton* e, gpointer) {
+    // The menu opens on release: opened on press, the release that follows could land
+    // on its first item (Settings) and pick it, as happens under XWayland.
+    if (e->button == 3) {
+        ShowMenu(reinterpret_cast<GdkEvent*>(e));
+        return TRUE;
+    }
     if (e->button == 1 && g_shelfPress >= 0) {
         bb::lshelf::Open(g_shelfPress);
         g_shelfPress = -1;
@@ -1309,6 +1372,8 @@ gboolean OnScroll(GtkWidget*, GdkEventScroll* e, gpointer) {
     }
     const Kind k = CurrentKind();
     if (k == Kind::Studio || k == Kind::RichCard) StudioScroll(delta);
+    if (k == Kind::AgentCard && g_diffScrollMax > 0 && g_agent.requestId == g_diffScrollFor)
+        g_diffScroll = std::clamp(g_diffScroll + delta * 3 * kDiffRowH, 0.0, g_diffScrollMax);
     // Bunbun.MusicSwipe: sideways on the small music pill skips a song.
     const bool sideways = e->direction == GDK_SCROLL_LEFT || e->direction == GDK_SCROLL_RIGHT ||
                           (e->direction == GDK_SCROLL_SMOOTH && std::fabs(e->delta_x) > std::fabs(e->delta_y) && std::fabs(e->delta_x) > 0.4);
@@ -1451,9 +1516,6 @@ int IslandTop(const GdkRectangle& area, const GdkRectangle& geo) {
 // or not (Behavior.AlwaysOnTop).
 void PlaceWindow() {
     const auto& f = bb::lfeat::Get();
-    const int w = static_cast<int>(std::ceil(kCanvasW * g_scale)), h = static_cast<int>(std::ceil(CanvasH() * g_scale));
-    gtk_widget_set_size_request(g_window, w, h);
-    gtk_window_resize(GTK_WINDOW(g_window), w, h);
     GdkDisplay* display = gtk_widget_get_display(g_window);
     GdkMonitor* mon = bb::lfeat::TargetMonitor(display);
     GdkRectangle area{0, 0, 1920, 1080}, geo{0, 0, 1920, 1080};
@@ -1461,6 +1523,14 @@ void PlaceWindow() {
         gdk_monitor_get_workarea(mon, &area);
         gdk_monitor_get_geometry(mon, &geo);
     }
+    // Appearance.MatchScreenSize: the same share of every screen, 1080 high being 1x.
+    // GDK's sizes are already in the desktop's scaled units, so a 4K screen at 200%
+    // counts as 1080 (GTK doubles everything there itself) and at 100% as 2160. Never
+    // below 1x: that would undo the desktop's own scaling (as on Windows with Auto DPI).
+    g_scale = g_baseScale * (g_matchScreen ? std::clamp(geo.height / 1080.0, 1.0, 3.0) : 1.0);
+    const int w = static_cast<int>(std::ceil(kCanvasW * g_scale)), h = static_cast<int>(std::ceil(CanvasH() * g_scale));
+    gtk_widget_set_size_request(g_window, w, h);
+    gtk_window_resize(GTK_WINDOW(g_window), w, h);
     const int side = 12;  // from the screen's side for left / right
     const int dy = static_cast<int>(std::min<double>(g_offsetY, g_offsetY + ExpandedShift()));
     int x = f.align == 0 ? area.x + side : f.align == 2 ? area.x + area.width - w - side : area.x + (area.width - w) / 2;
@@ -1480,7 +1550,8 @@ void PlaceWindow() {
     }
     gtk_window_set_keep_above(GTK_WINDOW(g_window), f.onTop);
     if (!f.onTop) gtk_window_set_keep_below(GTK_WINDOW(g_window), FALSE);
-    const int y = f.bottom ? area.y + area.height - h - dy : IslandTop(area, geo) + dy;    gtk_window_move(GTK_WINDOW(g_window), x, y);
+    const int y = f.bottom ? area.y + area.height - h - dy : IslandTop(area, geo) + dy;
+    gtk_window_move(GTK_WINDOW(g_window), x, y);
 }
 
 // ── Mirrors on other displays ───────────────────────────────────────────────
@@ -1693,6 +1764,14 @@ void IslandPickColour() {
     g_idle_add([](gpointer) -> gboolean { PickColour(); return G_SOURCE_REMOVE; }, nullptr);
 }
 
+void IslandToggleHidden() {
+    g_idle_add([](gpointer) -> gboolean { bb::lfeat::ToggleHidden(); bb::ltray::Refresh(); Redraw(); return G_SOURCE_REMOVE; }, nullptr);
+}
+
+void IslandToggleTucked() {
+    g_idle_add([](gpointer) -> gboolean { bb::lfeat::SetTucked(!bb::lfeat::Tucked()); Redraw(); return G_SOURCE_REMOVE; }, nullptr);
+}
+
 int IslandCapturePages() {
     struct Job {
         std::mutex m;
@@ -1731,16 +1810,22 @@ int main(int argc, char** argv) {
             execl(exe.c_str(), exe.c_str(), static_cast<char*>(nullptr));
             return bb::plat::OpenWithDefault(bb::settings::Path()) ? 0 : 1;
         }
-        // Asks the running island to start the colour picker: bind this to a key in
-        // your desktop's keyboard settings (Wayland has no global hotkeys for apps).
-        if (a == "--pick-colour" || a == "--pick-color") {
+        // Asks the running island to start the colour picker, hide / show, or tuck:
+        // bind these to keys in your desktop's keyboard settings (Wayland has no global
+        // hotkeys for apps; on GNOME the island adds the hide and tuck ones itself).
+        const char* command = a == "--pick-colour" || a == "--pick-color" ? "pick_colour"
+                              : a == "--toggle"                          ? "toggle"
+                              : a == "--tuck"                            ? "tuck"
+                                                                         : nullptr;
+        if (command) {
             const std::string sock = bb::plat::RuntimeDir() + "/agent.sock";
+            const std::string line = std::string("{\"bunbun_command\":\"") + command + "\"}\n";
             const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
             sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
             strncpy(addr.sun_path, sock.c_str(), sizeof addr.sun_path - 1);
             const bool ok = fd >= 0 && connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0 &&
-                            write(fd, "{\"bunbun_command\":\"pick_colour\"}\n", 33) == 33;
+                            write(fd, line.data(), line.size()) == static_cast<ssize_t>(line.size());
             if (fd >= 0) close(fd);
             if (!ok) fprintf(stderr, "Bunbun isn't running.\n");
             return ok ? 0 : 1;
@@ -1750,7 +1835,8 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (a == "--help" || a == "-h") {
-            printf("Usage: bunbun [--replace | --quit | --settings | --pick-colour | --version | --render-icon FILE.png [SIZE]]\n");
+            printf("Usage: bunbun [--replace | --quit | --settings | --toggle | --tuck | --pick-colour | --version |"
+                   " --render-icon FILE.png [SIZE]]\n");
             return 0;
         }
         // Packaging draws the app icon with the real mascot code (Bun, idle).
@@ -1782,6 +1868,16 @@ int main(int argc, char** argv) {
     }
     g_layerShell = GDK_IS_WAYLAND_DISPLAY(display) && gtk_layer_is_supported();
 #endif
+    // The AppImage's bundled libraries (AppRun's LD_LIBRARY_PATH) are loaded by now.
+    // Put the caller's path back, so what the island starts (the settings window and
+    // its system WebKitGTK, links, music apps) doesn't load them too. Only after the
+    // XWayland re-exec above, which still needs them.
+    if (getenv("BUNBUN_APPIMAGE")) {
+        const char* parent = getenv("BUNBUN_PARENT_LD_LIBRARY_PATH");
+        if (parent && *parent) setenv("LD_LIBRARY_PATH", parent, 1);
+        else unsetenv("LD_LIBRARY_PATH");
+        unsetenv("BUNBUN_PARENT_LD_LIBRARY_PATH");
+    }
 
     bb::settings::EnsureFile();
     LoadSettings();
@@ -1903,6 +1999,12 @@ int main(int argc, char** argv) {
             PlaceWindow();
             RebuildMirrors();
         }), nullptr);
+    // A new resolution: Match screen size re-sizes the island for it.
+    g_signal_connect(gtk_widget_get_screen(g_window), "size-changed", G_CALLBACK(+[](GdkScreen*, gpointer) {
+        PlaceWindow();
+        RebuildMirrors();
+        Redraw();
+    }), nullptr);
 
     gtk_main();
 

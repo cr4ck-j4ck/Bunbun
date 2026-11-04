@@ -74,7 +74,9 @@ export function useSettingsStore(): Store {
     const values: Record<string, string | null> = {};
     for (const [k, v] of Object.entries(batch)) {
       const def = defaultsRef.current[k] ?? schema[k]?.default;
-      values[k] = def !== undefined && v === def ? null : v;
+      // Numbers count as the default by value: a slider's "1" is Size scale's "1.0".
+      const sameNumber = def !== undefined && def.trim() !== "" && v.trim() !== "" && !isNaN(+def) && !isNaN(+v) && +v === +def;
+      values[k] = def !== undefined && (v === def || sameNumber) ? null : v;
     }
     setSaving(true);
     call<boolean | { skipped?: string[] }>("setSettings", { values })

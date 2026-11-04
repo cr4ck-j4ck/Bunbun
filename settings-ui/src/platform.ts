@@ -22,7 +22,7 @@ export function useIsLinux(): boolean {
 // Settings the Linux island, its agent bridge and hook read. Keep in step with
 // src/platform/linux (island_linux.cpp, studio_linux.cpp) and src/agents.
 export const LINUX_SETTINGS = new Set([
-  "Appearance.SizeScale", "Appearance.OffsetY", "Themes.PillOpacity", "Themes.AccentColorMode", "Themes.CustomAccentHex",
+  "Appearance.SizeScale", "Appearance.MatchScreenSize", "Appearance.OffsetY", "Themes.PillOpacity", "Themes.AccentColorMode", "Themes.CustomAccentHex",
   // look_linux.cpp: shape, theme, colours, text, sounds, privacy dots
   "Appearance.ShapeStyle", "Themes.ThemePreset", "Themes.PillBgColor", "Themes.TextPrimaryColor", "Themes.ContourBorderMode",
   "Themes.ContourBorderHex", "Themes.DropShadow", "Themes.FontFamily", "Themes.TextScale", "Themes.IslandFill", "Themes.SolidColor",
@@ -34,7 +34,7 @@ export const LINUX_SETTINGS = new Set([
   "Appearance.Position", "Appearance.TargetMonitor", "Appearance.Displays", "Appearance.MirrorPosition", "Appearance.DisplayPositions", "Appearance.OffsetX", "Appearance.SeparateExpandedOffsetY",
   "Appearance.OffsetYExpanded", "Appearance.BorderMergedMode", "Appearance.ProgressStyle", "Appearance.SpectrumStyle",
   "Behavior.AlwaysOnTop", "Behavior.AutoHideIdleSeconds", "Behavior.FullscreenMode", "Behavior.FullscreenShowApps", "Behavior.FullscreenTuckApps",
-  "Behavior.FullscreenHideApps", "Bunbun.TuckRevealMs", "Bunbun.DndFollowSystem", "Bunbun.AfkMinutes",
+  "Behavior.FullscreenHideApps", "Bunbun.TuckRevealMs", "Bunbun.DndFollowSystem", "Bunbun.AfkMinutes", "Bunbun.SleepMinutes",
   "Bunbun.MusicApps", "Bunbun.VideoApps",
   "Behavior.UnhideOnHover", "Shortcuts.HideShowHotkeyEnabled", "Shortcuts.HideShowModifiers", "Shortcuts.HideShowKey",
   "Bunbun.TuckHotkey",

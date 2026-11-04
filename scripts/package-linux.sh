@@ -101,9 +101,10 @@ rm -rf "$APPDIR" "$APPIMAGE"
 cp -a "$ROOT" "$APPDIR"
 mkdir -p "$APPDIR/usr/lib/bunbun/lib"
 # Libraries the island needs that many desktops don't have installed:
-# gtk-layer-shell, and libsoup 3 (lyrics) with its two less common dependencies.
+# gtk-layer-shell, and libsoup 3 (lyrics) with nghttp2. Not libpsl: every distro has
+# libpsl.so.5, and the build machine's copy needs a libunistring newer systems lack.
 # HTTPS itself comes from the system's glib-networking, like every GNOME/KDE app.
-for want in libgtk-layer-shell libsoup-3.0 libnghttp2 libpsl; do
+for want in libgtk-layer-shell libsoup-3.0 libnghttp2; do
     lib="$(ldd "$APPDIR/usr/lib/bunbun/bunbun" | awk -v w="$want" 'index($1, w) == 1 {print $3}')"
     [ -n "$lib" ] && cp -L "$lib" "$APPDIR/usr/lib/bunbun/lib/"
 done
@@ -116,7 +117,11 @@ cat > "$APPDIR/AppRun" <<'EOF'
 HERE="$(dirname "$(readlink -f "$0")")"
 export BUNBUN_DATA_DIR="$HERE/usr/share/bunbun"
 # The bundled libraries are for the island only: the settings window uses the
-# system's WebKitGTK, which needs the system's own (newer) libsoup.
+# system's WebKitGTK, which needs the system's own (newer) libsoup. The island puts
+# the caller's path back once started (BUNBUN_PARENT_LD_LIBRARY_PATH), so what it
+# opens, the settings window included, gets the system's libraries.
+export BUNBUN_APPIMAGE=1
+export BUNBUN_PARENT_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 ISLAND_LIBS="$HERE/usr/lib/bunbun/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 case "${1:-}" in
     settings) shift; exec "$HERE/usr/lib/bunbun/bunbun-settings" "$@" ;;

@@ -5,6 +5,46 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.6]
+
+### Changed
+- **Approval cards show the whole edit.** The card grows with the change (up to 12 lines, in a
+  monospace font, red for removed and green for added lines) and the mouse wheel scrolls the rest. A
+  new file's content shows too. Windows and Linux.
+- **Questions from your agent show in full.** The question wraps over as many lines as it needs, and
+  every option has its own row. With one single-choice question, a click on an option answers it.
+  Windows and Linux.
+- **Linux: the hotkeys work on Wayland.** On GNOME (Ubuntu's default) Bunbun adds its hide and tuck
+  shortcuts to GNOME's custom shortcuts; on other Wayland desktops, bind `bunbun --toggle` and
+  `bunbun --tuck` (new) to keys.
+- **Island size by screen.** New *Match screen size* (Appearance → Size & text): the island grows
+  with bigger screens, so it takes the same share of each one (1080p 1x, 1440p about 1.3x, 4K 2x),
+  re-sizing when it moves to another monitor, and never below your display scaling. *Size scale* is
+  now a slider from 0.6x to 2.5x (it was seven steps); the cards, text and icons grow with it. Linux
+  goes up to 2.5x too. Windows and Linux.
+- **Sleep after (minutes)** (Mascot studio → Moods, next to AFK after): how long without keyboard
+  or mouse before the mascot falls asleep, 10 minutes by default (it was a fixed 20); 0 keeps it
+  awake. On Windows the nap after not touching the island (a fixed 8 minutes) follows it too.
+  Windows and Linux.
+- **Linux: seek in the song.** Click the progress bar on the Music page, or on the expanded music
+  card (which now has one).
+
+### Fixed
+- Windows: in a full screen that tucks the island, bringing it back from the line and moving away
+  left the island open; it now folds back to the line.
+- Linux: the island could crash on a settings save, on Connect Claude Code or when hiding it from the
+  tray (every second tray menu refresh).
+- Linux AppImage: the island didn't start on Ubuntu 24.04 and other newer systems (a bundled
+  library needed one they don't have), and the settings window opened from the island closed
+  straight away (it got the island's bundled libraries).
+- Linux: a right-click could pick the menu's first item, Settings, as the button came up; the menu
+  now opens on release.
+
+### Documentation
+- Bunbun on Linux lists its requirements (64-bit, glibc 2.35, GTK 3.22, WebKitGTK 4.1 for the
+  settings window) and the distributions it's tested on: Ubuntu 22.04 to 26.10, Linux Mint 22,
+  Debian 12 and 13, Kali, Fedora 41 and 42, Arch, openSUSE Tumbleweed and Leap 15.6.
+
 ## [0.3.5]
 
 ### Fixed

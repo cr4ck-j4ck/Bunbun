@@ -6,9 +6,39 @@ with the Studio layout, the clock, music, the mascot, coding agents (Allow / Den
 and replies typed on the island), and the settings app. The rest of this page says what works where,
 what isn't there yet, and how the port is built.
 
+## Requirements
+
+| | Needs |
+|---|---|
+| **CPU** | 64-bit x86 (`x86_64` / `amd64`). There's no ARM build yet. |
+| **C library** | glibc 2.35 or newer, and the C++ runtime from GCC 12 or newer (`libstdc++` with `GLIBCXX_3.4.30`). Every distribution from 2022 on has both. |
+| **Toolkit** | GTK 3.22 or newer. Every GNOME, KDE, XFCE, Cinnamon and MATE desktop has it. |
+| **Settings window** | WebKitGTK 4.1 (2.40 or newer). The `.deb` installs it. With the AppImage, install it yourself if the settings window doesn't open (the commands are below); without it the island still runs and opens `settings.ini` in a text editor instead. |
+| **Desktop** | Any desktop on X11 or Wayland. See [What works where](#what-works-where) for the differences. |
+
+**Tested on** (each one: the island starts and stays up, `bunbun --toggle` reaches it, the settings
+window opens, and agent hooks run):
+
+| Distribution | Version | glibc | Package |
+|---|---|---|---|
+| Ubuntu | 22.04 LTS, 24.04 LTS, 26.10 | 2.35, 2.39, 2.44 | `.deb` and AppImage |
+| Linux Mint | 22 | 2.39 | `.deb` and AppImage |
+| Debian | 12 (bookworm), 13 (trixie) | 2.36, 2.41 | `.deb` and AppImage |
+| Kali Linux | Rolling | 2.43 | `.deb` and AppImage |
+| Fedora | 41, 42 | 2.40, 2.41 | AppImage |
+| Arch Linux | Rolling | 2.44 | AppImage |
+| openSUSE | Tumbleweed, Leap 15.6 | 2.44, 2.38 | AppImage |
+
+Distributions built on these work the same way: Pop!_OS, Zorin OS, elementary OS and Linux Mint 21
+(Ubuntu 22.04 or newer), MX Linux (Debian 12 or newer), Manjaro and EndeavourOS (Arch).
+
+**Not supported:** systems older than glibc 2.35. That includes Ubuntu 20.04, Debian 11, openSUSE
+Leap 15.5, and RHEL, AlmaLinux, Rocky Linux and CentOS Stream 9 (glibc 2.34): Bunbun won't start
+there.
+
 ## Install
 
-**Debian, Ubuntu, Linux Mint, Pop!_OS** (Ubuntu 22.04 or Debian 12 and newer):
+**Debian, Ubuntu, Linux Mint, Pop!_OS, Kali** (Ubuntu 22.04 or Debian 12 and newer):
 
 ```bash
 sudo apt install ./Bunbun-<version>-amd64.deb
@@ -16,7 +46,7 @@ sudo apt install ./Bunbun-<version>-amd64.deb
 
 Then start **Bunbun** from your app menu, or run `bunbun`. Remove it with `sudo apt remove bunbun`.
 
-**Any other distribution** (Fedora, Arch, openSUSE…) with glibc 2.35 or newer:
+**Fedora, Arch, openSUSE and any other distribution** with glibc 2.35 or newer:
 
 ```bash
 chmod +x Bunbun-<version>-x86_64.AppImage
@@ -26,9 +56,25 @@ chmod +x Bunbun-<version>-x86_64.AppImage
 ./Bunbun-<version>-x86_64.AppImage
 ```
 
-`./Bunbun-<version>-x86_64.AppImage settings` opens the settings window directly. The AppImage needs
-GTK 3, which every GNOME and KDE desktop has. If your system has no FUSE, add
-`--appimage-extract-and-run`.
+`./Bunbun-<version>-x86_64.AppImage settings` opens the settings window directly. If the AppImage
+doesn't start because your system has no FUSE, add `--appimage-extract-and-run`.
+
+The AppImage brings its own libraries for the island. The settings window uses your system's
+WebKitGTK; most GNOME desktops already have it. If the settings window doesn't open, install it:
+
+```bash
+sudo dnf install webkit2gtk4.1
+```
+
+```bash
+sudo pacman -S webkit2gtk-4.1
+```
+
+```bash
+sudo zypper install libwebkit2gtk-4_1-0
+```
+
+(Fedora, Arch and Manjaro, openSUSE, in that order.)
 
 **Start at login:** Settings → General → Start when you log in. It writes
 `~/.config/autostart/bunbun.desktop`, which GNOME, KDE, XFCE, Cinnamon and MATE all read.
@@ -63,7 +109,7 @@ their data:
 | Page | On Linux |
 |---|---|
 | **Home** | Three cards picked in Settings → Island pages (Agent, Music, Focus, Weather, Calendar, Battery, System) and **Your links** under them |
-| **Music** | While something plays (MPRIS): cover, title, artist, album, controls, a glow in the album's colour |
+| **Music** | While something plays (MPRIS): cover, title, artist, album, controls, a glow in the album's colour; click the progress bar to jump to that point |
 | **Lyrics** | Synced lyrics for the song that's playing, the current line in the middle (Features → Lyrics) |
 | **Calendar** | The month, today, and today's to-dos as an agenda. Calendar links (`.ics`) aren't read on Linux yet |
 | **Weather** | Open-Meteo, like Windows: now, today's high and low, the next hours. Your city from Settings, else roughly where you are from your IP address. Fetched with GIO, or `curl` where GIO can't do https |
@@ -96,7 +142,9 @@ while you type (Enter sends, Esc cancels) and back to your windows after.
 **Look and sounds** follow the same settings as on Windows: the shape (the Notch, flush with the top
 edge and the default; Pill; or Windows 11), the theme presets and Custom colours (background, primary
 and secondary text, border), Fill (Transparent, or Opaque in one solid colour), the border, the drop
-shadow, depth shading, accent bloom, tint, font and text size. The chimes (agent done, a question, an
+shadow, depth shading, accent bloom, tint, font and text size, and the island's size (Size scale,
+0.6x to 2.5x, and Match screen size, which grows it on bigger screens; GTK's own desktop scaling
+applies on top, so there's no Auto DPI scaling here). The chimes (agent done, a question, an
 error, the open / close blips, reminders) play through `paplay`, or `pw-play` or `aplay` when that's
 what the system has; the `.deb` recommends one. **Privacy dots** show on the small island while an app
 uses the camera (green: one of your processes has a `/dev/video*` device open) or the microphone
@@ -105,10 +153,20 @@ uses the camera (green: one of your processes has a `/dev/video*` device open) o
 **Where it sits and when it hides** follow Appearance and Behavior too: top or bottom, left, centre
 or right, on the monitor you pick (or the one your pointer is on), Offset X / Y and a separate offset
 while open, Border-merged mode, Always on top; auto-hide after a while, hide or tuck in full screen,
-and unhide on hover. Full-screen detection and the hide (Ctrl+Alt+D) and tuck (Ctrl+Alt+H) hotkeys
-work on X11 (including GNOME, which runs Bunbun through XWayland); on a Wayland compositor with
-layer-shell the island sits under full-screen windows by itself, and Tuck away is in the right-click
-menu.
+and unhide on hover. Full-screen detection works on X11 (including GNOME, which runs Bunbun through
+XWayland); on a Wayland compositor with layer-shell the island sits under full-screen windows by
+itself, and Tuck away is in the right-click menu.
+
+**The hide (Ctrl+Alt+D) and tuck (Ctrl+Alt+H) hotkeys** work everywhere, set up in one of three ways:
+
+- **X11 desktops:** Bunbun grabs the keys itself.
+- **GNOME on Wayland** (Ubuntu's default): apps can't grab keys there, so Bunbun adds two GNOME
+  custom shortcuts for you, "Bunbun: hide or show the island" and "Bunbun: tuck the island away"
+  (Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts). They follow the keys you
+  pick in Bunbun's settings, and go away when you turn the hotkeys off.
+- **KDE, Sway, Hyprland and other Wayland desktops:** bind a key to `bunbun --toggle` (hide or show)
+  and `bunbun --tuck` in your desktop's keyboard settings. With the AppImage, use its path:
+  `/path/to/Bunbun-<version>-x86_64.AppImage --toggle`.
 
 **Alerts** appear on the island as on Windows: low battery and charging (with time to full),
 Caps Lock and Num Lock, brightness (from `/sys/class/backlight`), volume (`pactl subscribe`),
@@ -277,7 +335,8 @@ tree, and makes both packages from it:
 - the **`.deb`** takes its dependencies from the binaries (`dpkg-shlibdeps`), so on newer releases
   the 64-bit-time package names (`libgtk-3-0t64`) satisfy them;
 - the **AppImage** carries the programs, the settings UI, gtk-layer-shell and libsoup 3 (for the
-  island only; the settings window uses the system's), and uses the system's
+  island only: what the island opens, the settings window included, gets the system's libraries),
+  and uses the system's
   GTK 3 and WebKitGTK. Without WebKitGTK the island opens `settings.ini` in a text editor instead of
   the settings window. Because the AppImage's folder changes on every run, agent hooks point at a
   copy of `bunbun-hook` kept in `~/.local/share/Bunbun/bin`; the hook needs only the C library.

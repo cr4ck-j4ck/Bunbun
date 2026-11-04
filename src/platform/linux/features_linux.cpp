@@ -110,6 +110,7 @@ void LoadSettings() {
     f.fsHideApps = s::Get(L"Behavior.FullscreenHideApps");
     f.dndFollowSystem = s::GetBool(L"Bunbun.DndFollowSystem");
     f.afkMinutes = std::clamp(s::GetInt(L"Bunbun.AfkMinutes"), 0, 240);
+    f.sleepMinutes = std::clamp(s::GetInt(L"Bunbun.SleepMinutes"), 0, 480);
 
     SpringFor(s::Get(L"Animations.AnimationStyle"), s::Get(L"Animations.AnimationSpeed"), &f.stiffness, &f.damping);
     const std::wstring fps = s::Get(L"Animations.TargetFPS");
@@ -317,13 +318,19 @@ GdkFilterReturn OnXEvent(GdkXEvent* xev, GdkEvent*, gpointer) {
     return GDK_FILTER_CONTINUE;
 }
 
-void UpdateHotkeys() {
+// skipGrabs: GNOME runs the shortcuts instead (UpdateShortcuts); grabbing too would
+// toggle twice whenever an X11 window has the focus.
+void UpdateHotkeys(bool skipGrabs) {
     GdkDisplay* gd = gdk_display_get_default();
     if (!GDK_IS_X11_DISPLAY(gd)) return;
     Display* d = GDK_DISPLAY_XDISPLAY(gd);
     const Window root = DefaultRootWindow(d);
     gdk_x11_display_error_trap_push(gd);
     Ungrab(d, root);
+    if (skipGrabs) {
+        gdk_x11_display_error_trap_pop_ignored(gd);
+        return;
+    }
     if (g_feat.hideHotkey) {
         const std::wstring k = g_feat.hideKey.empty() ? L"D" : g_feat.hideKey;
         GrabKey(d, root, k[0], ModsFor(g_feat.hideMods), [] { ToggleHidden(); });
@@ -338,6 +345,99 @@ void UpdateHotkeys() {
     }
 }
 #endif
+
+// GNOME on Wayland: Bunbun runs through XWayland there, and an X11 key grab never
+// sees keys pressed in Wayland apps. GNOME's own custom shortcuts can run a command
+// though, so the hotkeys become two of those, running bunbun --toggle and --tuck.
+bool GnomeWayland() {
+    const char* session = getenv("XDG_SESSION_TYPE");
+    const char* desktop = getenv("XDG_CURRENT_DESKTOP");
+    return session && strcmp(session, "wayland") == 0 && desktop && (strstr(desktop, "GNOME") || strstr(desktop, "gnome"));
+}
+
+constexpr const char* kKeysSchema = "org.gnome.settings-daemon.plugins.media-keys";
+constexpr const char* kKeySchema = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding";
+constexpr const char* kKeyBase = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/";
+
+// "<Control><Alt>d" for Shortcuts.HideShowModifiers / HideShowKey.
+std::string GnomeAccel(const std::wstring& mods, wchar_t key) {
+    std::string out;
+    if (mods == L"ctrl_shift") out = "<Control><Shift>";
+    else if (mods == L"alt_shift") out = "<Alt><Shift>";
+    else if (mods == L"win_alt") out = "<Super><Alt>";
+    else if (mods == L"ctrl_alt_shift") out = "<Control><Alt><Shift>";
+    else out = "<Control><Alt>";
+    return out + static_cast<char>(std::tolower(static_cast<int>(key)));
+}
+
+// Adds or updates our custom shortcut `id`, or removes it when accel is empty.
+// Other custom shortcuts are left alone.
+void SetGnomeShortcut(const char* id, const char* name, const std::string& accel, const std::string& command) {
+    GSettingsSchemaSource* src = g_settings_schema_source_get_default();
+    GSettingsSchema* listSchema = src ? g_settings_schema_source_lookup(src, kKeysSchema, TRUE) : nullptr;
+    GSettingsSchema* keySchema = src ? g_settings_schema_source_lookup(src, kKeySchema, TRUE) : nullptr;
+    if (!listSchema || !keySchema) {  // not GNOME's settings daemon
+        if (listSchema) g_settings_schema_unref(listSchema);
+        if (keySchema) g_settings_schema_unref(keySchema);
+        return;
+    }
+    const std::string path = std::string(kKeyBase) + id + "/";
+    GSettings* list = g_settings_new_full(listSchema, nullptr, nullptr);
+    GSettings* key = g_settings_new_full(keySchema, nullptr, path.c_str());
+    gchar** paths = g_settings_get_strv(list, "custom-keybindings");
+    std::vector<const char*> keep;
+    bool listed = false;
+    for (gchar** p = paths; *p; ++p) {
+        if (path == *p) listed = true;
+        else keep.push_back(*p);
+    }
+    if (!accel.empty()) {
+        g_settings_set_string(key, "name", name);
+        g_settings_set_string(key, "command", command.c_str());
+        g_settings_set_string(key, "binding", accel.c_str());
+        keep.push_back(path.c_str());
+    } else {
+        g_settings_reset(key, "name");
+        g_settings_reset(key, "command");
+        g_settings_reset(key, "binding");
+    }
+    if (listed != !accel.empty()) {
+        keep.push_back(nullptr);
+        g_settings_set_strv(list, "custom-keybindings", keep.data());
+    }
+    g_strfreev(paths);
+    g_settings_sync();
+    g_object_unref(key);
+    g_object_unref(list);
+    g_settings_schema_unref(keySchema);
+    g_settings_schema_unref(listSchema);
+}
+
+// The hotkeys (Shortcuts.HideShowHotkeyEnabled, Bunbun.TuckHotkey): GNOME shortcuts
+// on GNOME Wayland, else X11 key grabs. Other Wayland desktops can bind
+// bunbun --toggle / --tuck in their keyboard settings (docs/linux.md).
+void UpdateShortcuts() {
+    const bool gnome = GnomeWayland();
+    if (gnome) {
+        gchar* quoted = g_shell_quote(bb::plat::IslandCommand().c_str());
+        const std::string exe = quoted;
+        g_free(quoted);
+        const std::wstring k = g_feat.hideKey.empty() ? L"D" : g_feat.hideKey;
+        const std::string toggle = g_feat.hideHotkey ? GnomeAccel(g_feat.hideMods, k[0]) : std::string();
+        const std::string tuck = g_feat.tuckHotkey ? "<Control><Alt>h" : std::string();
+        // Written only when something changed: every settings save lands here.
+        static std::string s_applied;
+        const std::string want = exe + "|" + toggle + "|" + tuck;
+        if (want != s_applied) {
+            s_applied = want;
+            SetGnomeShortcut("bunbun-toggle", "Bunbun: hide or show the island", toggle, exe + " --toggle");
+            SetGnomeShortcut("bunbun-tuck", "Bunbun: tuck the island away", tuck, exe + " --tuck");
+        }
+    }
+#ifdef GDK_WINDOWING_X11
+    UpdateHotkeys(gnome);
+#endif
+}
 }  // namespace
 
 bool FullscreenAppActive() { return g_fullscreen; }
@@ -1042,15 +1142,11 @@ void Start(std::function<void(const std::string&, const std::string&, double, do
     }, nullptr);
     CheckBattery();
     CheckAudioOutput();
-#ifdef GDK_WINDOWING_X11
-    UpdateHotkeys();
-#endif
+    UpdateShortcuts();
 }
 
 void ApplySettingsChange() {
-#ifdef GDK_WINDOWING_X11
-    UpdateHotkeys();
-#endif
+    UpdateShortcuts();
 }
 
 // ── The date ────────────────────────────────────────────────────────────────

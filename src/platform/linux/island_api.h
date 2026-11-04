@@ -16,6 +16,9 @@ void IslandSetAgentView(const bb::AgentView& view, bool nudge);
 int IslandCapturePages();
 // Starts the colour picker (bunbun --pick-colour). Any thread.
 void IslandPickColour();
+// Hides / shows (bunbun --toggle) or tucks / untucks (bunbun --tuck). Any thread.
+void IslandToggleHidden();
+void IslandToggleTucked();
 
 // Settings by "Section.Key" ("Bunbun.ShellApprovals"): true/false read as 1/0.
 int Wh_GetIntSetting(const wchar_t* name, ...);

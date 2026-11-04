@@ -986,6 +986,7 @@ void PaintMusic(cairo_t* cr, const Rect& pg) {
         const double barW = tw - 90;
         SText(cr, Clock(pos), tx, ay + 76, 40, 16, FSmall, W(0.45));
         bb::lfeat::Progress(cr, tx + 42, ay + 84, barW, pos / g_track.length, rgb, g_track.playing, Now());
+        g_hits.push_back({{tx + 42, ay + 74, barW, 20}, Action::Seek});  // click to jump there
         SText(cr, Clock(g_track.length), tx + 48 + barW, ay + 76, 40, 16, FSmall, W(0.45));
     }
     // Controls: previous, play / pause, next.
@@ -2172,7 +2173,15 @@ bool RichCardShown() {
     return (a.phase == AgentPhase::Approval && !a.plan.empty()) || st::NeedsQuestionCard(a);
 }
 
-void RichCardSize(cairo_t*, double* w, double* h) {
+// The question's wrapped height on the card (the text column beside the mascot).
+std::string QuestionText(const AgentView::Question& q) {
+    return q.text.empty() ? std::string("Has a question for you") : U(q.text);
+}
+double QuestionTextH(cairo_t* cr, const AgentView::Question& q) {
+    return WrapText(cr, QuestionText(q), 0, 0, 440 - 32 - (g_mascotOn ? 44 : 0), FAsk, W(1), false);
+}
+
+void RichCardSize(cairo_t* cr, double* w, double* h) {
     const AgentView& a = g_agent;
     if (a.phase == AgentPhase::Approval && !a.plan.empty()) {
         *w = 480;
@@ -2181,9 +2190,10 @@ void RichCardSize(cairo_t*, double* w, double* h) {
     }
     g_answers.Sync(a);
     const size_t idx = std::min<size_t>(static_cast<size_t>(std::max(0, g_answers.index)), a.questions.size() - 1);
-    const size_t rows = std::min<size_t>(a.questions[idx].options.size(), 6);
+    const auto& q = a.questions[idx];
     *w = 440;
-    *h = 128 + 30.0 * rows + (g_compose.kind == ComposeOther ? 10 : 0);
+    *h = st::QuestionCardHeight(QuestionTextH(cr, q), !q.header.empty() || q.multi, st::QuestionRows(q)) +
+         (g_compose.kind == ComposeOther ? 10 : 0);
 }
 
 void PaintRichCard(cairo_t* cr, const Rect& rect) {
@@ -2238,15 +2248,23 @@ void PaintRichCard(cairo_t* cr, const Rect& rect) {
     const int idx = std::clamp(g_answers.index, 0, count - 1);
     const auto& q = a.questions[static_cast<size_t>(idx)];
     if (count > 1) SText(cr, std::to_string(idx + 1) + " of " + std::to_string(count), R - 60, T, 60, 16, FSmall, C(0x8e8e93), 2);
-    SText(cr, q.text.empty() ? std::string("Has a question for you") : U(q.text), tx, T + 15, R - tx, 21, FTitle, W(1));
-    if (!q.header.empty() || q.multi)
-        SText(cr, q.multi ? (q.header.empty() ? std::string("Pick any") : U(q.header) + kDot + "pick any") : U(q.header), tx, T + 34,
-              R - tx, 14, FSmall, C(0x8e8e93));
-    double y = T + 54;
+    // The question wraps in full (RichCardSize measured the card to fit), then the
+    // hint line, then one row per option.
+    const double qH = st::QuestionTextShown(QuestionTextH(cr, q));
+    cairo_save(cr);
+    cairo_rectangle(cr, tx, rect.y + 27, R - tx, qH + 1);
+    cairo_clip(cr);
+    WrapText(cr, QuestionText(q), tx, rect.y + 27, R - tx, FAsk, W(1));
+    cairo_restore(cr);
+    const bool subLine = !q.header.empty() || q.multi;
+    if (subLine)
+        SText(cr, q.multi ? (q.header.empty() ? std::string("Pick any") : U(q.header) + kDot + "pick any") : U(q.header), tx,
+              rect.y + 31 + qH, R - tx, 14, FSmall, C(0x8e8e93));
+    double y = rect.y + st::QuestionOptionsTop(qH, subLine);
     const auto& picks = g_answers.picks[static_cast<size_t>(idx)];
     const std::wstring& typed = g_answers.other[static_cast<size_t>(idx)];
     const Col accent = Accent();
-    for (size_t i = 0; i < q.options.size() && i < 6; ++i) {
+    for (size_t i = 0; i < q.options.size() && i < static_cast<size_t>(st::kQuestionRowsMax); ++i) {
         const bool on = std::find(picks.begin(), picks.end(), static_cast<int>(i)) != picks.end();
         const Rect row{L, y, R - L, 26};
         Fill(cr, row.x, row.y, row.w, row.h, 9, W(on ? 0.16 : NextHitHovered() ? 0.10 : 0.05));
@@ -2334,6 +2352,9 @@ bool StudioDo(const Hit& h) {
             return true;
         case Action::QuestionToggle:
             g_answers.Toggle(a, h.index);
+            // One single-choice question: the pick is the answer.
+            if (st::AnswersOnPick(a) && g_answers.Answered(0))
+                if (const std::string reply = st::QuestionsReply(a, g_answers); !reply.empty()) bb::agents::DecideRaw(a.requestId, reply);
             return true;
         case Action::QuestionNext:
             g_answers.Sync(a);

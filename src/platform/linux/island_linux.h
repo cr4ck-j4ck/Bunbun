@@ -22,7 +22,7 @@ struct Rect {
 };
 
 enum class Action {
-    None, PlayPause, Next, Previous, Allow, Deny, Terminal, Answer, Settings,
+    None, PlayPause, Next, Previous, Seek, Allow, Deny, Terminal, Answer, Settings,
     // Studio (studio_linux.cpp)
     Tab, OpenLink, OpenMusic, AgentPage, ModelCycle,
     PlanApprove, PlanChange, QuestionToggle, QuestionNext, QuestionBack, QuestionOther, Reply,

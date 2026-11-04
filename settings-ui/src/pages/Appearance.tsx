@@ -80,6 +80,7 @@ export function Appearance() {
 
       <Section title="Size & text">
         <Setting k="Appearance.SizeScale" />
+        <Setting k="Appearance.MatchScreenSize" />
         <Setting k="Appearance.AutoDpiScale" />
         <Setting k="Themes.TextScale" />
         <Setting k="Themes.FontFamily" description="Any installed font name. Empty uses Segoe UI Variable." />

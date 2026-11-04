@@ -107,6 +107,20 @@ std::wstring Clip(std::wstring s, size_t max) {
     return s;
 }
 
+// An approval's diff keeps its lines (the card shows them and scrolls), up to a cap.
+std::wstring ClipLines(std::wstring s, size_t maxLines = 200, size_t maxChars = 12000) {
+    std::wstring out;
+    size_t lines = 1;
+    for (const wchar_t c : s) {
+        if (c == L'\r') continue;
+        if (c == L'\n' && ++lines > maxLines) { out += L"\n\x2026"; break; }
+        if (out.size() >= maxChars) { out += L'\x2026'; break; }
+        if (c == L'\t') out += L"    ";
+        else out += c;
+    }
+    return out;
+}
+
 std::wstring BaseName(const std::string& path) {
     std::wstring w = Wide(path);
     while (!w.empty() && (w.back() == L'/' || w.back() == L'\\')) w.pop_back();
@@ -735,9 +749,12 @@ std::string HandleEvent(const Value& msg) {
                         oldS = input->getString("TargetContent");
                         newS = input->getString("ReplacementContent");
                     }
+                    // A new file: its whole content is the addition.
+                    if (oldS.empty() && newS.empty()) newS = input->getString("content");
+                    if (oldS.empty() && newS.empty()) newS = input->getString("CodeContent");
                     if (!oldS.empty() || !newS.empty()) {
-                        pending->diffOld = Clip(Wide(oldS), 110);
-                        pending->diffNew = Clip(Wide(newS), 110);
+                        pending->diffOld = ClipLines(Wide(oldS));
+                        pending->diffNew = ClipLines(Wide(newS));
                     }
                 }
                 if (tool == "ExitPlanMode" && input) {
@@ -872,6 +889,14 @@ std::string HandleCommand(const std::string& command) {
     }
     if (command == "pick_colour") {  // bunbun --pick-colour, for a keyboard shortcut
         IslandPickColour();
+        return "{\"ok\":true}";
+    }
+    if (command == "toggle") {  // bunbun --toggle: the hide hotkey on Wayland
+        IslandToggleHidden();
+        return "{\"ok\":true}";
+    }
+    if (command == "tuck") {  // bunbun --tuck: the tuck hotkey on Wayland
+        IslandToggleTucked();
         return "{\"ok\":true}";
     }
     return "{\"shown\":false}";

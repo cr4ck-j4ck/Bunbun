@@ -321,13 +321,31 @@ inline std::wstring CleanPlanText(const std::wstring& plan) {
     return out;
 }
 
-// The step-through card is for what the quick buttons can't do: several
-// questions, multi-select, or a question with no or more than four options.
+// Every question with its questions listed gets the step-through card: the question
+// wraps in full and each option is a row (a row of quick buttons cut both short).
 inline bool NeedsQuestionCard(const AgentView& a) {
-    if (a.phase != AgentPhase::Question || a.questions.empty()) return false;
-    if (a.questions.size() > 1) return true;
-    const auto& q = a.questions[0];
-    return q.multi || q.options.size() < 2 || q.options.size() > 4 || a.options.empty();
+    return a.phase == AgentPhase::Question && !a.questions.empty();
+}
+
+// One single-choice question: picking an option answers it, no Send needed.
+inline bool AnswersOnPick(const AgentView& a) {
+    return a.questions.size() == 1 && !a.questions[0].multi;
+}
+
+// The question card's layout, shared by Windows and Linux. textH is the question's
+// wrapped height (at most kQuestionTextMax shows); offsets are from the card's top.
+constexpr int kQuestionRowsMax = 8;
+constexpr double kQuestionTextMax = 88;
+inline double QuestionTextShown(double textH) { return textH < 18 ? 18 : (textH > kQuestionTextMax ? kQuestionTextMax : textH); }
+inline double QuestionOptionsTop(double textH, bool subLine) {
+    const double y = 27 + QuestionTextShown(textH) + 4 + (subLine ? 16 : 0) + 6;
+    return y < 58 ? 58 : y;
+}
+inline int QuestionRows(const AgentView::Question& q) {
+    return q.options.size() < static_cast<size_t>(kQuestionRowsMax) ? static_cast<int>(q.options.size()) : kQuestionRowsMax;
+}
+inline double QuestionCardHeight(double textH, bool subLine, int rows) {
+    return QuestionOptionsTop(textH, subLine) + 30.0 * rows + 62;  // the "Your answer" line, the buttons, the margin
 }
 
 // Your answers while you step through the questions of one request.

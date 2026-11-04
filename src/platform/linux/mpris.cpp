@@ -238,6 +238,19 @@ void Raise() {
                            nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr, nullptr);
 }
 
+// Jumps to `seconds` with Seek (an offset from where the song is), which every
+// player that can seek takes; SetPosition would also need the track's id.
+void SeekTo(double seconds) {
+    Player* p = Best();
+    if (!p || !p->player) return;
+    const double from = Position();
+    const gint64 offset = static_cast<gint64>((std::max(0.0, seconds) - from) * 1e6);
+    g_dbus_proxy_call(p->player, "Seek", g_variant_new("(x)", offset), G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr, nullptr);
+    // Shown at once; the player's Seeked signal (or the next Position) corrects it.
+    p->position = std::max(0.0, seconds);
+    p->positionAt = g_get_monotonic_time();
+}
+
 void PlayPause() { Call("PlayPause"); }
 void Next() { Call("Next"); }
 void Previous() { Call("Previous"); }

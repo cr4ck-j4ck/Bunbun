@@ -72,9 +72,15 @@ bool DrawIcon() {
 void RebuildMenu() {
     if (!g_menuFor) return;
     GtkWidget* menu = g_menuFor();
+    g_object_ref_sink(menu);  // ours too: the indicator drops its reference to the old menu below
     gtk_widget_show_all(menu);
-    if (g_indicator) g_api.setMenu(g_indicator, GTK_MENU(menu));  // the indicator keeps a reference
-    if (g_menu) gtk_widget_destroy(g_menu);
+    if (g_indicator) g_api.setMenu(g_indicator, GTK_MENU(menu));
+    // Without our own reference, setMenu freed the old menu and destroying it here
+    // crashed the island on every second refresh (a settings save, hide / show).
+    if (g_menu) {
+        gtk_widget_destroy(g_menu);
+        g_object_unref(g_menu);
+    }
     g_menu = menu;
 }
 

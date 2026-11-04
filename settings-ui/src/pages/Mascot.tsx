@@ -129,6 +129,7 @@ export function Mascot() {
         <Setting k="Bunbun.MascotDnd" label="Do not disturb" description={'Headphones on, eyes closed and a Do Not Disturb badge; the mascot stops reacting. Its own switch; to follow the system\'s Do Not Disturb too, use the next one. Ask Bun "dnd on" or "dnd off" to switch it; Focus mode does the same.'} />
         <Setting k="Bunbun.DndFollowSystem" label="Follow the system's Do Not Disturb" />
         <Setting k="Bunbun.AfkMinutes" label="AFK after (minutes)" />
+        <Setting k="Bunbun.SleepMinutes" label="Sleep after (minutes)" />
         <Setting k="Bunbun.LiveMood" label="Live while the screen is shared" />
         <Setting k="Bunbun.StreamingMood" label="Streaming Shows for videos" />
         <Setting k="Bunbun.MusicApps" label="Always music" />
