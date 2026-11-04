@@ -96,6 +96,8 @@ bb::mascot::Mood MoodFromName(const std::string& m) {
     if (m == "talking") return Mood::Talking;
     if (m == "confused") return Mood::Confused;
     if (m == "streaming") return Mood::Streaming;
+    if (m == "dnd") return Mood::Dnd;
+    if (m == "live") return Mood::Live;
     return Mood::Idle;
 }
 
@@ -127,41 +129,10 @@ Value ListPacks() {
 
 // ── System ──────────────────────────────────────────────────────────────────
 
-std::string AutostartFile() {
-    const char* xdg = getenv("XDG_CONFIG_HOME");
-    return (xdg && xdg[0] == '/' ? std::string(xdg) : bb::plat::HomeDir() + "/.config") + "/autostart/bunbun.desktop";
-}
-
-bool AutostartEnabled() { return bb::plat::FileExists(AutostartFile()); }
-
-// The island to start at login: the AppImage itself when we run from one (its
-// mount point changes every run), else bunbun next to us.
-std::string IslandCommand() {
-    if (const char* appimage = getenv("APPIMAGE"); appimage && *appimage) return appimage;
-    return bb::plat::ExeDir() + "/bunbun";
-}
-
-void SetAutostart(bool on) {
-    if (!on) {
-        unlink(AutostartFile().c_str());
-        return;
-    }
-    std::string exe = IslandCommand();
-    std::string quoted = "\"";
-    for (char c : exe) {
-        if (c == '"' || c == '\\' || c == '`' || c == '$') quoted += '\\';
-        quoted += c;
-    }
-    quoted += '"';
-    bb::plat::WriteFileAtomic(AutostartFile(), "[Desktop Entry]\n"
-                                               "Type=Application\n"
-                                               "Name=Bunbun\n"
-                                               "Comment=Dynamic Island with a mascot and coding-agent companions\n"
-                                               "Exec=" + quoted + "\n"
-                                               "Icon=bunbun\n"
-                                               "X-GNOME-Autostart-enabled=true\n"
-                                               "NoDisplay=false\n");
-}
+// Start at login: bb::plat::AutostartEnabled / SetAutostart (platform.cpp, shared with the tray menu).
+using bb::plat::AutostartEnabled;
+using bb::plat::IslandCommand;
+using bb::plat::SetAutostart;
 
 // ── Page pictures (Island pages) ────────────────────────────────────────────
 // The island saves them to <state>/previews/<page>.png (studio_linux.cpp).

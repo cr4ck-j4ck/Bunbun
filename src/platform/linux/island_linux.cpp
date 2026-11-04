@@ -15,6 +15,8 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -49,6 +51,12 @@
 #include "mpris.h"
 #include "platform.h"
 #include "settings.h"
+#include "calendar_linux.h"
+#include "features_linux.h"
+#include "picker_linux.h"
+#include "shelf_linux.h"
+#include "tray_linux.h"
+#include "look_linux.h"
 #include "lyrics_linux.h"
 #include "sources.h"
 
@@ -73,17 +81,28 @@ GtkWidget* g_window = nullptr;
 bool g_layerShell = false;
 double g_scale = 1.0;       // Appearance.SizeScale
 double g_offsetY = 0;       // Appearance.OffsetY
-double g_opacity = 0.96;    // Themes.PillOpacity
-double g_fill[3] = {0.035, 0.035, 0.045};  // the surface colour; Themes.SolidColor when Fill is Opaque
 bool g_mascotOn = true;     // Bunbun.Mascot and MascotOnIsland
 bool g_agentsOn = true;     // Bunbun.Agents
 bool g_agentPill = true;    // Bunbun.AgentPill: the pill while an agent works (cards always show)
 bool g_mediaOn = true;      // Modules.Media: what's playing
 bool g_streamingMood = true;  // Bunbun.StreamingMood: a video shows the popcorn mascot and "Streaming"
+bool g_liveMood = true;       // Bunbun.LiveMood: the Live mood while the screen is shared or recorded
 bool g_expandOnHover = true;  // Behavior.ExpandOnHover; off: a click opens and closes the island
 bool g_pinned = false;      // opened by a click (ExpandOnHover off)
 std::string g_toastTitle, g_toastText;  // a reminder or the focus timer, until g_toastUntil
 double g_toastUntil = 0;
+double g_toastStart = 0, g_toastSeconds = 0;
+double g_toastLevel = -1;   // 0..1 draws a level bar (volume, brightness); < 0 none
+double g_vw = 0, g_vh = 0;  // the resize spring's velocities
+double g_yOff = 0, g_vy = 0;  // Appearance.OffsetYExpanded: the pill's extra drop while open
+double g_artChangedAt = -10;  // Animations.PillCoverSpin
+double g_trackChangedAt = -10;  // Animations.ExpandedMediaTransitions
+double g_expandUntil = 0;   // Modules.MediaAutoExpand: open until then after a new song
+double g_swipeAt = -10;     // Bunbun.MusicSwipe: one skip per gesture
+int g_shelfPress = -1;      // the shelf item pressed (opens on release, drags on a move)
+double g_shelfPressX = 0, g_shelfPressY = 0;
+int g_shelfDrag = -1;       // the shelf item being dragged out
+std::string g_lastSong;
 bool g_clock24 = true;
 bool g_showSeconds = false;
 
@@ -117,6 +136,22 @@ ID2D1RenderTarget* g_rt = nullptr;  // the mascot draws through the Direct2D sta
 double Now() { return g_get_monotonic_time() / 1e6; }
 
 void ScheduleFrame(bool fast);
+int g_fastMs = 16;  // the fast frame interval (bb::lfeat::FrameMs)
+
+// Appearance.Displays = all: a view-only copy of the island on every other
+// monitor, painted from the main island's last frame (as on Windows, mirrors
+// don't take clicks). Each sits per Appearance.MirrorPosition, or its own entry in
+// Appearance.DisplayPositions ("2=bottom-center;3=top-left").
+struct Mirror {
+    GtkWidget* window = nullptr;
+    int monitor = 0;     // 0-based
+    int align = 1;       // 0 left, 1 centre, 2 right
+    bool bottom = false;
+};
+std::vector<Mirror> g_mirrors;
+cairo_pattern_t* g_frame = nullptr;  // the main island's last frame (canvas units)
+struct { double x = 0, y = 0, w = 0, h = 0; } g_framePill;  // where the pill was in it
+void RebuildMirrors();
 
 // ── Settings ────────────────────────────────────────────────────────────────
 
@@ -126,24 +161,16 @@ void LoadSettings() {
     g_scale = std::clamp(s::GetDouble(L"Appearance.SizeScale"), 0.6, 2.0);
     if (g_scale <= 0) g_scale = 1.0;
     g_offsetY = s::GetInt(L"Appearance.OffsetY");
-    g_opacity = std::clamp(s::GetInt(L"Themes.PillOpacity"), 30, 100) / 100.0;
-    g_fill[0] = 0.035; g_fill[1] = 0.035; g_fill[2] = 0.045;
-    if (s::Get(L"Themes.IslandFill") == L"opaque") {
-        // One steady colour, nothing showing through.
-        g_opacity = 1.0;
-        std::wstring hex = s::Get(L"Themes.SolidColor");
-        if (!hex.empty() && hex[0] == L'#') hex.erase(0, 1);
-        if (hex.size() == 3) hex = {hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]};
-        const unsigned long v = hex.size() >= 6 ? std::wcstoul(hex.substr(0, 6).c_str(), nullptr, 16) : 0;
-        g_fill[0] = ((v >> 16) & 0xFF) / 255.0;
-        g_fill[1] = ((v >> 8) & 0xFF) / 255.0;
-        g_fill[2] = (v & 0xFF) / 255.0;
-    }
+    bb::llook::LoadSettings();  // shape, theme, colours, font, sounds, privacy dots
+    bb::lfeat::LoadSettings();  // placement, hiding, motion, alerts, the date, eyes, lyrics
+    bb::lcal::LoadSettings();   // calendar links and the meeting alert
+    bb::llook::SetEdge(bb::lfeat::Get().bottom, bb::lfeat::Get().merged);
     g_mascotOn = s::GetBool(L"Bunbun.Mascot") && s::GetBool(L"Bunbun.MascotOnIsland");
     g_agentsOn = s::GetBool(L"Bunbun.Agents");
     g_agentPill = s::GetBool(L"Bunbun.AgentPill");
     g_mediaOn = s::GetBool(L"Modules.Media");
     g_streamingMood = s::GetBool(L"Bunbun.StreamingMood");
+    g_liveMood = s::GetBool(L"Bunbun.LiveMood");
     g_expandOnHover = s::GetBool(L"Behavior.ExpandOnHover");
     if (g_expandOnHover) g_pinned = false;
     g_showSeconds = s::GetBool(L"Modules.ShowSeconds");
@@ -182,8 +209,8 @@ void RoundRect(cairo_t* cr, double x, double y, double w, double h, double r) {
 double Text(cairo_t* cr, const std::string& text, double x, double y, double maxW, double size, bool bold,
             double r, double g, double b, double a, bool mono, int lines) {
     PangoLayout* layout = pango_cairo_create_layout(cr);
-    PangoFontDescription* font = pango_font_description_from_string(mono ? "Monospace" : "Sans");
-    pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
+    PangoFontDescription* font = pango_font_description_from_string(mono ? "Monospace" : bb::llook::Font());
+    pango_font_description_set_absolute_size(font, bb::llook::TextSize(size) * PANGO_SCALE);
     pango_font_description_set_weight(font, bold ? PANGO_WEIGHT_SEMIBOLD : PANGO_WEIGHT_NORMAL);
     pango_layout_set_font_description(layout, font);
     pango_layout_set_text(layout, text.c_str(), -1);
@@ -197,6 +224,7 @@ double Text(cairo_t* cr, const std::string& text, double x, double y, double max
     }
     int w = 0, h = 0;
     pango_layout_get_pixel_size(layout, &w, &h);
+    bb::llook::Ink(&r, &g, &b, &a);  // "white" is the theme's text colour
     cairo_set_source_rgba(cr, r, g, b, a);
     cairo_move_to(cr, x, y);
     pango_cairo_show_layout(cr, layout);
@@ -207,8 +235,8 @@ double Text(cairo_t* cr, const std::string& text, double x, double y, double max
 
 double TextWidth(cairo_t* cr, const std::string& text, double size, bool bold) {
     PangoLayout* layout = pango_cairo_create_layout(cr);
-    PangoFontDescription* font = pango_font_description_from_string("Sans");
-    pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
+    PangoFontDescription* font = pango_font_description_from_string(bb::llook::Font());
+    pango_font_description_set_absolute_size(font, bb::llook::TextSize(size) * PANGO_SCALE);
     pango_font_description_set_weight(font, bold ? PANGO_WEIGHT_SEMIBOLD : PANGO_WEIGHT_NORMAL);
     pango_layout_set_font_description(layout, font);
     pango_layout_set_text(layout, text.c_str(), -1);
@@ -269,7 +297,8 @@ void Button(cairo_t* cr, const Rect& r, const std::string& label, bool primary, 
 
 // Media control glyphs, drawn rather than taken from a font.
 void Glyph(cairo_t* cr, Action a, double cx, double cy, double s, bool playing) {
-    cairo_set_source_rgba(cr, 1, 1, 1, 0.92);
+    const auto& ink = bb::llook::Get().ink;
+    cairo_set_source_rgba(cr, ink[0], ink[1], ink[2], 0.92);
     if (a == Action::PlayPause && playing) {
         cairo_rectangle(cr, cx - s * 0.45, cy - s * 0.5, s * 0.3, s);
         cairo_rectangle(cr, cx + s * 0.15, cy - s * 0.5, s * 0.3, s);
@@ -302,6 +331,14 @@ void IconButton(cairo_t* cr, double cx, double cy, double size, Action a, bool p
 void Art(cairo_t* cr, double x, double y, double size, double alpha) {
     if (!g_art || alpha <= 0) return;
     cairo_save(cr);
+    // Animations.PillCoverSpin: a new cover spins in on the small island.
+    const double spin = Now() - g_artChangedAt;
+    if (bb::lfeat::Get().coverSpin && size < 40 && spin < 0.6) {
+        const double e = 1.0 - std::pow(1.0 - spin / 0.6, 3);
+        cairo_translate(cr, x + size / 2, y + size / 2);
+        cairo_rotate(cr, (1.0 - e) * -2 * M_PI);
+        cairo_translate(cr, -(x + size / 2), -(y + size / 2));
+    }
     RoundRect(cr, x, y, size, size, size * 0.22);
     cairo_clip(cr);
     const double k = size / std::max(gdk_pixbuf_get_width(g_art), gdk_pixbuf_get_height(g_art));
@@ -313,15 +350,11 @@ void Art(cairo_t* cr, double x, double y, double size, double alpha) {
     cairo_restore(cr);
 }
 
-// Bars that bob while music plays. Not driven by the audio yet (see docs/linux.md).
+// Bars that bob while music plays, in Appearance.SpectrumStyle. Not driven by the
+// audio yet (see docs/linux.md).
 void Bars(cairo_t* cr, double x, double cy, double h) {
-    const double t = Now();
-    cairo_set_source_rgba(cr, 0.47, 0.78, 1.0, 0.9);
-    for (int i = 0; i < 4; ++i) {
-        const double v = g_track.playing ? 0.35 + 0.65 * std::fabs(std::sin(t * (3.1 + i * 0.9) + i * 1.7)) : 0.25;
-        RoundRect(cr, x + i * 5, cy - h * v / 2, 3, h * v, 1.5);
-        cairo_fill(cr);
-    }
+    static const double kBlue[3] = {0.47, 0.78, 1.0};
+    bb::lfeat::Spectrum(cr, x, cy, 20, h, kBlue, 0.9, g_track.playing, Now());
 }
 
 std::string ClockText() {
@@ -344,22 +377,89 @@ std::string AgentLine(const AgentView& a) {
 
 // ── What to show ────────────────────────────────────────────────────────────
 
-enum class Kind { Clock, Media, Agent, AgentCard, Studio, RichCard, Toast };
+enum class Kind { Clock, Media, Agent, AgentCard, Studio, RichCard, Toast, Hidden, Tuck, Meeting, Color };
+
+// The colour just picked (the colour picker): a card with HEX, RGB and HSL; a
+// click on a row copies that form. It stays a while, or until you click elsewhere.
+struct PickedColour { uint8_t r = 0, g = 0, b = 0; };
+PickedColour g_color;
+double g_colorUntil = 0;
+int g_colorCopied = 0;       // the row copied last (the hex is copied on picking)
+double g_colorCopiedAt = 0;
+
+std::string ColorRow(int row) {
+    char buf[64];
+    const auto& c = g_color;
+    if (row == 0) {
+        snprintf(buf, sizeof buf, "#%02X%02X%02X", c.r, c.g, c.b);
+    } else if (row == 1) {
+        snprintf(buf, sizeof buf, "rgb(%d, %d, %d)", c.r, c.g, c.b);
+    } else {
+        const double r = c.r / 255.0, g = c.g / 255.0, b = c.b / 255.0;
+        const double mx = std::max({r, g, b}), mn = std::min({r, g, b}), l = (mx + mn) / 2, d = mx - mn;
+        double h = 0, s = 0;
+        if (d > 1e-9) {
+            s = d / (1 - std::fabs(2 * l - 1));
+            h = mx == r ? std::fmod((g - b) / d, 6.0) : mx == g ? (b - r) / d + 2 : (r - g) / d + 4;
+            h *= 60;
+            if (h < 0) h += 360;
+        }
+        snprintf(buf, sizeof buf, "hsl(%d, %d%%, %d%%)", static_cast<int>(std::lround(h)), static_cast<int>(std::lround(s * 100)),
+                 static_cast<int>(std::lround(l * 100)));
+    }
+    return buf;
+}
+
+void CopyColorRow(int row) {
+    bb::lsrc::CopyText(ColorRow(row));
+    g_colorCopied = row;
+    g_colorCopiedAt = Now();
+    g_colorUntil = std::max(g_colorUntil, Now() + 6);
+}
+
+void PickColour() {
+    bb::lpick::Start([](uint8_t r, uint8_t g, uint8_t b) {
+        g_color = {r, g, b};
+        g_colorUntil = Now() + 12;
+        CopyColorRow(0);  // the hex is on the clipboard straight away
+        Redraw();
+    });
+}
+
+// A new song opened the island for a moment (Modules.MediaAutoExpand).
+bool AutoExpanding() { return g_track.playing && Now() < g_expandUntil; }
 
 Kind CurrentKind() {
     Kind k = Kind::Clock;
     const bool toast = Now() < g_toastUntil && !Composing() && !g_hover;
+    const auto& f = bb::lfeat::Get();
+    const bool needsYou = g_agentsOn && (g_agent.phase == AgentPhase::Approval || g_agent.phase == AgentPhase::Question);
+    if (!needsYou && Now() < g_colorUntil) return Kind::Color;
+    if (!needsYou && !Composing()) {
+        // Hidden with the hotkey; tucked into a line (by hand, or in full screen);
+        // hidden in full screen; hidden after a while without anything happening.
+        // Pointing at a tucked line for a moment brings the island back.
+        const bool fullscreen = bb::lfeat::FullscreenAppActive();
+        const bool reveal = g_hover && Now() - g_hoverSince > 0.45;
+        if (bb::lfeat::HiddenByHotkey()) return Kind::Hidden;
+        if (bb::lfeat::Tucked() && reveal) bb::lfeat::SetTucked(false);
+        if (bb::lfeat::Tucked() || (fullscreen && f.tuckFullscreen && !reveal)) return Kind::Tuck;
+        if (fullscreen && f.hideFullscreen && !(f.unhideOnHover && g_hover)) return Kind::Hidden;
+        if (bb::lfeat::AutoHidden() && !toast && !(f.unhideOnHover && g_hover)) return Kind::Hidden;
+    }
     if (g_agentsOn && g_agent.phase != AgentPhase::None) {
         if (g_agent.phase == AgentPhase::Approval || g_agent.phase == AgentPhase::Question)
             return RichCardShown() ? Kind::RichCard : Kind::AgentCard;
         if (g_agentPill) k = Kind::Agent;
     }
     if (toast) return Kind::Toast;
+    // A meeting about to start (Modules.MeetingAlertMinutes), over the clock and music.
+    if (k == Kind::Clock && bb::lcal::PillWanted(static_cast<double>(time(nullptr))) && !g_hover) return Kind::Meeting;
     if (k == Kind::Clock && g_track.active && g_mediaOn) k = Kind::Media;
     // Studio: the frame opens while the pointer rests on the island, and stays
     // open while you type a reply into it.
     const bool open = g_pinned || (g_expandOnHover && g_hover && Now() - g_hoverSince >= kOpenDelay);
-    if (StudioLayout() && (Composing() || open)) return Kind::Studio;
+    if (StudioLayout() && (Composing() || open || (k == Kind::Media && AutoExpanding()))) return Kind::Studio;
     return k;
 }
 
@@ -376,9 +476,12 @@ mascot::Mood MoodFor(Kind k) {
             default: break;
         }
     }
+    if (g_liveMood && bb::llook::ScreenInUse()) return mascot::Mood::Live;  // streaming / sharing / recording
     if ((k == Kind::Media || k == Kind::Studio) && g_track.playing)
         return StreamingNow() ? mascot::Mood::Streaming : mascot::Mood::Music;
-    if (k == Kind::Toast || Now() < g_pokeUntil) return mascot::Mood::Happy;
+    if (bb::lfeat::Get().mascotDnd) return mascot::Mood::Dnd;  // headphones on, a muted bell
+    if (k == Kind::Toast || Now() < g_pokeUntil || bb::lfeat::BatteryCheer()) return mascot::Mood::Happy;
+    if (bb::lfeat::BatteryDrowsy()) return mascot::Mood::Sleepy;
     return mascot::Mood::Idle;
 }
 
@@ -390,25 +493,86 @@ int CardLines(cairo_t* cr, const AgentView& a) {
     return std::clamp(static_cast<int>(std::ceil(width / (460 - 32 - 30))), 1, most);  // a little slack for mono / wrapping
 }
 
+// Privacy dots on the right of the small island, as on Windows: outermost the
+// screen (blue, shared or recorded), then the camera (green), then the microphone (orange).
+int DotCount() { return (bb::llook::ScreenInUse() ? 1 : 0) + (bb::llook::CamInUse() ? 1 : 0) + (bb::llook::MicInUse() ? 1 : 0); }
+double DotsRoom() { const int n = DotCount(); return n ? 8.0 + n * 13.0 : 0.0; }
+
+void PaintDots(cairo_t* cr, const Rect& p) {
+    const auto& l = bb::llook::Get();
+    double x = p.x + p.w - 16 - 4;
+    const auto dot = [&](const double* c) {
+        cairo_arc(cr, x, p.y + p.h / 2, 4, 0, 2 * M_PI);
+        cairo_set_source_rgba(cr, c[0], c[1], c[2], 1);
+        cairo_fill(cr);
+        x -= 13;
+    };
+    if (bb::llook::ScreenInUse()) dot(l.screenColor);
+    if (bb::llook::CamInUse()) dot(l.camColor);
+    if (bb::llook::MicInUse()) dot(l.micColor);
+}
+
+// What the small idle island shows beside the face (Bunbun.IdleStripItems).
+std::string StripText() {
+    const int strip = bb::lfeat::Get().strip;
+    std::string text;
+    if (strip == 0 || strip == 1) text = ClockText();
+    const auto& w = bb::lsrc::CurrentWeather();
+    if ((strip == 0 || strip == 2) && w.has) {
+        const std::string temp = std::to_string(static_cast<int>(std::lround(w.temp))) + "\xC2\xB0";
+        text += text.empty() ? temp : " \xC2\xB7 " + temp;
+    }
+    if (strip == 2 && text.empty()) text = ClockText();  // no weather yet: the time meanwhile
+    return text;
+}
+
+bool FaceShown() { return g_mascotOn || bb::lfeat::Get().eyes; }
+
 // The pill's target size for what it shows.
 void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
+    const auto& f = bb::lfeat::Get();
     switch (k) {
-        case Kind::Clock:
-            *w = 30 + TextWidth(cr, ClockText(), 14, true) + (g_mascotOn ? 34 : 0);
+        case Kind::Hidden:  // invisible; its size is where pointing brings it back
+            *w = 120;
             *h = kCollapsedH;
             return;
-        case Kind::Media:
-            if (g_pinned || (g_expandOnHover && g_hover)) { *w = 380; *h = 96; return; }
+        case Kind::Tuck:
+            *w = 60;
+            *h = 6;
+            return;
+        case Kind::Color:
+            *w = 300;
+            *h = 112;
+            return;
+        case Kind::Meeting:
+            *w = std::clamp(56 + TextWidth(cr, bb::plat::Utf8(bb::lcal::Next().title), 13.5, true) + 30 +
+                                (bb::lcal::Next().joinUrl.empty() ? 0 : 70),
+                            240.0, 460.0);
+            *h = 50;
+            return;
+        case Kind::Clock: {
+            const std::string strip = StripText();
+            *w = (strip.empty() ? 16 : 30 + TextWidth(cr, strip, 14, true)) + (FaceShown() ? 34 : 0) + DotsRoom();
+            *h = kCollapsedH;
+            return;
+        }
+        case Kind::Media: {
+            if (g_pinned || (g_expandOnHover && g_hover) || AutoExpanding()) { *w = 380; *h = 96; return; }
+            // Modules.MediaPillClock: the time on the left of the music pill.
+            const double clock = f.pillClock ? TextWidth(cr, ClockText(), 13, true) + 18 : 0;
             if (StreamingNow()) {  // the mascot, "Streaming" and the bars
-                *w = 44 + TextWidth(cr, "Streaming", 12.5, true) + 44;
+                *w = clock + 44 + TextWidth(cr, "Streaming", 12.5, true) + 44 + DotsRoom();
                 *h = kCollapsedH;
                 return;
             }
             // Lyrics on the small island: as wide as the song's longest line needs.
-            if (const double lw = LyricPillWidth(cr, 38 + 40); lw > 0) { *w = lw; *h = kCollapsedH; return; }
-            *w = 36 + std::min(200.0, TextWidth(cr, g_track.title, 12.5, true)) + 44;
+            if (const double lw = LyricPillWidth(cr, 38 + 40); lw > 0) { *w = clock + lw + DotsRoom(); *h = kCollapsedH; return; }
+            // Modules.CollapsedTitle off: just the cover and the bars.
+            const double title = f.collapsedTitle ? std::min(200.0, TextWidth(cr, g_track.title, 12.5, true)) : 0;
+            *w = clock + 36 + title + 44 + DotsRoom();
             *h = kCollapsedH;
             return;
+        }
         case Kind::Agent:
             *w = g_agent.phase == AgentPhase::Finished || g_agent.phase == AgentPhase::Error ? 320 : 400;
             *h = 44;
@@ -428,7 +592,9 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
             RichCardSize(cr, w, h);
             return;
         case Kind::Toast:
-            *w = std::clamp(56 + std::max(TextWidth(cr, g_toastTitle, 11.5, true), TextWidth(cr, g_toastText, 13.5, true)) + 22, 200.0, 440.0);
+            *w = std::clamp(56 + std::max(TextWidth(cr, g_toastTitle, 11.5, true), TextWidth(cr, g_toastText, 13.5, true)) + 22 +
+                                (g_toastLevel >= 0 ? 90 : 0),
+                            200.0, 440.0);
             *h = 50;
             return;
     }
@@ -438,21 +604,92 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
 
 void PaintClock(cairo_t* cr, const Rect& p) {
     double x = p.x + 14;
-    if (g_mascotOn) {
+    if (bb::lfeat::Get().eyes) {  // Bunbun.IdleFace = eyes
+        bb::lfeat::DrawEyes(cr, x + 13, p.y + p.h / 2, 26, g_mood, g_agent.phase, Now(), g_moodSince, g_hover ? g_mouseX : -1, g_mouseY);
+        x += 34;
+    } else if (g_mascotOn) {
         DrawMascot(cr, x + 13, p.y + p.h / 2, 30);
         x += 34;
     }
-    Text(cr, ClockText(), x, p.y + (p.h - 18) / 2, p.w - (x - p.x) - 10, 14, true);
+    Text(cr, StripText(), x, p.y + (p.h - 18) / 2, p.w - (x - p.x) - 10 - DotsRoom(), 14, true);
 }
 
-void PaintMedia(cairo_t* cr, const Rect& p) {
+void PaintColor(cairo_t* cr, const Rect& p) {
+    const auto& c = g_color;
+    // The swatch, then one row per form; the copied one says so for a moment.
+    RoundRect(cr, p.x + 14, p.y + 14, 84, 84, 14);
+    cairo_set_source_rgb(cr, c.r / 255.0, c.g / 255.0, c.b / 255.0);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgba(cr, 1, 1, 1, 0.18);
+    cairo_set_line_width(cr, 1);
+    cairo_stroke(cr);
+    g_hits.push_back({{p.x + 14, p.y + 14, 84, 84}, Action::ColorPick});  // the swatch picks again
+    static const char* kLabels[3] = {"HEX", "RGB", "HSL"};
+    for (int row = 0; row < 3; ++row) {
+        const Rect r{p.x + 110, p.y + 12 + row * 30, p.w - 124, 28};
+        const bool hover = static_cast<int>(g_hits.size()) == g_hoverHit;
+        if (hover) {
+            RoundRect(cr, r.x, r.y, r.w, r.h, 8);
+            cairo_set_source_rgba(cr, 1, 1, 1, 0.1);
+            cairo_fill(cr);
+        }
+        const bool copied = row == g_colorCopied && Now() - g_colorCopiedAt < 1.6;
+        Text(cr, kLabels[row], r.x + 8, r.y + 6, 34, 11, true, 1, 1, 1, 0.5);
+        Text(cr, copied ? "Copied" : ColorRow(row), r.x + 44, r.y + 5, r.w - 52, 13, true, copied ? 0.2 : 1, copied ? 0.88 : 1,
+             copied ? 0.4 : 1, 1, row == 0);
+        g_hits.push_back({r, Action::ColorCopy, row});
+    }
+}
+
+// A meeting about to start: its title, a countdown and Join (when it has a link).
+void PaintMeeting(cairo_t* cr, const Rect& p) {
+    const bb::ics::Meeting& m = bb::lcal::Next();
+    DrawMascot(cr, p.x + 26, p.y + p.h / 2, 32);
+    const double now = static_cast<double>(time(nullptr));
+    const int mins = static_cast<int>(std::ceil((m.startsAt - now) / 60.0));
+    const std::string when = mins > 1 ? "In " + std::to_string(mins) + " min" : mins == 1 ? "In 1 min" : "Now";
+    const bool join = !m.joinUrl.empty();
+    const double x = p.x + 50, w = p.w - 50 - 16 - (join ? 74 : 0);
+    Text(cr, when, x, p.y + 7, w, 11.5, true, 1.0, 0.62, 0.04, 1.0);
+    Text(cr, bb::plat::Utf8(m.title), x, p.y + 24, w, 13.5, true);
+    if (join) Button(cr, {p.x + p.w - 16 - 66, p.y + 10, 66, 30}, "Join", true, Action::MeetingJoin);
+    g_hits.push_back({{p.x, p.y, p.w - (join ? 90 : 0), p.h}, Action::MeetingDismiss});
+}
+
+// A tucked island: a thin line in the agents' colour (orange while one works,
+// green when it's done, red on an error), white otherwise.
+void PaintTuck(cairo_t* cr, const Rect& p) {
+    double c[3] = {1, 1, 1}, a = 0.55;
+    switch (g_agentsOn ? g_agent.phase : AgentPhase::None) {
+        case AgentPhase::Working:
+        case AgentPhase::Thinking: c[0] = 1; c[1] = 0.6; c[2] = 0.12; a = 0.95; break;
+        case AgentPhase::Finished: c[0] = 0.13; c[1] = 0.88; c[2] = 0.35; a = 0.95; break;
+        case AgentPhase::Error: c[0] = 1; c[1] = 0.23; c[2] = 0.23; a = 0.95; break;
+        default: break;
+    }
+    RoundRect(cr, p.x + 4, p.y + 1.5, p.w - 8, 3, 1.5);
+    cairo_set_source_rgba(cr, c[0], c[1], c[2], a);
+    cairo_fill(cr);
+}
+
+void PaintMedia(cairo_t* cr, Rect p) {
     const bool expanded = p.h > 60;
+    if (!expanded && bb::lfeat::Get().pillClock) {  // the time on the left, then a divider
+        const std::string clock = ClockText();
+        const double cw = TextWidth(cr, clock, 13, true);
+        Text(cr, clock, p.x + 14, p.y + (p.h - 17) / 2, cw + 2, 13, true);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.15);
+        cairo_rectangle(cr, p.x + 14 + cw + 8, p.y + 10, 1, p.h - 20);
+        cairo_fill(cr);
+        p.x += cw + 18;
+        p.w -= cw + 18;
+    }
     if (!expanded && StreamingNow()) {
         // A video: no cover or title, just the mascot with its popcorn, "Streaming"
         // and the bars (still in the accent colour).
         DrawMascot(cr, p.x + 22, p.y + p.h / 2, 34);
-        Text(cr, "Streaming", p.x + 44, p.y + (p.h - 16) / 2, p.w - 44 - 40, 12.5, true);
-        Bars(cr, p.x + p.w - 30, p.y + p.h / 2, 16);
+        Text(cr, "Streaming", p.x + 44, p.y + (p.h - 16) / 2, p.w - 44 - 40 - DotsRoom(), 12.5, true);
+        Bars(cr, p.x + p.w - 30 - DotsRoom(), p.y + p.h / 2, 16);
         return;
     }
     if (!expanded) {
@@ -462,10 +699,12 @@ void PaintMedia(cairo_t* cr, const Rect& p) {
         if (g_art) artAlpha = g_mascotOn ? (phase < 3.5 ? std::clamp(std::min(phase, 3.5 - phase) / 0.35, 0.0, 1.0) : 0.0) : 1.0;
         if (artAlpha < 1.0) DrawMascot(cr, p.x + 21, p.y + p.h / 2, 28);  // under the art while it fades
         Art(cr, p.x + 9, p.y + 5, p.h - 10, artAlpha);
-        if (bb::llyrics::PillOn()) PaintLyricPill(cr, {p.x + 38, p.y, p.w - 38 - 40, p.h});
-        else Text(cr, g_track.title.empty() ? g_track.player : g_track.title, p.x + 38, p.y + (p.h - 16) / 2, p.w - 38 - 40, 12.5,
-                  true);
-        Bars(cr, p.x + p.w - 30, p.y + p.h / 2, 16);
+        const double room = DotsRoom();
+        if (bb::llyrics::PillOn()) PaintLyricPill(cr, {p.x + 38, p.y, p.w - 38 - 40 - room, p.h});
+        else if (bb::lfeat::Get().collapsedTitle)
+            Text(cr, g_track.title.empty() ? g_track.player : g_track.title, p.x + 38, p.y + (p.h - 16) / 2, p.w - 38 - 40 - room,
+                 12.5, true);
+        Bars(cr, p.x + p.w - 30 - room, p.y + p.h / 2, 16);
         return;
     }
     const double art = p.h - 24;
@@ -477,8 +716,12 @@ void PaintMedia(cairo_t* cr, const Rect& p) {
         DrawMascot(cr, p.x + 12 + art / 2, p.y + 12 + art / 2, art * 0.9);
     }
     const double tx = p.x + 24 + art, tw = p.w - (tx - p.x) - 14;
-    Text(cr, g_track.title, tx, p.y + 13, tw, 14, true);
-    Text(cr, g_track.artist.empty() ? g_track.player : g_track.artist, tx, p.y + 33, tw, 12, false, 1, 1, 1, 0.65);
+    // Animations.ExpandedMediaTransitions: a new song's words fade and slide in.
+    const double since = Now() - g_trackChangedAt;
+    const double in = bb::lfeat::Get().mediaTransitions && since < 0.35 ? since / 0.35 : 1.0;
+    const double slide = (1.0 - in) * 8;
+    Text(cr, g_track.title, tx + slide, p.y + 13, tw, 14, true, 1, 1, 1, in);
+    Text(cr, g_track.artist.empty() ? g_track.player : g_track.artist, tx + slide, p.y + 33, tw, 12, false, 1, 1, 1, 0.65 * in);
     const double cy = p.y + p.h - 24;
     IconButton(cr, tx + 16, cy, 30, Action::Previous, g_track.playing);
     IconButton(cr, tx + 56, cy, 34, Action::PlayPause, g_track.playing);
@@ -547,14 +790,45 @@ void PaintCard(cairo_t* cr, const Rect& p) {
 
 void PaintToast(cairo_t* cr, const Rect& p) {
     DrawMascot(cr, p.x + 26, p.y + p.h / 2, 32);
-    const double x = p.x + 50, w = p.w - 50 - 16;
+    const double barW = g_toastLevel >= 0 ? 90 : 0;
+    const double x = p.x + 50, w = p.w - 50 - 16 - barW;
     Text(cr, g_toastTitle, x, p.y + 7, w, 11.5, true, 1, 1, 1, 0.65);
     Text(cr, g_toastText, x, p.y + 24, w, 13.5, true);
+    if (g_toastLevel >= 0) {  // a level: volume, brightness, battery
+        const double bx = p.x + p.w - 16 - barW + 8, bw = barW - 8, cy = p.y + p.h / 2;
+        RoundRect(cr, bx, cy - 3, bw, 6, 3);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.16);
+        cairo_fill(cr);
+        RoundRect(cr, bx, cy - 3, std::max(6.0, bw * std::clamp(g_toastLevel, 0.0, 1.0)), 6, 3);
+        cairo_set_source_rgba(cr, 0.47, 0.78, 1.0, 0.95);
+        cairo_fill(cr);
+    }
+    if (bb::lfeat::Get().countdownBar && g_toastSeconds > 0) {  // Modules.StatusCountdownProgress
+        const double left = std::clamp(1.0 - (Now() - g_toastStart) / g_toastSeconds, 0.0, 1.0);
+        cairo_rectangle(cr, p.x + 16, p.y + p.h - 3, (p.w - 32) * left, 2);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.35);
+        cairo_fill(cr);
+    }
 }
 
-// Where the pill is in the window this frame.
+// Room for the expanded offset (Appearance.OffsetYExpanded) on top of the canvas.
+double ExpandedShift() {
+    const auto& f = bb::lfeat::Get();
+    return f.separateExpandedY ? f.offsetYExpanded - static_cast<int>(g_offsetY) : 0;
+}
+double CanvasH() { return kCanvasH + std::fabs(ExpandedShift()); }
+
+// Where the pill is in the window this frame: left, centre or right
+// (Appearance.Position), against the top or the bottom edge, moved by the
+// expanded offset while open.
 Rect PillRect() {
-    return {(kCanvasW - g_w) / 2, kTopGap, g_w, g_h};
+    const auto& f = bb::lfeat::Get();
+    const double x = f.align == 0 ? 0 : f.align == 2 ? kCanvasW - g_w : (kCanvasW - g_w) / 2;
+    // The window sits at the smaller of the two offsets; g_yOff is how far the pill
+    // is from it now (eased by the spring as the island opens and closes).
+    const double gap = bb::llook::TopGap(kTopGap);
+    if (f.bottom) return {x, CanvasH() - gap - g_h - g_yOff, g_w, g_h};
+    return {x, gap + g_yOff, g_w, g_h};
 }
 
 // The pill as a region of pixel rows, its corners rounded with `radius`.
@@ -563,7 +837,12 @@ cairo_region_t* PillRegion(const Rect& p, double radius) {
     const int x0 = static_cast<int>(std::floor(p.x)), y0 = static_cast<int>(std::floor(p.y));
     const int w = static_cast<int>(std::ceil(p.w)), h = static_cast<int>(std::ceil(p.h));
     for (int y = 0; y < h; ++y) {
-        const double dy = std::max({0.0, radius - (y + 0.5), (y + 0.5) - (h - radius)});
+        // The notch and the merged island are square on the screen edge's side.
+        const bool square = bb::llook::Get().shape == bb::llook::Shape::Notch || bb::lfeat::Get().merged;
+        const bool bottom = bb::lfeat::Get().bottom;
+        const double top = square && !bottom ? 0.0 : radius - (y + 0.5);
+        const double low = square && bottom ? 0.0 : (y + 0.5) - (h - radius);
+        const double dy = std::max({0.0, top, low});
         const int inset = dy > 0 ? static_cast<int>(std::ceil(radius - std::sqrt(std::max(0.0, radius * radius - dy * dy)))) : 0;
         cairo_rectangle_int_t row{x0 + inset, y0 + y, w - 2 * inset, 1};
         if (row.width > 0) cairo_region_union_rectangle(region, &row);
@@ -602,7 +881,21 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
     cairo_paint(cr);
     cairo_restore(cr);
+    // With mirrors, draw into a group first so they can show the same frame.
+    cairo_t* const windowCr = cr;
+    const bool capture = !g_mirrors.empty();
+    if (capture) cairo_push_group(cr);
     cairo_scale(cr, g_scale, g_scale);
+    const auto finishFrame = [&](const Rect& pill) {
+        if (!capture) return;
+        cairo_pattern_t* frame = cairo_pop_group(windowCr);
+        cairo_set_source(windowCr, frame);
+        cairo_paint(windowCr);
+        if (g_frame) cairo_pattern_destroy(g_frame);
+        g_frame = frame;
+        g_framePill = {pill.x, pill.y, pill.w, pill.h};
+        for (const Mirror& m : g_mirrors) gtk_widget_queue_draw(m.window);
+    };
 
     const Kind kind = CurrentKind();
     const mascot::Mood mood = MoodFor(kind);
@@ -613,12 +906,19 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
 
     double tw = 0, th = 0;
     TargetSize(cr, kind, &tw, &th);
-    const double k = 1.0 - std::exp(-dt * 16.0);  // ease toward the target, ~0.2 s
-    g_w += (tw - g_w) * k;
-    g_h += (th - g_h) * k;
-    if (std::fabs(tw - g_w) < 0.3) g_w = tw;
-    if (std::fabs(th - g_h) < 0.3) g_h = th;
+    // The resize spring, in the chosen motion style and speed (Animations.*).
+    bb::lfeat::Spring(&g_w, &g_vw, tw, dt);
+    bb::lfeat::Spring(&g_h, &g_vh, th, dt);
+    g_w = std::max(g_w, 1.0);
+    g_h = std::max(g_h, 1.0);
+    const bool open = th > 60;
+    const double shift = ExpandedShift();
+    bb::lfeat::Spring(&g_yOff, &g_vy, open ? std::max(shift, 0.0) : std::max(-shift, 0.0), dt);
     const bool resizing = g_w != tw || g_h != th;
+    if (g_hover || kind == Kind::AgentCard || kind == Kind::RichCard) bb::lfeat::NoteInteraction();
+    if (bb::lshelf::CameraRunning() && !(kind == Kind::Studio && StudioOnMirror())) bb::lshelf::CameraStop();
+    // The bars follow the real audio while music plays on screen.
+    if (g_track.playing && (kind == Kind::Media || kind == Kind::Studio)) bb::lfeat::WantAudio(true);
 
     Rect p = PillRect();
     // The nudge: a small bounce when a new agent event arrives.
@@ -629,23 +929,78 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
         p.w += bump * 2;
     }
 
-    // The surface, with a soft shadow. The open island gets rounder corners.
-    const double radius = std::min(p.h / 2, p.h > 150 ? 32.0 : 22.0);
-    for (int i = 3; i >= 1; --i) {
-        RoundRect(cr, p.x - i, p.y - i + 2, p.w + 2 * i, p.h + 2 * i, radius + i);
-        cairo_set_source_rgba(cr, 0, 0, 0, 0.07);
+    // Hidden: nothing drawn. Pointing where it was brings it back (unless the
+    // hotkey hid it), so the input region stays.
+    if (kind == Kind::Hidden) {
+        g_hits.clear();
+        const bool pointable = !bb::lfeat::HiddenByHotkey() && bb::lfeat::Get().unhideOnHover;
+        Rect scaled{p.x * g_scale, p.y * g_scale, pointable ? p.w * g_scale : 1, pointable ? p.h * g_scale : 1};
+        UpdateInputRegion(scaled, 0);
+        finishFrame({0, 0, 0, 0});
+        ScheduleFrame(false);
+        return TRUE;
+    }
+
+    // The surface in the chosen shape and colours, with a soft shadow. The open
+    // island gets rounder corners.
+    const auto& look = bb::llook::Get();
+    const double radius = bb::llook::Radius(p.h);
+    // Themes.TintIntensity: a dark scrim deepens a see-through fill.
+    if (look.opacity < 1.0 && look.tint > 0 && kind != Kind::Tuck) {
+        bb::llook::SurfacePath(cr, p.x, p.y, p.w, p.h, radius);
+        cairo_set_source_rgba(cr, 0, 0, 0, look.tint * 0.35 * (1.0 - look.opacity) * 3);
         cairo_fill(cr);
     }
-    RoundRect(cr, p.x, p.y, p.w, p.h, radius);
-    cairo_set_source_rgba(cr, g_fill[0], g_fill[1], g_fill[2], g_opacity);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, 1, 1, 1, 0.06);
-    cairo_set_line_width(cr, 1);
-    cairo_stroke(cr);
+    if (look.shadow && kind != Kind::Tuck) {
+        for (int i = 3; i >= 1; --i) {
+            bb::llook::SurfacePath(cr, p.x - i, p.y - i + 2, p.w + 2 * i, p.h + 2 * i, radius + i);
+            cairo_set_source_rgba(cr, 0, 0, 0, 0.07);
+            cairo_fill(cr);
+        }
+    }
+    bb::llook::SurfacePath(cr, p.x, p.y, p.w, p.h, radius);
+    cairo_set_source_rgba(cr, look.fill[0], look.fill[1], look.fill[2], look.opacity);
+    if (look.borderOn) {
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, look.border[0], look.border[1], look.border[2], 0.9);
+        cairo_set_line_width(cr, 1);
+        cairo_stroke(cr);
+    } else {
+        cairo_fill(cr);
+    }
+    // Themes.MaterialDepth: soft shading downwards; Themes.AccentBloom: the accent
+    // (the album's colour while music plays) washing in from the top.
+    if (look.depth && kind != Kind::Tuck) {
+        cairo_pattern_t* g = cairo_pattern_create_linear(0, p.y, 0, p.y + p.h);
+        cairo_pattern_add_color_stop_rgba(g, 0.0, 1, 1, 1, 0.035);
+        cairo_pattern_add_color_stop_rgba(g, 1.0, 0, 0, 0, 0.16);
+        bb::llook::SurfacePath(cr, p.x, p.y, p.w, p.h, radius);
+        cairo_set_source(cr, g);
+        cairo_fill(cr);
+        cairo_pattern_destroy(g);
+        if (look.bloom > 0) {
+            static const double kAccent[3] = {0.47, 0.78, 1.0};
+            const double a = (kind == Kind::Media || (kind == Kind::Studio && g_track.playing) ? 0.16 : 0.06) * look.bloom;
+            cairo_pattern_t* b = cairo_pattern_create_radial(p.x + p.w / 2, p.y, 0, p.x + p.w / 2, p.y, std::max(p.w, p.h) * 0.6);
+            cairo_pattern_add_color_stop_rgba(b, 0, kAccent[0], kAccent[1], kAccent[2], a);
+            cairo_pattern_add_color_stop_rgba(b, 1, kAccent[0], kAccent[1], kAccent[2], 0);
+            bb::llook::SurfacePath(cr, p.x, p.y, p.w, p.h, radius);
+            cairo_set_source(cr, b);
+            cairo_fill(cr);
+            cairo_pattern_destroy(b);
+        }
+    }
+
+    // A blip when the island opens into Studio or folds back (Bunbun.SoundOpenClose).
+    static bool wasOpen = false;
+    if ((kind == Kind::Studio) != wasOpen) {
+        wasOpen = kind == Kind::Studio;
+        bb::llook::PlayChime(wasOpen ? bb::chime::Chime::Open : bb::chime::Chime::Close);
+    }
 
     g_hits.clear();
     cairo_save(cr);
-    RoundRect(cr, p.x, p.y, p.w, p.h, radius);
+    bb::llook::SurfacePath(cr, p.x, p.y, p.w, p.h, radius);
     cairo_clip(cr);
     // Content appears once the pill is close to its size, so it never spills.
     if (!resizing || (std::fabs(tw - g_w) < 24 && std::fabs(th - g_h) < 16)) {
@@ -659,17 +1014,25 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
                 break;
             case Kind::RichCard: PaintRichCard(cr, p); break;
             case Kind::Toast: PaintToast(cr, p); break;
+            case Kind::Tuck: PaintTuck(cr, p); break;
+            case Kind::Meeting: PaintMeeting(cr, p); break;
+            case Kind::Color: PaintColor(cr, p); break;
+            case Kind::Hidden: break;
         }
+        if ((kind == Kind::Clock || kind == Kind::Media) && p.h <= 55 && DotCount()) PaintDots(cr, p);
     }
     cairo_restore(cr);
 
     Rect scaled{p.x * g_scale, p.y * g_scale, p.w * g_scale, p.h * g_scale};
     UpdateInputRegion(scaled, radius * g_scale);
+    finishFrame(p);
 
     // Fast frames while something moves; the mascot's idle motion is fine at ~8 fps.
     const bool fast = resizing || since < 0.45 || kind == Kind::Media || kind == Kind::AgentCard || kind == Kind::Studio ||
-                      kind == Kind::RichCard ||
-                      mascot::NeedsFastFrames(g_mood, now, g_moodSince) || g_hover;
+                      kind == Kind::RichCard || kind == Kind::Toast ||
+                      mascot::NeedsFastFrames(g_mood, now, g_moodSince) || g_hover ||
+                      (kind == Kind::Clock && bb::lfeat::Get().eyes);
+    g_fastMs = bb::lfeat::FrameMs(resizing || g_hover || kind == Kind::Studio || kind == Kind::AgentCard || kind == Kind::RichCard);
     ScheduleFrame(fast);
     return TRUE;
 }
@@ -682,7 +1045,9 @@ gboolean OnTimer(gpointer) {
 
 void ScheduleFrame(bool fast) {
     if (g_timer) return;
-    g_timer = g_timeout_add(fast ? 16 : 125, OnTimer, nullptr);
+    // Fast: Animations.TargetFPS while you use the island, Bunbun.AmbientFps for
+    // moving content otherwise, both lowered by the battery saver.
+    g_timer = g_timeout_add(fast ? g_fastMs : 125, OnTimer, nullptr);
 }
 
 void Redraw() {
@@ -698,6 +1063,7 @@ void Redraw() {
 void SetArt(GdkPixbuf* pb) {
     if (g_art) g_object_unref(g_art);
     g_art = nullptr;
+    g_artChangedAt = Now();
     if (pb) {
         const int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb), side = std::min(w, h);
         // A centred square, at most 192 px: covers are often 1000+ px.
@@ -750,6 +1116,18 @@ void LoadArt(const std::string& url) {
 
 void OnMediaChanged() {
     g_track = bb::mpris::Current();
+    // A new song: the transitions, and Modules.MediaAutoExpand (never for a video,
+    // nor for apps and sites on Modules.MediaExpandBlocklist).
+    const std::string song = g_track.title + "\n" + g_track.artist;
+    if (g_track.active && !g_track.title.empty() && song != g_lastSong) {
+        const bool first = g_lastSong.empty();
+        g_lastSong = song;
+        g_trackChangedAt = Now();
+        const auto& f = bb::lfeat::Get();
+        if (!first && g_track.playing && f.autoExpand && !IsVideoTrack(g_track) && !bb::lfeat::ExpandBlocked(g_track.player, g_track.title))
+            g_expandUntil = Now() + 5.0;
+        bb::lfeat::NoteInteraction();
+    }
     LoadArt(g_track.active ? g_track.artUrl : std::string());
     bb::llyrics::OnTrack(g_track);
     Redraw();
@@ -762,7 +1140,16 @@ gboolean ApplyAgentView(gpointer) {
     if (!g_agentInboxNew) return G_SOURCE_REMOVE;
     g_agentInboxNew = false;
     if (g_agentInbox.generation < g_agent.generation && g_agentInbox.generation != 0) return G_SOURCE_REMOVE;
+    // A chime when an agent finishes, needs you, or stops with an error (as on Windows).
+    const AgentView& next = g_agentInbox;
+    using bb::chime::Chime;
+    if (next.phase == AgentPhase::Finished && g_agent.phase != AgentPhase::Finished) bb::llook::PlayChime(Chime::Done);
+    else if (next.phase == AgentPhase::Error && g_agent.phase != AgentPhase::Error) bb::llook::PlayChime(Chime::Error);
+    else if ((next.phase == AgentPhase::Approval || next.phase == AgentPhase::Question) && next.requestId != 0 &&
+             next.requestId != g_agent.requestId)
+        bb::llook::PlayChime(Chime::Question);
     g_agent = g_agentInbox;
+    bb::lfeat::NoteInteraction();
     if (g_agentInboxNudge) g_nudgeAt = Now();
     g_agentInboxNudge = false;
     Redraw();
@@ -792,6 +1179,10 @@ void Do(const Hit& h) {
         case Action::Terminal: bb::agents::Decide(g_agent.requestId, bb::AgentDecision::Terminal); break;
         case Action::Answer: bb::agents::Decide(g_agent.requestId, bb::AgentDecision::Allow, h.index); break;
         case Action::Settings: OpenSettings(); break;
+        case Action::MeetingJoin: bb::lcal::Join(); break;
+        case Action::ColorPick: g_colorUntil = 0; PickColour(); break;
+        case Action::ColorCopy: CopyColorRow(h.index); break;
+        case Action::MeetingDismiss: bb::lcal::Dismiss(); break;
         case Action::None: break;
         default: StudioDo(h); break;
     }
@@ -806,11 +1197,18 @@ gboolean OnButtonPress(GtkWidget*, GdkEventButton* e, gpointer) {
     if (e->button != 1) return TRUE;
     const int i = HitAt(e->x, e->y);
     const Kind kind = CurrentKind();
+    if (i >= 0 && g_hits[i].action == Action::ShelfOpen) {  // decided on release or on a drag
+        g_shelfPress = g_hits[i].index;
+        g_shelfPressX = e->x;
+        g_shelfPressY = e->y;
+        return TRUE;
+    }
+    if (kind == Kind::Color && i < 0) g_colorUntil = 0;  // a click off its rows puts it away
     if (kind == Kind::Toast && i < 0) g_toastUntil = 0;  // a click puts it away
     else if (i >= 0) Do(g_hits[i]);
     // Expand on hover off: a click on the island opens it, another closes it.
     else if (!g_expandOnHover && kind != Kind::AgentCard && kind != Kind::RichCard) g_pinned = !g_pinned;
-    else if (kind == Kind::Clock) g_pokeUntil = Now() + 1.2;  // a poke
+    else if (kind == Kind::Clock && !bb::lfeat::Get().mascotDnd) g_pokeUntil = Now() + 1.2;  // a poke
     Redraw();
     return TRUE;
 }
@@ -818,12 +1216,52 @@ gboolean OnButtonPress(GtkWidget*, GdkEventButton* e, gpointer) {
 gboolean OnMotion(GtkWidget*, GdkEventMotion* e, gpointer) {
     g_mouseX = e->x / g_scale;
     g_mouseY = e->y / g_scale;
+    // Dragging a file off the shelf hands it to wherever you drop it.
+    if (g_shelfPress >= 0 && std::hypot(e->x - g_shelfPressX, e->y - g_shelfPressY) > 6) {
+        g_shelfDrag = g_shelfPress;
+        g_shelfPress = -1;
+        GtkTargetList* targets = gtk_target_list_new(nullptr, 0);
+        gtk_target_list_add_uri_targets(targets, 0);
+        gtk_drag_begin_with_coordinates(g_window, targets, static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_LINK), 1,
+                                        reinterpret_cast<GdkEvent*>(e), static_cast<int>(e->x), static_cast<int>(e->y));
+        gtk_target_list_unref(targets);
+    }
     const int hit = HitAt(e->x, e->y);
     if (hit != g_hoverHit) {
         g_hoverHit = hit;
         Redraw();
     }
     return FALSE;
+}
+
+gboolean OnButtonRelease(GtkWidget*, GdkEventButton* e, gpointer) {
+    if (e->button == 1 && g_shelfPress >= 0) {
+        bb::lshelf::Open(g_shelfPress);
+        g_shelfPress = -1;
+        Redraw();
+    }
+    return TRUE;
+}
+
+// Files dropped on the island go on the shelf, and the island opens on it.
+void OnDragReceived(GtkWidget*, GdkDragContext* ctx, int, int, GtkSelectionData* data, guint, guint time, gpointer) {
+    std::vector<std::string> uris;
+    if (gchar** list = gtk_selection_data_get_uris(data)) {
+        for (gchar** u = list; *u; ++u) uris.emplace_back(*u);
+        g_strfreev(list);
+    }
+    gtk_drag_finish(ctx, !uris.empty(), FALSE, time);
+    if (uris.empty() || !bb::lshelf::ShelfOn()) return;
+    bb::lshelf::Add(uris);
+    StudioShowShelf();
+    ShowToast("File shelf", uris.size() == 1 ? "1 file added" : std::to_string(uris.size()) + " files added", 2);
+}
+
+void OnDragGet(GtkWidget*, GdkDragContext*, GtkSelectionData* data, guint, guint, gpointer) {
+    const auto& items = bb::lshelf::Items();
+    if (g_shelfDrag < 0 || g_shelfDrag >= static_cast<int>(items.size())) return;
+    gchar* uris[] = {const_cast<gchar*>(items[static_cast<size_t>(g_shelfDrag)].uri.c_str()), nullptr};
+    gtk_selection_data_set_uris(data, uris);
 }
 
 gboolean OnCrossing(GtkWidget*, GdkEventCrossing* e, gpointer) {
@@ -857,6 +1295,14 @@ gboolean OnScroll(GtkWidget*, GdkEventScroll* e, gpointer) {
     }
     const Kind k = CurrentKind();
     if (k == Kind::Studio || k == Kind::RichCard) StudioScroll(delta);
+    // Bunbun.MusicSwipe: sideways on the small music pill skips a song.
+    const bool sideways = e->direction == GDK_SCROLL_LEFT || e->direction == GDK_SCROLL_RIGHT ||
+                          (e->direction == GDK_SCROLL_SMOOTH && std::fabs(e->delta_x) > std::fabs(e->delta_y) && std::fabs(e->delta_x) > 0.4);
+    if (k == Kind::Media && g_h < 60 && sideways && bb::lfeat::Get().musicSwipe && Now() - g_swipeAt > 0.6) {
+        g_swipeAt = Now();
+        if (delta > 0) bb::mpris::Next();
+        else bb::mpris::Previous();
+    }
     Redraw();
     return TRUE;
 }
@@ -890,25 +1336,41 @@ void OpenSettings() {
     }, nullptr);
 }
 
-void ShowMenu(GdkEvent* event) {
+// The menu, for the island's right-click and the tray icon (the tray adds the
+// version, the hide / show switch and Start when you log in, as on Windows).
+GtkWidget* BuildMenu(bool tray) {
     GtkWidget* menu = gtk_menu_new();
     const auto item = [&](const char* label, GCallback cb) {
         GtkWidget* it = gtk_menu_item_new_with_label(label);
         g_signal_connect(it, "activate", cb, nullptr);
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), it);
     };
+    if (tray) {
+        GtkWidget* version = gtk_menu_item_new_with_label("Bunbun " BUNBUN_VERSION_STR);
+        gtk_widget_set_sensitive(version, FALSE);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), version);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+        item(bb::lfeat::HiddenByHotkey() ? "Show the island" : "Hide the island",
+             G_CALLBACK(+[](GtkMenuItem*, gpointer) { bb::lfeat::ToggleHidden(); bb::ltray::Refresh(); }));
+    }
     item("Settings\xE2\x80\xA6", G_CALLBACK(+[](GtkMenuItem*, gpointer) { OpenSettings(); }));
+    item("Pick a colour\xE2\x80\xA6", G_CALLBACK(+[](GtkMenuItem*, gpointer) {
+        // After the menu has closed, so it isn't in the picture.
+        g_timeout_add(200, [](gpointer) -> gboolean { PickColour(); return G_SOURCE_REMOVE; }, nullptr);
+    }));
     if (bb::hooks::ClaudeHooksInstalled())
         item("Disconnect Claude Code", G_CALLBACK(+[](GtkMenuItem*, gpointer) {
             std::wstring report;
             bb::hooks::UninstallClaudeHooks(&report);
             Wh_Log(L"%ls", report.c_str());
+            bb::ltray::Refresh();
         }));
     else
         item("Connect Claude Code", G_CALLBACK(+[](GtkMenuItem*, gpointer) {
             std::wstring report;
             bb::hooks::InstallClaudeHooks(&report);
             Wh_Log(L"%ls", report.c_str());
+            bb::ltray::Refresh();
         }));
     // Lyrics on the small island, as on Windows' right-click menu.
     GtkWidget* lyrics = gtk_check_menu_item_new_with_label("Lyrics on the island");
@@ -918,12 +1380,33 @@ void ShowMenu(GdkEvent* event) {
         bb::settings::Set(L"Bunbun.PillLyrics", gtk_check_menu_item_get_active(it) ? &on : nullptr);
     }), nullptr);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), lyrics);
+    if (bb::lfeat::Get().tuckHotkey)
+        item("Tuck away (Ctrl+Alt+H)", G_CALLBACK(+[](GtkMenuItem*, gpointer) { bb::lfeat::SetTucked(true); }));
+    if (bb::lfeat::Get().timer) {  // Modules.TimerModule: the focus timer from the menu
+        if (bb::lsrc::FocusState().active)
+            item("Stop the focus timer", G_CALLBACK(+[](GtkMenuItem*, gpointer) { bb::lsrc::FocusStop(); Redraw(); }));
+        else
+            item("Focus for 25 minutes", G_CALLBACK(+[](GtkMenuItem*, gpointer) { bb::lsrc::FocusStart(25); Redraw(); }));
+    }
     item("Open data folder", G_CALLBACK(+[](GtkMenuItem*, gpointer) {
         bb::plat::MakeDirs(bb::plat::ConfigDir());
         bb::plat::OpenWithDefault(bb::plat::ConfigDir());
     }));
+    if (tray) {
+        GtkWidget* login = gtk_check_menu_item_new_with_label("Start when you log in");
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(login), bb::plat::AutostartEnabled());
+        g_signal_connect(login, "toggled", G_CALLBACK(+[](GtkCheckMenuItem* it, gpointer) {
+            bb::plat::SetAutostart(gtk_check_menu_item_get_active(it));
+        }), nullptr);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), login);
+    }
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
     item("Quit Bunbun", G_CALLBACK(+[](GtkMenuItem*, gpointer) { gtk_main_quit(); }));
+    return menu;
+}
+
+void ShowMenu(GdkEvent* event) {
+    GtkWidget* menu = BuildMenu(false);
     gtk_widget_show_all(menu);
     g_signal_connect(menu, "deactivate", G_CALLBACK(+[](GtkMenuShell* m, gpointer) {
         g_idle_add([](gpointer w) -> gboolean { gtk_widget_destroy(GTK_WIDGET(w)); return G_SOURCE_REMOVE; }, m);
@@ -933,20 +1416,147 @@ void ShowMenu(GdkEvent* event) {
 
 // ── Window placement ────────────────────────────────────────────────────────
 
+// Places the window on the chosen monitor (Appearance.TargetMonitor), at the
+// chosen edge and side (Position), moved by OffsetX / OffsetY; above other windows
+// or not (Behavior.AlwaysOnTop).
 void PlaceWindow() {
-    const int w = static_cast<int>(std::ceil(kCanvasW * g_scale)), h = static_cast<int>(std::ceil(kCanvasH * g_scale));
+    const auto& f = bb::lfeat::Get();
+    const int w = static_cast<int>(std::ceil(kCanvasW * g_scale)), h = static_cast<int>(std::ceil(CanvasH() * g_scale));
     gtk_widget_set_size_request(g_window, w, h);
     gtk_window_resize(GTK_WINDOW(g_window), w, h);
+    GdkDisplay* display = gtk_widget_get_display(g_window);
+    GdkMonitor* mon = bb::lfeat::TargetMonitor(display);
+    GdkRectangle area{0, 0, 1920, 1080}, geo{0, 0, 1920, 1080};
+    if (mon) {
+        gdk_monitor_get_workarea(mon, &area);
+        gdk_monitor_get_geometry(mon, &geo);
+    }
+    const int side = 12;  // from the screen's side for left / right
+    const int dy = static_cast<int>(std::min<double>(g_offsetY, g_offsetY + ExpandedShift()));
+    int x = f.align == 0 ? area.x + side : f.align == 2 ? area.x + area.width - w - side : area.x + (area.width - w) / 2;
+    x += f.offsetX;
     if (g_layerShell) {
-        gtk_layer_set_margin(GTK_WINDOW(g_window), GTK_LAYER_SHELL_EDGE_TOP, static_cast<int>(g_offsetY));
+        gtk_layer_set_monitor(GTK_WINDOW(g_window), mon);
+        gtk_layer_set_layer(GTK_WINDOW(g_window), f.onTop ? GTK_LAYER_SHELL_LAYER_TOP : GTK_LAYER_SHELL_LAYER_BOTTOM);
+        gtk_layer_set_anchor(GTK_WINDOW(g_window), GTK_LAYER_SHELL_EDGE_TOP, !f.bottom);
+        gtk_layer_set_anchor(GTK_WINDOW(g_window), GTK_LAYER_SHELL_EDGE_BOTTOM, f.bottom);
+        gtk_layer_set_anchor(GTK_WINDOW(g_window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+        gtk_layer_set_margin(GTK_WINDOW(g_window), f.bottom ? GTK_LAYER_SHELL_EDGE_BOTTOM : GTK_LAYER_SHELL_EDGE_TOP, dy);
+        gtk_layer_set_margin(GTK_WINDOW(g_window), GTK_LAYER_SHELL_EDGE_LEFT, x - geo.x);
         return;
     }
+    gtk_window_set_keep_above(GTK_WINDOW(g_window), f.onTop);
+    if (!f.onTop) gtk_window_set_keep_below(GTK_WINDOW(g_window), FALSE);
+    const int y = f.bottom ? area.y + area.height - h - dy : area.y + dy;
+    gtk_window_move(GTK_WINDOW(g_window), x, y);
+}
+
+// ── Mirrors on other displays ───────────────────────────────────────────────
+
+gboolean OnMirrorDraw(GtkWidget* w, cairo_t* cr, gpointer data) {
+    const Mirror& m = g_mirrors[static_cast<size_t>(GPOINTER_TO_INT(data))];
+    cairo_save(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+    if (!g_frame || g_framePill.w <= 0) return TRUE;
+    // The main frame's pill (and its shadow), moved to where this mirror's pill sits.
+    const double margin = 12;
+    const double px = m.align == 0 ? 0 : m.align == 2 ? kCanvasW - g_framePill.w : (kCanvasW - g_framePill.w) / 2;
+    const double canvasH = gtk_widget_get_allocated_height(w) / g_scale;
+    const double py = m.bottom ? canvasH - bb::llook::TopGap(kTopGap) - g_framePill.h : g_framePill.y;
+    cairo_scale(cr, g_scale, g_scale);
+    cairo_rectangle(cr, px - margin, py - margin, g_framePill.w + 2 * margin, g_framePill.h + 2 * margin);
+    cairo_clip(cr);
+    cairo_translate(cr, px - g_framePill.x, py - g_framePill.y);
+    cairo_scale(cr, 1.0 / g_scale, 1.0 / g_scale);
+    cairo_set_source(cr, g_frame);
+    cairo_paint(cr);
+    return TRUE;
+}
+
+void PlaceMirror(Mirror& m) {
+    const auto& f = bb::lfeat::Get();
+    const int w = static_cast<int>(std::ceil(kCanvasW * g_scale)), h = static_cast<int>(std::ceil(kCanvasH * g_scale));
+    gtk_widget_set_size_request(m.window, w, h);
+    GdkDisplay* display = gtk_widget_get_display(m.window);
+    GdkMonitor* mon = gdk_display_get_monitor(display, m.monitor);
+    if (!mon) return;
+    GdkRectangle area{}, geo{};
+    gdk_monitor_get_workarea(mon, &area);
+    gdk_monitor_get_geometry(mon, &geo);
+    const int side = 12;
+    int x = m.align == 0 ? area.x + side : m.align == 2 ? area.x + area.width - w - side : area.x + (area.width - w) / 2;
+    x += f.offsetX;
+    const int dy = static_cast<int>(g_offsetY);
+    if (g_layerShell) {
+        gtk_layer_set_monitor(GTK_WINDOW(m.window), mon);
+        gtk_layer_set_anchor(GTK_WINDOW(m.window), GTK_LAYER_SHELL_EDGE_TOP, !m.bottom);
+        gtk_layer_set_anchor(GTK_WINDOW(m.window), GTK_LAYER_SHELL_EDGE_BOTTOM, m.bottom);
+        gtk_layer_set_anchor(GTK_WINDOW(m.window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
+        gtk_layer_set_margin(GTK_WINDOW(m.window), m.bottom ? GTK_LAYER_SHELL_EDGE_BOTTOM : GTK_LAYER_SHELL_EDGE_TOP, dy);
+        gtk_layer_set_margin(GTK_WINDOW(m.window), GTK_LAYER_SHELL_EDGE_LEFT, x - geo.x);
+        return;
+    }
+    gtk_window_move(GTK_WINDOW(m.window), x, m.bottom ? area.y + area.height - h - dy : area.y + dy);
+}
+
+// Rebuilds the mirror windows for the current monitors and settings.
+void RebuildMirrors() {
+    for (Mirror& m : g_mirrors) gtk_widget_destroy(m.window);
+    g_mirrors.clear();
+    namespace s = bb::settings;
+    if (s::Get(L"Appearance.Displays") != L"all" || !g_window) return;
     GdkDisplay* display = gtk_widget_get_display(g_window);
-    GdkMonitor* mon = gdk_display_get_primary_monitor(display);
-    if (!mon) mon = gdk_display_get_monitor(display, 0);
-    GdkRectangle area{0, 0, 1920, 1080};
-    if (mon) gdk_monitor_get_workarea(mon, &area);
-    gtk_window_move(GTK_WINDOW(g_window), area.x + (area.width - w) / 2, area.y + static_cast<int>(g_offsetY));
+    GdkMonitor* main = bb::lfeat::TargetMonitor(display);
+    const std::wstring same = s::Get(L"Appearance.MirrorPosition"), per = s::Get(L"Appearance.DisplayPositions");
+    const auto parse = [](const std::wstring& pos, Mirror* m) {
+        if (pos.empty() || pos == L"same") return;
+        m->bottom = pos.rfind(L"bottom", 0) == 0;
+        m->align = pos.find(L"left") != std::wstring::npos ? 0 : pos.find(L"right") != std::wstring::npos ? 2 : 1;
+    };
+    for (int i = 0; i < gdk_display_get_n_monitors(display); ++i) {
+        if (gdk_display_get_monitor(display, i) == main) continue;
+        Mirror m;
+        m.monitor = i;
+        m.align = bb::lfeat::Get().align;
+        m.bottom = bb::lfeat::Get().bottom;
+        parse(same, &m);
+        // "2=bottom-center;3=top-left": display numbers start at 1.
+        const std::wstring key = std::to_wstring(i + 1) + L"=";
+        if (const size_t at = per.find(key); at != std::wstring::npos && (at == 0 || per[at - 1] == L';' || per[at - 1] == L' '))
+            parse(per.substr(at + key.size(), per.find(L';', at) == std::wstring::npos ? std::wstring::npos : per.find(L';', at) - at - key.size()), &m);
+        m.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+        gtk_window_set_title(GTK_WINDOW(m.window), "Bunbun mirror");
+        gtk_widget_set_app_paintable(m.window, TRUE);
+        if (GdkVisual* rgba = gdk_screen_get_rgba_visual(gtk_widget_get_screen(m.window))) gtk_widget_set_visual(m.window, rgba);
+        gtk_window_set_decorated(GTK_WINDOW(m.window), FALSE);
+        gtk_window_set_skip_taskbar_hint(GTK_WINDOW(m.window), TRUE);
+        gtk_window_set_skip_pager_hint(GTK_WINDOW(m.window), TRUE);
+        gtk_window_set_accept_focus(GTK_WINDOW(m.window), FALSE);
+        if (g_layerShell) {
+            gtk_layer_init_for_window(GTK_WINDOW(m.window));
+            gtk_layer_set_namespace(GTK_WINDOW(m.window), "bunbun-mirror");
+            gtk_layer_set_layer(GTK_WINDOW(m.window), GTK_LAYER_SHELL_LAYER_TOP);
+            gtk_layer_set_exclusive_zone(GTK_WINDOW(m.window), 0);
+            gtk_layer_set_keyboard_mode(GTK_WINDOW(m.window), GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+        } else {
+            gtk_window_set_type_hint(GTK_WINDOW(m.window), GDK_WINDOW_TYPE_HINT_DOCK);
+            gtk_window_set_keep_above(GTK_WINDOW(m.window), TRUE);
+            gtk_window_stick(GTK_WINDOW(m.window));
+        }
+        g_mirrors.push_back(m);
+        g_signal_connect(m.window, "draw", G_CALLBACK(OnMirrorDraw), GINT_TO_POINTER(static_cast<int>(g_mirrors.size() - 1)));
+        PlaceMirror(g_mirrors.back());
+        gtk_widget_show_all(m.window);
+        PlaceMirror(g_mirrors.back());
+        // View-only: an empty input region lets clicks through to what's below.
+        cairo_region_t* none = cairo_region_create();
+        gtk_widget_input_shape_combine_region(m.window, none);
+        cairo_region_destroy(none);
+    }
+    Redraw();
 }
 
 // X11: a window mapped while the window manager or compositor is still
@@ -965,7 +1575,10 @@ void OnSettingsFileChanged(GFileMonitor*, GFile*, GFile*, GFileMonitorEvent ev, 
         ev != G_FILE_MONITOR_EVENT_RENAMED && ev != G_FILE_MONITOR_EVENT_MOVED_IN)
         return;
     LoadSettings();
+    bb::lfeat::ApplySettingsChange();
     PlaceWindow();
+    RebuildMirrors();
+    bb::ltray::Refresh();  // your character may have changed, and the menu's switches
     Redraw();
 }
 
@@ -1013,10 +1626,14 @@ void InstallStableHook() {
     if (bb::plat::WriteFileAtomic(dst, data)) chmod(dst.c_str(), 0755);
 }
 
-void ShowToast(const std::string& title, const std::string& text, double seconds) {
+void ShowToast(const std::string& title, const std::string& text, double seconds, double level) {
     g_toastTitle = title;
     g_toastText = text;
+    g_toastLevel = level;
+    g_toastStart = Now();
+    g_toastSeconds = seconds;
     g_toastUntil = Now() + seconds;
+    bb::lfeat::NoteInteraction();
     g_nudgeAt = Now();
     Redraw();
 }
@@ -1037,6 +1654,10 @@ void IslandSetAgentView(const AgentView& view, bool nudge) {
         g_agentInboxNudge = g_agentInboxNudge || nudge;
     }
     g_idle_add(ApplyAgentView, nullptr);
+}
+
+void IslandPickColour() {
+    g_idle_add([](gpointer) -> gboolean { PickColour(); return G_SOURCE_REMOVE; }, nullptr);
 }
 
 int IslandCapturePages() {
@@ -1077,12 +1698,26 @@ int main(int argc, char** argv) {
             execl(exe.c_str(), exe.c_str(), static_cast<char*>(nullptr));
             return bb::plat::OpenWithDefault(bb::settings::Path()) ? 0 : 1;
         }
+        // Asks the running island to start the colour picker: bind this to a key in
+        // your desktop's keyboard settings (Wayland has no global hotkeys for apps).
+        if (a == "--pick-colour" || a == "--pick-color") {
+            const std::string sock = bb::plat::RuntimeDir() + "/agent.sock";
+            const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+            sockaddr_un addr{};
+            addr.sun_family = AF_UNIX;
+            strncpy(addr.sun_path, sock.c_str(), sizeof addr.sun_path - 1);
+            const bool ok = fd >= 0 && connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0 &&
+                            write(fd, "{\"bunbun_command\":\"pick_colour\"}\n", 33) == 33;
+            if (fd >= 0) close(fd);
+            if (!ok) fprintf(stderr, "Bunbun isn't running.\n");
+            return ok ? 0 : 1;
+        }
         if (a == "--version") {
             printf("Bunbun %s\n", BUNBUN_VERSION_STR);
             return 0;
         }
         if (a == "--help" || a == "-h") {
-            printf("Usage: bunbun [--replace | --quit | --settings | --version | --render-icon FILE.png [SIZE]]\n");
+            printf("Usage: bunbun [--replace | --quit | --settings | --pick-colour | --version | --render-icon FILE.png [SIZE]]\n");
             return 0;
         }
         // Packaging draws the app icon with the real mascot code (Bun, idle).
@@ -1151,11 +1786,22 @@ int main(int argc, char** argv) {
             gdk_window_set_override_redirect(gtk_widget_get_window(g_window), TRUE);
         }
     }
-    gtk_widget_add_events(g_window, GDK_BUTTON_PRESS_MASK | GDK_POINTER_MOTION_MASK | GDK_ENTER_NOTIFY_MASK |
+    gtk_widget_add_events(g_window, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK | GDK_ENTER_NOTIFY_MASK |
                                         GDK_LEAVE_NOTIFY_MASK | GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK |
                                         GDK_KEY_PRESS_MASK | GDK_FOCUS_CHANGE_MASK);
     g_signal_connect(g_window, "draw", G_CALLBACK(OnDraw), nullptr);
     g_signal_connect(g_window, "button-press-event", G_CALLBACK(OnButtonPress), nullptr);
+    g_signal_connect(g_window, "button-release-event", G_CALLBACK(OnButtonRelease), nullptr);
+    // The File shelf: drop files on the island, drag them out again.
+    {
+        GtkTargetList* targets = gtk_target_list_new(nullptr, 0);
+        gtk_target_list_add_uri_targets(targets, 0);
+        gtk_drag_dest_set(g_window, GTK_DEST_DEFAULT_ALL, nullptr, 0, static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_LINK));
+        gtk_drag_dest_set_target_list(g_window, targets);
+        gtk_target_list_unref(targets);
+    }
+    g_signal_connect(g_window, "drag-data-received", G_CALLBACK(OnDragReceived), nullptr);
+    g_signal_connect(g_window, "drag-data-get", G_CALLBACK(OnDragGet), nullptr);
     g_signal_connect(g_window, "motion-notify-event", G_CALLBACK(OnMotion), nullptr);
     g_signal_connect(g_window, "enter-notify-event", G_CALLBACK(OnCrossing), nullptr);
     g_signal_connect(g_window, "leave-notify-event", G_CALLBACK(OnCrossing), nullptr);
@@ -1181,6 +1827,19 @@ int main(int argc, char** argv) {
     bb::llyrics::Start([] { Redraw(); });
     bb::mpris::Start(OnMediaChanged);
     bb::lsrc::Start([] { Redraw(); });
+    bb::lcal::Start([] { Redraw(); });
+    bb::ltray::Start([] { return BuildMenu(true); });
+    bb::llook::StartPrivacy([] {
+        // The screen dot came on: say who and how, as Windows does.
+        static bool screenWas = false;
+        const bool screen = bb::llook::ScreenInUse();
+        if (screen && !screenWas) ShowToast("Screen", bb::llook::ScreenText(), 3.5);
+        screenWas = screen;
+        Redraw();
+    });
+    bb::lfeat::Start([](const std::string& title, const std::string& text, double seconds, double level) {
+        ShowToast(title, text, seconds, level);
+    }, [] { Redraw(); });
     if (!bb::agents::Start()) fprintf(stderr, "Bunbun: the agent socket is in use; agents won't show.\n");
     // The clock needs a redraw when the minute (or second) turns over. Every
     // frame path also passes through here, so no draw for a few seconds means
@@ -1191,13 +1850,26 @@ int main(int argc, char** argv) {
             Remap();
         }
         // Reminders that came due, and the end of a focus timer.
-        for (const std::wstring& text : bb::lsrc::TakeDueReminders()) ShowToast("Reminder", bb::plat::Utf8(text), 10);
+        for (const std::wstring& text : bb::lsrc::TakeDueReminders()) {
+            ShowToast("Reminder", bb::plat::Utf8(text), 10);
+            // Modules.ReminderSound, kept quiet in full screen or while focusing (Modules.QuietReminders).
+            const auto& f = bb::lfeat::Get();
+            const bool quiet = f.quietReminders && (bb::lfeat::FullscreenAppActive() || bb::lsrc::FocusState().running);
+            if (f.reminderSound && !quiet) bb::llook::PlayChime(bb::chime::Chime::Question);
+        }
         if (bb::lsrc::FocusTakeFinished()) ShowToast("Focus", "Time's up \xE2\x80\x94 take a break", 10);
         gtk_widget_queue_draw(g_window);
         return G_SOURCE_CONTINUE;
     }, nullptr);
     g_signal_connect(gtk_widget_get_screen(g_window), "composited-changed", G_CALLBACK(+[](GdkScreen*, gpointer) { Remap(); }),
                      nullptr);
+    // Monitors coming and going: re-place the island and its mirrors.
+    RebuildMirrors();
+    for (const char* sig : {"monitor-added", "monitor-removed"})
+        g_signal_connect(display, sig, G_CALLBACK(+[](GdkDisplay*, GdkMonitor*, gpointer) {
+            PlaceWindow();
+            RebuildMirrors();
+        }), nullptr);
 
     gtk_main();
 

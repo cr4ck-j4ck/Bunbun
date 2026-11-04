@@ -123,13 +123,13 @@
   "options": []
  },
  "Appearance.ShapeStyle": {
-  "default": "default",
+  "default": "notch",
   "name": "Island Shape Style",
-  "description": "Change the overall shape of the island (Pill, Windows 11, or macOS Notch).",
+  "description": "Change the overall shape of the island (Notch, Pill or Windows 11). Notch is the default: flush with the top of the screen.",
   "options": [
    {
     "value": "default",
-    "label": "Default (Apple Pill)"
+    "label": "Pill (Apple capsule)"
    },
    {
     "value": "w11",
@@ -137,7 +137,7 @@
    },
    {
     "value": "notch",
-    "label": "macOS Notch (Top Edge Flush)"
+    "label": "Notch (Top Edge Flush, default)"
    }
   ]
  },
@@ -271,17 +271,24 @@
    }
   ]
  },
- "Behavior.AutoHideFullscreen": {
-  "default": "true",
-  "name": "Hide on full screen",
-  "description": "Automatically hide the island when playing a video or app in full screen mode.",
-  "options": []
- },
- "Behavior.FullscreenTuck": {
-  "default": "false",
-  "name": "Tuck instead of hiding",
-  "description": "In full screen, fold the island into a thin line instead of hiding it. Point at the line to bring the island back; it unfolds by itself when you leave full screen, and when an agent needs you.",
-  "options": []
+ "Behavior.FullscreenMode": {
+  "default": "tuck",
+  "name": "In full screen",
+  "description": "What the island does while a video, game or app is full screen. Tuck folds it into a thin line (point at the line to bring it back; it unfolds when you leave full screen or an agent needs you). Show keeps the island as usual, hover and all. Hide takes it away until you leave full screen. On Linux this needs X11 (GNOME on Wayland runs Bunbun through XWayland).",
+  "options": [
+   {
+    "value": "tuck",
+    "label": "Tuck"
+   },
+   {
+    "value": "show",
+    "label": "Show"
+   },
+   {
+    "value": "hide",
+    "label": "Hide"
+   }
+  ]
  },
  "Behavior.UnhideOnHover": {
   "default": "true",
@@ -675,8 +682,8 @@
  },
  "Indicators.PrivacyDotsScreen": {
   "default": "true",
-  "name": "Show screen-recording indicator (Blue dot)",
-  "description": "Show a blue dot while an app records or shares your screen through Windows' capture API (Snipping Tool, browsers, Teams). Recorders that read the screen another way, such as OBS display capture, can't be detected.",
+  "name": "Show screen sharing and recording indicator (Blue dot)",
+  "description": "One blue dot while your screen is shared or recorded: OBS recording or streaming, a browser sharing your screen (Google Meet and the like), and apps using the system's capture: on Windows its capture API (Snipping Tool, Teams, Discord), Xbox Game Bar, Camtasia and ShareX; on Linux PipeWire screen sharing (Discord, Zoom, GNOME's recorder), ffmpeg, wf-recorder, gpu-screen-recorder and SimpleScreenRecorder.",
   "options": []
  },
  "Indicators.PrivacyDotsScreenHex": {
@@ -1264,7 +1271,7 @@
  "Bunbun.MascotDnd": {
   "default": "false",
   "name": "Mascot do not disturb",
-  "description": "The mascot settles in with its favourite snack and stops reacting. Independent of Windows' Do Not Disturb. Ask Bun \"dnd on\" or \"dnd off\" to switch it.",
+  "description": "The mascot puts its headphones on, closes its eyes and shows a Do Not Disturb badge, and stops reacting. Independent of Windows' Do Not Disturb. Ask Bun \"dnd on\" or \"dnd off\" to switch it; Focus mode does the same.",
   "options": []
  },
  "Bunbun.Character": {
@@ -1383,6 +1390,18 @@
   "default": "true",
   "name": "Streaming mode for videos",
   "description": "While a video plays (YouTube, Netflix, an anime site, VLC...), the small island shows your mascot munching popcorn and \"Streaming\" instead of the title and cover. Music apps (Spotify, YouTube Music, Apple Music and the like) keep the song and the headphones.",
+  "options": []
+ },
+ "Bunbun.LiveMood": {
+  "default": "true",
+  "name": "Live mood while the screen is shared",
+  "description": "While an app streams, shares or records your screen, the mascot goes Live, with a pulsing REC badge. Uses the screen privacy dot's detection, so Privacy dots and their Screen dot need to be on.",
+  "options": []
+ },
+ "Bunbun.AfkMinutes": {
+  "default": "3",
+  "name": "AFK after (minutes)",
+  "description": "With no keyboard or mouse for this long, the mascot goes AFK and munches its favourite snack until you're back. 0 turns it off.",
   "options": []
  },
  "Bunbun.MusicSwipe": {

@@ -21,8 +21,8 @@ const CHARACTERS = [
 
 const MOODS = [
   ["idle", "Idle"], ["working", "Working"], ["thinking", "Thinking"], ["alert", "Needs you"],
-  ["happy", "Celebrate"], ["music", "Music"], ["snack", "Do not disturb"], ["sad", "Error"], ["sleepy", "Sleepy"],
-  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming"],
+  ["happy", "Celebrate"], ["music", "Music"], ["snack", "AFK"], ["dnd", "Do not disturb"], ["live", "Live"], ["sad", "Error"], ["sleepy", "Sleepy"],
+  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming Shows"],
 ] as const;
 
 // Preset colours per character; "" is the character's own colour. Luffy, Dazai and
@@ -123,7 +123,9 @@ export function Mascot() {
           <Toggle on={s.bool("Bunbun.Mascot")} onChange={(v) => s.set("Bunbun.Mascot", v)} />
         </Row>
         <Setting k="Bunbun.MascotOnIsland" label="On the island" description="Beside the clock and the music pill. When music plays, headphones go on and the vibing starts." />
-        <Setting k="Bunbun.MascotDnd" label="Do not disturb" description={'The mascot settles in with its favourite snack. Separate from Windows\' Do Not Disturb. Ask Bun "dnd on" or "dnd off" to switch it.'} />
+        <Setting k="Bunbun.MascotDnd" label="Do not disturb" description={'Headphones on, eyes closed and a Do Not Disturb badge; the mascot stops reacting. Separate from Windows\' Do Not Disturb. Ask Bun "dnd on" or "dnd off" to switch it; Focus mode does the same.'} />
+        <Setting k="Bunbun.AfkMinutes" label="AFK after (minutes)" />
+        <Setting k="Bunbun.LiveMood" label="Live while the screen is shared" />
       </Section>
 
       <Section title="Personality">
@@ -146,7 +148,7 @@ export function Mascot() {
             s.set("Bunbun.Character", `custom:${pack}`);
           }} />
         </div>
-        <Row label="Skin packs" description={<>Or make a folder in <code>{folder || "%APPDATA%\\Bunbun\\mascots"}</code> with <code>idle.png</code> and, optionally, <code>working</code>, <code>thinking</code>, <code>alert</code>, <code>happy</code>, <code>sad</code>, <code>sleepy</code>, <code>music</code>, <code>snack</code>, <code>listening</code>, <code>talking</code>, <code>confused</code> and <code>streaming</code> PNGs. Square, transparent, 256 px or more.</>}>
+        <Row label="Skin packs" description={<>Or make a folder in <code>{folder || "%APPDATA%\\Bunbun\\mascots"}</code> with <code>idle.png</code> and, optionally, <code>working</code>, <code>thinking</code>, <code>alert</code>, <code>happy</code>, <code>sad</code>, <code>sleepy</code>, <code>music</code>, <code>snack</code>, <code>listening</code>, <code>talking</code>, <code>confused</code>, <code>streaming</code> (Streaming Shows), <code>dnd</code> and <code>live</code> PNGs. Square, transparent, 256 px or more.</>}>
           <button className="btn small" onClick={() => call("openPacksFolder")}><FolderOpen size={15} /> Open folder</button>
           <button className="btn small" onClick={() => call<string[]>("listPacks").then(setPacks)}><RotateCcw size={14} /> Refresh</button>
         </Row>

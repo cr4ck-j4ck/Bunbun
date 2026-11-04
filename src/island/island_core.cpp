@@ -16,6 +16,9 @@
 #include "../assistant/assistant.h"
 #include "../common/todos.h"  // Bunbun: to-do file and repeats, shared with the settings app
 #include "../common/json.h"   // Bunbun: talking to the local AI helper
+#include "../common/chime_wav.h"  // Bunbun: the UI chimes, shared with Linux
+#include "../common/ics.h"        // Bunbun: calendar links (.ics), shared with Linux
+#include "../common/ag_quota.h"   // Bunbun: Antigravity's quota, shared with Linux
 #include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
 #include "../updater.h"  // Bunbun: one-click updates from the island's update notice
 #include "studio_icons.h"  // Bunbun: Studio page model and icons, shared with the Linux island
@@ -55,6 +58,7 @@
 #include <wlanapi.h>   // Bunbun: Wi-Fi radio, network name and signal for the Connectivity tab
 #include <propsys.h>   // Bunbun: a window's app ID, to find a player's window
 #include <appmodel.h>  // Bunbun: a process's app ID and package
+#include <tlhelp32.h>  // Bunbun: screen recorders running (privacy_module.inc)
 
 #include <algorithm>
 #include <array>
@@ -723,6 +727,8 @@ struct Settings {
     bool mediaPillClock = false;    // show the clock inside the collapsed media pill
     bool collapsedTitle = true;     // Bunbun: song title inside the collapsed media pill
     bool streamingMood = true;      // Bunbun: videos show the Streaming mascot, not title and cover
+    bool liveMood = true;           // Bunbun: the Live mood while the screen is shared or recorded
+    int afkMinutes = 3;             // Bunbun: no input this long = AFK (snack); 0 = off
     bool dateFirst = false;
     int firstDayOfWeek = -1;        // 0 = Sunday .. 6 = Saturday, -1 = follow Windows
 
@@ -2829,6 +2835,8 @@ void LoadSettings() {
     next.mediaPillClock = Wh_GetIntSetting(L"Modules.MediaPillClock") != 0;
     next.collapsedTitle = Wh_GetIntSetting(L"Modules.CollapsedTitle") != 0;  // Bunbun
     next.streamingMood = Wh_GetIntSetting(L"Bunbun.StreamingMood") != 0;     // Bunbun
+    next.liveMood = Wh_GetIntSetting(L"Bunbun.LiveMood") != 0;               // Bunbun
+    next.afkMinutes = std::clamp(Wh_GetIntSetting(L"Bunbun.AfkMinutes"), 0, 240);  // Bunbun
 
     // ── Localization (#35) ───────────────────────────────────────────────────
     {
@@ -3100,8 +3108,23 @@ void LoadSettings() {
     }
 
     next.borderMergedMode = Wh_GetIntSetting(L"Appearance.BorderMergedMode") != 0;
-    next.autoHideFullscreen = Wh_GetIntSetting(L"Behavior.AutoHideFullscreen") != 0;
-    next.fullscreenTuck = Wh_GetIntSetting(L"Behavior.FullscreenTuck") != 0;
+    {
+        // Bunbun: Behavior.FullscreenMode (tuck | show | hide) replaced the two switches
+        // AutoHideFullscreen and FullscreenTuck. Until the new key is set, an old
+        // "don't hide" carries over as Show and an old "tuck" as Tuck.
+        std::wstring mode = GetStringSettingCopy(L"Behavior.FullscreenMode");
+        wchar_t raw[32] = {};
+        GetPrivateProfileStringW(L"Behavior", L"FullscreenMode", L"", raw, ARRAYSIZE(raw), bb::SettingsPath());
+        if (!raw[0]) {
+            wchar_t oldHide[16] = {}, oldTuck[16] = {};
+            GetPrivateProfileStringW(L"Behavior", L"AutoHideFullscreen", L"", oldHide, ARRAYSIZE(oldHide), bb::SettingsPath());
+            GetPrivateProfileStringW(L"Behavior", L"FullscreenTuck", L"", oldTuck, ARRAYSIZE(oldTuck), bb::SettingsPath());
+            if (EqualsNoCase(oldTuck, L"true")) mode = L"tuck";
+            else if (EqualsNoCase(oldHide, L"false")) mode = L"show";
+        }
+        next.autoHideFullscreen = !EqualsNoCase(mode, L"show");  // watch for full screen at all
+        next.fullscreenTuck = !EqualsNoCase(mode, L"hide") && !EqualsNoCase(mode, L"show");  // tuck (the default)
+    }
     next.hardwareMonitorModule = Wh_GetIntSetting(L"Modules.HardwareMonitorModule") != 0;
     next.connectivityModule = Wh_GetIntSetting(L"Modules.ConnectivityModule") != 0;  // Bunbun
     next.todoModule = Wh_GetIntSetting(L"Modules.TodoModule") != 0;                          // Bunbun
@@ -17733,16 +17756,24 @@ class Renderer {
         const bool cheer = settings.batteryMoods && now - g_batteryCheerAt.load(std::memory_order_relaxed) < 2.5;
         const bool drowsy = settings.batteryMoods && state.battery.hasBattery && !state.battery.charging && state.battery.percent < 15;
         if (cheer) s_moodSince = std::min(s_moodSince, g_batteryCheerAt.load(std::memory_order_relaxed));
+        // Bunbun: seconds since the last keyboard or mouse input anywhere (AFK).
+        LASTINPUTINFO lii{sizeof(lii)};
+        const double awaySeconds = GetLastInputInfo(&lii) ? (GetTickCount() - lii.dwTime) / 1000.0 : 0.0;
         if (now - s_lastPokeTime < 2.0 || cheer) {
             mood = bb::mascot::Mood::Happy;
+        } else if (settings.liveMood && state.system.screenActive) {
+            mood = bb::mascot::Mood::Live;  // Bunbun: streaming, sharing or recording the screen
         } else if (drowsy && !music) {
             mood = bb::mascot::Mood::Sleepy;
         } else if (music) {
             mood = MediaMascotMood(state.media, settings);  // Bunbun: popcorn for a video
         } else if (settings.mascotDnd || FocusModeActive()) {  // Bunbun: Focus mode too
-            // Bunbun: the mascot's own do-not-disturb (settings or Ask Bun), so Bun
-            // settles in with a snack. Deliberately independent of Windows' DND.
-            mood = bb::mascot::Mood::Snack;
+            // Bunbun: the mascot's own do-not-disturb (settings or Ask Bun): headphones
+            // on, eyes closed, a muted bell. Deliberately independent of Windows' DND.
+            mood = bb::mascot::Mood::Dnd;
+        } else if (settings.afkMinutes > 0 && awaySeconds >= settings.afkMinutes * 60.0) {
+            // Bunbun: you're away: a snack while you're gone, a nap after 20 minutes.
+            mood = awaySeconds >= 1200.0 ? bb::mascot::Mood::Sleepy : bb::mascot::Mood::Snack;
         } else {
             // Idle life cycle: after 8 minutes of idle inactivity, mascot takes a cozy nap
             extern std::atomic<double> g_lastIslandInteractionTime;

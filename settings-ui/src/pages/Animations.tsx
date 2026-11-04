@@ -1,7 +1,7 @@
 import { Check } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useStore } from "../store";
-import { PageHead, Section, Setting } from "../ui/controls";
+import { LinuxBadge, PageHead, Section, Setting } from "../ui/controls";
 
 // The island's own multipliers per style (island_core.cpp, render loop).
 const STYLES = [
@@ -95,7 +95,7 @@ export function Animations() {
     <div className="page">
       <PageHead title="Animations" subtitle="How the island moves: the spring behind every resize, its speed, and how smooth everything runs." />
       <section className="section">
-        <h3>Motion style</h3>
+        <h3>Motion style<LinuxBadge keys={["Animations.AnimationStyle"]} /></h3>
         <p className="section-note">Each preview runs the island's real spring at your animation speed. The line underneath
           traces the size: anything poking past the dashed lines is overshoot.</p>
         <div className="choices" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))" }}>
@@ -122,8 +122,7 @@ export function Animations() {
       <Section title="When the island appears">
         <Setting k="Behavior.ExpandOnHover" />
         <Setting k="Behavior.AutoHideIdleSeconds" />
-        <Setting k="Behavior.AutoHideFullscreen" />
-        {s.bool("Behavior.AutoHideFullscreen") && <Setting k="Behavior.FullscreenTuck" />}
+        <Setting k="Behavior.FullscreenMode" />
         <Setting k="Behavior.UnhideOnHover" />
         <Setting k="Behavior.AlwaysOnTop" />
       </Section>

@@ -32,8 +32,9 @@ suit.
 | Error | A task failed | Droopy eyes, a tear, a rain cloud, a little head shake |
 | Sleepy | Idle for a while | Eyes closed, "Z"s |
 | Music | Music is playing | Headphones on, nodding to the beat |
-| Streaming | A video or film is playing | Watching, munching popcorn from a striped bucket |
-| Do not disturb | Mascot DND is on | Eating its favourite snack |
+| Streaming Shows | A video or film is playing | Watching, munching popcorn from a striped bucket |
+| AFK | No keyboard or mouse for 3 minutes (Bunbun.AfkMinutes) | Eating its favourite snack; a nap after 20 minutes away |
+| Do not disturb | Mascot DND or Focus is on | Headphones on, eyes closed, a crescent-moon badge |
 | Listening | You're typing in Ask Bun | Ears up, leaning toward the text, sound waves at the ear |
 | Talking | Bun's local AI is answering | Mouth moving with the words, a speech bubble with dots (Bolt talks through an equaliser) |
 | Confused | Bun didn't understand, or couldn't get an answer | Dizzy: spiral eyes, a wavy mouth, a golden ring with stars circling the head |
@@ -116,16 +117,18 @@ happy.png       celebrate
 sad.png         error
 sleepy.png
 music.png
-snack.png       do not disturb
+snack.png       AFK (you're away)
 listening.png   you're typing to Bun
 talking.png     Bun is answering
 confused.png    Bun didn't understand
-streaming.png   a video is playing
+streaming.png   Streaming Shows: a video is playing
+dnd.png         do not disturb
+live.png        Live: streaming, sharing or recording the screen
 ```
 
 Animated: name the frames `idle_1.png`, `idle_2.png`… (all the same canvas size) instead.
 Any mood without its own PNG uses `idle.png`; `talking.png` falls back to `happy.png`,
-`confused.png` to `thinking.png` and `streaming.png` to `snack.png`. Click **Refresh** in the Mascot studio and pick the
+`confused.png` to `thinking.png` `streaming.png` to `snack.png`, `dnd.png` to `sleepy.png` and `live.png` to `working.png`. Click **Refresh** in the Mascot studio and pick the
 pack.
 
 Skin packs are for artwork you own or have permission to use. Please don't submit third-party

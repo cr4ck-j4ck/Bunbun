@@ -270,6 +270,8 @@ bb::mascot::Mood MoodFromName(const std::string& m) {
     if (m == "talking") return Mood::Talking;
     if (m == "confused") return Mood::Confused;
     if (m == "streaming") return Mood::Streaming;
+    if (m == "dnd") return Mood::Dnd;
+    if (m == "live") return Mood::Live;
     return Mood::Idle;
 }
 
@@ -638,7 +640,7 @@ Value SheetCommand(const std::string& cmd, const Value& args, std::string* err) 
     if (!rows || !rows->isArray() || g_sheetRows.empty()) { *err = "slice a sheet first"; return {}; }
     const std::wstring dir = bm::PacksFolder() + L"\\" + name;
     static const char* kMoods[] = {"idle", "working", "thinking", "alert", "happy", "sad", "sleepy", "music", "snack",
-                                   "listening", "talking", "confused", "streaming"};
+                                   "listening", "talking", "confused", "streaming", "dnd", "live"};
     for (const Value& r : rows->arr) {
         const int index = static_cast<int>(r.getNumber("row", -1));
         const std::string mood = r.getString("mood");

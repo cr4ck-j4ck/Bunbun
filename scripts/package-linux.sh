@@ -83,7 +83,7 @@ Architecture: amd64
 Maintainer: Bunbun <noreply@users.noreply.github.com>
 Installed-Size: $INSTALLED_KB
 Depends: $DEPENDS
-Recommends: xdg-utils
+Recommends: xdg-utils, pulseaudio-utils | pipewire-bin | alsa-utils, libayatana-appindicator3-1 | libappindicator3-1, xdg-desktop-portal
 Homepage: ${BUNBUN_HOMEPAGE:-https://github.com}
 Description: Dynamic Island with a mascot that watches your coding agents
  Bunbun puts a small island at the top of the screen: the time, what's

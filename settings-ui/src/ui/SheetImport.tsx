@@ -6,8 +6,8 @@ import { call } from "../bridge";
 // order left, up, centre, down, right; the character turns to the cursor with them.
 const TARGETS = [
   ["", "Skip this row"], ["idle", "Idle"], ["working", "Working"], ["thinking", "Thinking"], ["alert", "Needs you"],
-  ["happy", "Celebrate"], ["sad", "Error"], ["sleepy", "Sleepy"], ["music", "Music"], ["snack", "Do not disturb"],
-  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming"], ["look", "Look directions (← ↑ • ↓ →)"],
+  ["happy", "Celebrate"], ["sad", "Error"], ["sleepy", "Sleepy"], ["music", "Music"], ["snack", "AFK"], ["dnd", "Do not disturb"], ["live", "Live"],
+  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming Shows"], ["look", "Look directions (← ↑ • ↓ →)"],
 ] as const;
 
 type Row = { frames: string[] };

@@ -30,6 +30,12 @@ enum class Action {
     // Pages: clipboard, note, to-dos, focus timer, quick toggles, all apps
     ClipCopy, ClipClear, NoteToggle, NoteEdit, TodoToggle, TodoOpen,
     FocusStart, FocusPause, FocusAdd, FocusStop, FocusPick, Radio, OpenPage,
+    // The meeting pill (calendar_linux.cpp)
+    MeetingJoin, MeetingDismiss,
+    // File shelf and Mirror pages
+    ShelfOpen, ShelfRemove, ShelfClear, MirrorToggle,
+    // The colour picker: start it, copy a row of the colour card
+    ColorPick, ColorCopy,
 };
 struct Hit {
     Rect r;
@@ -78,6 +84,9 @@ bool StudioLayout();                      // Bunbun.Layout = studio
 int StudioContext();
 // Opens the Agent page the next time the frame opens (hovering an agent pill).
 void StudioShowAgentPage();
+// Opens the File shelf next time (files were just dropped on the island).
+void StudioShowShelf();
+bool StudioOnMirror();  // the Mirror page is the one showing
 // The frame: header, the current page, tab bar. `mix` fades it in (0..1).
 void PaintStudio(cairo_t* cr, const Rect& island, double mix);
 // The wheel or a touchpad over the open frame: the next or previous page.
@@ -94,7 +103,8 @@ bool StudioDo(const Hit& h);
 double LyricPillWidth(cairo_t* cr, double chrome);
 void PaintLyricPill(cairo_t* cr, const Rect& area);
 // A short message on the island (a reminder, the focus timer), for `seconds`.
-void ShowToast(const std::string& title, const std::string& text, double seconds);
+// level 0..1 draws a bar (volume, brightness); < 0 none.
+void ShowToast(const std::string& title, const std::string& text, double seconds, double level = -1);
 // Saves a picture of every Studio page for Settings → Island pages; returns how many.
 int StudioCapturePages();
 

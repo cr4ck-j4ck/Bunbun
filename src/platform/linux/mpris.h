@@ -30,6 +30,7 @@ Track Current();
 double Position();
 
 void PlayPause();
+void Raise();  // the player's window to the front
 void Next();
 void Previous();
 

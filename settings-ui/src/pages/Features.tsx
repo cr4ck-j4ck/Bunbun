@@ -1,6 +1,6 @@
 import { BatteryMedium, Bell, CalendarDays, Gamepad2, LayoutGrid, Mic, Music2, Quote, Search, SlidersHorizontal } from "lucide-react";
 import { ReactNode, useEffect, useRef, useState } from "react";
-import { notOnLinux, useIsLinux } from "../platform";
+import { neverOnLinux, notOnLinux, useIsLinux } from "../platform";
 import { useStore } from "../store";
 import { PageHead, Setting, Toggle } from "../ui/controls";
 
@@ -53,6 +53,7 @@ export function Features({ go }: { go?: (page: string) => void }) {
       <div className="feature-grid">
         {GROUPS.map((x) => {
           const on = x.main ? s.bool(x.main) : true;
+          if (linux && neverOnLinux(x.main ? [x.main, ...x.keys] : x.keys)) return null;  // Windows-only for good
           return (
             <div key={x.id} role="button" tabIndex={0} className={`feature ${open === x.id ? "open" : ""} ${on ? "" : "off"}`}
               onClick={() => setOpen(open === x.id ? null : x.id)} onKeyDown={(e) => e.key === "Enter" && setOpen(open === x.id ? null : x.id)}>

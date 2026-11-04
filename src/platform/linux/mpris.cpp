@@ -229,6 +229,15 @@ double Position() {
     return p->position + (IsPlaying(*p) ? (now - p->positionAt) / 1e6 : 0.0);
 }
 
+// Brings the player's window to the front (org.mpris.MediaPlayer2.Raise, on the
+// player's root object; players that can't raise ignore it).
+void Raise() {
+    Player* p = Best();
+    if (!p || !g_bus) return;
+    g_dbus_connection_call(g_bus, p->bus.c_str(), "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2", "Raise",
+                           nullptr, nullptr, G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr, nullptr);
+}
+
 void PlayPause() { Call("PlayPause"); }
 void Next() { Call("Next"); }
 void Previous() { Call("Previous"); }

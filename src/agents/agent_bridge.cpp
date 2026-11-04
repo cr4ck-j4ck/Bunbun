@@ -870,6 +870,10 @@ std::string HandleCommand(const std::string& command) {
         out["count"] = Value::Number(std::max(0, IslandCapturePages()));
         return json::Serialize(out);
     }
+    if (command == "pick_colour") {  // bunbun --pick-colour, for a keyboard shortcut
+        IslandPickColour();
+        return "{\"ok\":true}";
+    }
     return "{\"shown\":false}";
 }
 #endif

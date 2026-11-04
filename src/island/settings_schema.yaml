@@ -49,13 +49,13 @@
   - BorderMergedMode: false
     $name: Border-Merged Mode
     $description: Attach the island flush to the top edge of the monitor without a floating gap.
-  - ShapeStyle: default
+  - ShapeStyle: notch
     $name: Island Shape Style
-    $description: Change the overall shape of the island (Pill, Windows 11, or macOS Notch).
+    $description: Change the overall shape of the island (Notch, Pill or Windows 11). Notch is the default: flush with the top of the screen.
     $options:
-      - default: Default (Apple Pill)
+      - default: Pill (Apple capsule)
       - w11: Windows 11 (Rounded Box)
-      - notch: macOS Notch (Top Edge Flush)
+      - notch: Notch (Top Edge Flush, default)
   - ProgressStyle: slim
     $name: Progress bar style
     $description: Look of the song progress bar in the expanded media player. Wavy and Squiggle animate while music is playing and flatten when paused.
@@ -104,12 +104,13 @@
       - '10': Hide after 10 seconds
       - '30': Hide after 30 seconds
       - '60': Hide after 60 seconds
-  - AutoHideFullscreen: true
-    $name: Hide on full screen
-    $description: Automatically hide the island when playing a video or app in full screen mode.
-  - FullscreenTuck: false
-    $name: Tuck instead of hiding
-    $description: In full screen, fold the island into a thin line instead of hiding it. Point at the line to bring the island back; it unfolds by itself when you leave full screen, and when an agent needs you.
+  - FullscreenMode: tuck
+    $name: In full screen
+    $description: What the island does while a video, game or app is full screen. Tuck folds it into a thin line (point at the line to bring it back; it unfolds when you leave full screen or an agent needs you). Show keeps the island as usual, hover and all. Hide takes it away until you leave full screen. On Linux this needs X11 (GNOME on Wayland runs Bunbun through XWayland).
+    $options:
+      - tuck: Tuck
+      - show: Show
+      - hide: Hide
   - UnhideOnHover: true
     $name: Unhide on hover
     $description: Allow the hidden island to reappear when you hover your mouse over it.
@@ -273,8 +274,8 @@
     $name: Camera dot color
     $description: Custom hex color for camera privacy indicator.
   - PrivacyDotsScreen: true
-    $name: Show screen-recording indicator (Blue dot)
-    $description: Show a blue dot while an app records or shares your screen through Windows' capture API (Snipping Tool, browsers, Teams). Recorders that read the screen another way, such as OBS display capture, can't be detected.
+    $name: Show screen sharing and recording indicator (Blue dot)
+    $description: "One blue dot while your screen is shared or recorded: OBS recording or streaming, a browser sharing your screen (Google Meet and the like), and apps using the system's capture: on Windows its capture API (Snipping Tool, Teams, Discord), Xbox Game Bar, Camtasia and ShareX; on Linux PipeWire screen sharing (Discord, Zoom, GNOME's recorder), ffmpeg, wf-recorder, gpu-screen-recorder and SimpleScreenRecorder."
   - PrivacyDotsScreenHex: "#4F8CFF"
     $name: Screen-recording dot color
     $description: Custom hex color for the screen-recording indicator.
@@ -544,7 +545,7 @@
     $description: The model (about 1-2 GB of memory) is unloaded after this long without a question, and loads again in a second or two when needed.
   - MascotDnd: false
     $name: Mascot do not disturb
-    $description: The mascot settles in with its favourite snack and stops reacting. Independent of Windows' Do Not Disturb. Ask Bun "dnd on" or "dnd off" to switch it.
+    $description: The mascot puts its headphones on, closes its eyes and shows a Do Not Disturb badge, and stops reacting. Independent of Windows' Do Not Disturb. Ask Bun "dnd on" or "dnd off" to switch it; Focus mode does the same.
   - Character: bunny
     $name: Mascot character
     $description: bunny, cat, dog, fox, panda, robot, spiderman, luffy, dazai, or custom:<folder> for a skin pack in %APPDATA%\Bunbun\mascots
@@ -596,6 +597,12 @@
   - StreamingMood: true
     $name: Streaming mode for videos
     $description: While a video plays (YouTube, Netflix, an anime site, VLC...), the small island shows your mascot munching popcorn and "Streaming" instead of the title and cover. Music apps (Spotify, YouTube Music, Apple Music and the like) keep the song and the headphones.
+  - LiveMood: true
+    $name: Live mood while the screen is shared
+    $description: While an app streams, shares or records your screen, the mascot goes Live, with a pulsing REC badge. Uses the screen privacy dot's detection, so Privacy dots and their Screen dot need to be on.
+  - AfkMinutes: 3
+    $name: AFK after (minutes)
+    $description: With no keyboard or mouse for this long, the mascot goes AFK and munches its favourite snack until you're back. 0 turns it off.
   - MusicSwipe: true
     $name: Swipe for the next song
     $description: Swipe sideways on the small music pill, or scroll sideways on a touchpad, to skip to the next or previous song.

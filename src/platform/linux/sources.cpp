@@ -342,13 +342,16 @@ void RefreshRadios() {
 std::vector<std::string> g_clips;
 bool g_clipOn = true;
 bool g_clipSelfSet = false;  // the next change is our own copy
+std::function<void(const std::string&)> g_onCopy;
 
 void OnClipboardText(GtkClipboard*, const gchar* text, gpointer) {
-    if (!text || !g_clipOn) return;
+    if (!text) return;
     std::string t = text;
     while (!t.empty() && isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
     if (t.empty()) return;
     if (t.size() > 4000) t.resize(4000);
+    if (g_onCopy) g_onCopy(t);
+    if (!g_clipOn) return;
     g_clips.erase(std::remove(g_clips.begin(), g_clips.end(), t), g_clips.end());
     g_clips.insert(g_clips.begin(), t);
     if (g_clips.size() > 8) g_clips.resize(8);
@@ -417,7 +420,7 @@ void Start(std::function<void()> changed) {
     LoadSettings();
     g_signal_connect(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), "owner-change", G_CALLBACK(+[](GtkClipboard* cb, GdkEvent*, gpointer) {
         if (g_clipSelfSet) { g_clipSelfSet = false; return; }
-        if (g_clipOn) gtk_clipboard_request_text(cb, OnClipboardText, nullptr);
+        if (g_clipOn || g_onCopy) gtk_clipboard_request_text(cb, OnClipboardText, nullptr);
     }), nullptr);
     RefreshRadios();
     g_timeout_add_seconds(3, [](gpointer) -> gboolean { RefreshRadios(); return G_SOURCE_CONTINUE; }, nullptr);
@@ -455,6 +458,8 @@ void LoadSettings() {
     g_clipOn = s::GetBool(L"Bunbun.ClipboardHistory");
     if (!g_clipOn) g_clips.clear();
 }
+
+void FetchUrl(const std::string& url, std::function<void(const std::string&)> done) { Fetch(url, std::move(done)); }
 
 const Load& SystemLoad() { Sample(); return g_load; }
 const Battery& BatteryState() { Sample(); return g_battery; }
@@ -502,6 +507,7 @@ void SetDnd(bool on) {
 }
 
 const std::vector<std::string>& ClipHistory() { return g_clips; }
+void OnCopy(std::function<void(const std::string&)> listener) { g_onCopy = std::move(listener); }
 
 void CopyClip(int index) {
     if (index < 0 || index >= static_cast<int>(g_clips.size())) return;
@@ -514,6 +520,15 @@ void CopyClip(int index) {
 }
 
 void ClearClips() { g_clips.clear(); }
+
+void CopyText(const std::string& text) {
+    g_clipSelfSet = true;
+    gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), text.c_str(), -1);
+    if (!g_clipOn) return;
+    g_clips.erase(std::remove(g_clips.begin(), g_clips.end(), text), g_clips.end());
+    g_clips.insert(g_clips.begin(), text);
+    if (g_clips.size() > 8) g_clips.resize(8);
+}
 
 const std::vector<std::wstring>& NoteLines() {
     ReadNote();

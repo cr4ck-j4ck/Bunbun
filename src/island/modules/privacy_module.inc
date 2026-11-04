@@ -236,7 +236,7 @@ void ObsOutputs(std::vector<std::wstring>* out) {
     text.resize(read);
     // Each output's state is whichever marker came last.
     struct Output { const char* name; const wchar_t* label; };
-    const Output outputs[] = {{"Recording", L"recording"}, {"Streaming", L"live"}, {"Replay Buffer", L"replay buffer"}};
+    const Output outputs[] = {{"Recording", L"recording"}, {"Streaming", L"streaming"}, {"Replay Buffer", L"recording"}};
     for (const Output& o : outputs) {
         const size_t start = text.rfind(std::string("==== ") + o.name + " Start");
         const size_t stop = text.rfind(std::string("==== ") + o.name + " Stop");
@@ -246,8 +246,9 @@ void ObsOutputs(std::vector<std::wstring>* out) {
 }
 
 // ── Screen: browsers sharing a screen, window or tab ────────────────────────
-// Chromium browsers open a small "<site> is sharing your screen." bar for as long
-// as they share; its window title says so.
+// Chromium browsers (Google Meet in Chrome or Edge, and the like) open a small
+// "<site> is sharing your screen." bar for as long as they share; its window title
+// says so. Firefox shows a "Sharing Indicator" window instead.
 void BrowserSharingBars(std::vector<std::wstring>* out) {
     EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
         if (!IsWindowVisible(hwnd)) return TRUE;
@@ -260,7 +261,14 @@ void BrowserSharingBars(std::vector<std::wstring>* out) {
             at = t.find(marker);
             if (at != std::wstring::npos) break;
         }
-        if (at == std::wstring::npos) return TRUE;
+        if (at == std::wstring::npos) {
+            if (t.find(L"Sharing Indicator") == std::wstring::npos) return TRUE;
+            DWORD fpid = 0;
+            GetWindowThreadProcessId(hwnd, &fpid);
+            if (_wcsnicmp(ProcessName(fpid).c_str(), L"Firefox", 7) == 0)
+                AddUnique(reinterpret_cast<std::vector<std::wstring>*>(param), L"Firefox");
+            return TRUE;
+        }
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         std::wstring app = ProcessName(pid);
@@ -269,6 +277,33 @@ void BrowserSharingBars(std::vector<std::wstring>* out) {
         AddUnique(reinterpret_cast<std::vector<std::wstring>*>(param), app);
         return TRUE;
     }, reinterpret_cast<LPARAM>(out));
+}
+
+// ── Screen: dedicated screen recorders ──────────────────────────────────────
+// Recorders that capture the screen their own way and only run while recording:
+// Xbox Game Bar's capture server, Camtasia's recorder, and the ffmpeg ShareX
+// starts for a screen recording. Sharing and recording light the same blue dot.
+void ScreenRecorders(std::vector<std::wstring>* out) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    std::vector<std::pair<DWORD, std::wstring>> procs;  // pid, exe
+    std::vector<DWORD> parents;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        procs.emplace_back(pe.th32ProcessID, pe.szExeFile);
+        parents.push_back(pe.th32ParentProcessID);
+    }
+    CloseHandle(snap);
+    for (size_t i = 0; i < procs.size(); ++i) {
+        const std::wstring& exe = procs[i].second;
+        if (_wcsicmp(exe.c_str(), L"bcastdvr.exe") == 0) AddUnique(out, L"Xbox Game Bar (recording)");
+        else if (_wcsicmp(exe.c_str(), L"CamRecorder.exe") == 0) AddUnique(out, L"Camtasia (recording)");
+        else if (_wcsicmp(exe.c_str(), L"ffmpeg.exe") == 0) {
+            for (const auto& [pid, name] : procs)
+                if (pid == parents[i] && _wcsicmp(name.c_str(), L"ShareX.exe") == 0) AddUnique(out, L"ShareX (recording)");
+        }
+    }
 }
 
 // "Discord", "Discord & OBS Studio", "Discord, OBS Studio +1".
@@ -310,12 +345,13 @@ void UpdatePrivacyIndicators() {
         for (DWORD pid : pids) AddUnique(&cam, ProcessName(pid));
         ConsentStoreApps(L"webcam", &cam);
     }
-    // Screen capture through Windows' capture API (Snipping Tool's recorder,
-    // browsers sharing a screen, Teams). OBS display capture reads the screen
-    // another way and can't be seen.
+    // Screen capture, shared or recorded, lights one blue dot: Windows' capture
+    // API (Snipping Tool's recorder, browsers sharing a screen, Teams), OBS's
+    // outputs, and the dedicated recorders above.
     if (settings.privacyDots && settings.privacyDotsScreen) {
         ObsOutputs(&screen);
         BrowserSharingBars(&screen);
+        ScreenRecorders(&screen);
         ConsentStoreApps(L"graphicsCaptureProgrammatic", &screen);
         ConsentStoreApps(L"graphicsCaptureWithoutBorder", &screen);
     }
@@ -331,6 +367,17 @@ void UpdatePrivacyIndicators() {
             if (std::find(before.begin(), before.end(), app) != before.end() || !alert.empty()) continue;
             if (_wcsicmp(app.c_str(), s_self.c_str()) == 0 || _wcsnicmp(app.c_str(), L"bunbun", 6) == 0) continue;
             alert = app + L" " + Loc(L"is using your") + L" " + Loc(what);
+            if (kind == 2) {
+                // Bunbun: the screen says how: streaming (OBS live), recording, or sharing.
+                const std::wstring how = app.find(L"(streaming)") != std::wstring::npos ? L"is streaming your screen"
+                                         : app.find(L"(recording)") != std::wstring::npos ? L"is recording your screen"
+                                                                                          : L"is sharing your screen";
+                std::wstring name = app;
+                if (const size_t paren = name.find(L" ("); paren != std::wstring::npos &&
+                    (name.find(L"(streaming)") != std::wstring::npos || name.find(L"(recording)") != std::wstring::npos))
+                    name = name.substr(0, paren);
+                alert = name + L" " + Loc(how.c_str());
+            }
             alertKind = kind;
         }
     };

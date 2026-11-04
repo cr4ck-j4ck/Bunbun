@@ -11,6 +11,7 @@
 #include "../src/common/json.h"
 #include "../src/common/update.h"
 #include "../src/common/todos.h"
+#include "../src/common/chime_wav.h"
 
 #include <algorithm>
 #include <cwchar>
@@ -44,6 +45,28 @@ static void WriteAll(const std::wstring& path, const std::string& s) {
     FILE* f = _wfopen(path.c_str(), L"wb");
     fwrite(s.data(), 1, s.size(), f);
     fclose(f);
+}
+
+// The UI chimes (common/chime_wav.h, shared by Windows and Linux): each one is a
+// valid 16-bit mono WAV of the expected length, louder with the volume.
+static void TestChimes() {
+    using bb::chime::Chime;
+    const size_t bytes[] = {30914, 23858, 24740, 6218, 6218};  // Done, Question, Error, Open, Close
+    for (int c = 0; c < static_cast<int>(Chime::Count); ++c) {
+        const auto wav = bb::chime::MakeWav(bb::chime::NotesFor(static_cast<Chime>(c)), 0.4f);
+        CHECK(wav.size() == bytes[c]);
+        CHECK(memcmp(wav.data(), "RIFF", 4) == 0 && memcmp(wav.data() + 8, "WAVEfmt ", 8) == 0);
+        int peakQuiet = 0, peakLoud = 0;
+        const auto loud = bb::chime::MakeWav(bb::chime::NotesFor(static_cast<Chime>(c)), 1.0f);
+        for (size_t i = 44; i + 1 < wav.size(); i += 2) {
+            int16_t a, b;
+            memcpy(&a, &wav[i], 2);
+            memcpy(&b, &loud[i], 2);
+            peakQuiet = std::max(peakQuiet, std::abs(static_cast<int>(a)));
+            peakLoud = std::max(peakLoud, std::abs(static_cast<int>(b)));
+        }
+        CHECK(peakQuiet > 1000 && peakLoud > peakQuiet);
+    }
 }
 
 static void TestJson() {
@@ -427,6 +450,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTodos();
     TestLyricsText();
     TestStudioChat();
+    TestChimes();
     std::printf(g_failed ? "%d check(s) failed\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;
 }

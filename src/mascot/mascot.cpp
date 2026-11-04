@@ -212,6 +212,8 @@ const wchar_t* MoodFile(Mood m) {
         case Mood::Talking: return L"talking.png";
         case Mood::Confused: return L"confused.png";
         case Mood::Streaming: return L"streaming.png";
+        case Mood::Dnd: return L"dnd.png";
+        case Mood::Live: return L"live.png";
         default: return L"idle.png";
     }
 }
@@ -222,6 +224,8 @@ const wchar_t* FallbackFile(Mood m) {
         case Mood::Talking: return L"happy.png";
         case Mood::Confused: return L"thinking.png";
         case Mood::Streaming: return L"snack.png";  // a pack without popcorn frames still munches
+        case Mood::Dnd: return L"sleepy.png";       // eyes closed, settled in
+        case Mood::Live: return L"working.png";     // at the laptop
         default: return L"idle.png";
     }
 }
@@ -441,7 +445,7 @@ const PackInfo& LoadPackInfo(ID2D1RenderTarget* rt, PackCache& cache, const std:
         info.frameSeconds = std::clamp(static_cast<float>(_wtof(fs.c_str())), 0.05f, 5.0f);
     info.frames = FileExists(dir + L"idle_1.png");
     if (info.frames) {
-        for (int m = 0; m <= static_cast<int>(Mood::Streaming); ++m) {  // every mood, the newest last
+        for (int m = 0; m <= static_cast<int>(Mood::Live); ++m) {  // every mood, the newest last
             const std::wstring stem = Stem(static_cast<Mood>(m));
             int count = 0;
             while (count < 32 && FileExists(dir + stem + L"_" + std::to_wstring(count + 1) + L".png")) ++count;
@@ -1156,6 +1160,10 @@ thread_local SpideyPalette t_spidey = SpideyPaletteFor(Style{});  // set by Draw
 // Streaming is drawn as Snack (the same chewing face and motion) with the eyes
 // open on the screen and popcorn instead of each character's own snack.
 thread_local bool t_streaming = false;  // set by DrawStyled for each frame
+// Do Not Disturb is drawn as Sleepy with headphones and a moon badge; Live as
+// Working (at the laptop) with a pulsing REC badge and broadcast waves.
+thread_local bool t_dnd = false;
+thread_local bool t_live = false;
 
 void SpideyHead(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float rx, float ry, float s, Mood mood,
                 double t, const D2D1_MATRIX_3X2_F& world) {
@@ -1745,6 +1753,71 @@ void TerminalVisor(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_RECT_F visor, 
         rt->FillRectangle(D2D1::RectF(cmdLeft + typed + s * 0.006f, promptY - barH * 1.4f, cmdLeft + typed + s * 0.022f, promptY + barH * 1.4f),
                           cache.Get(rt, green));
     rt->PopAxisAlignedClip();
+}
+
+// ── Do Not Disturb: a purple rounded tile with a crescent moon ─────────────
+void DndMoonBadge(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float s, double t, float lw) {
+    const float h = s * 0.10f;  // half the badge
+    // A slow breath: it eases a little larger and back every 3 s.
+    const float k = 1.0f + 0.035f * std::sin(static_cast<float>(t) * 2.1f);
+    const float hk = h * k;
+    // Soft shadow, then the purple tile with a lighter top edge.
+    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(c.x - hk, c.y - hk + h * 0.12f, c.x + hk, c.y + hk + h * 0.12f), hk * 0.42f, hk * 0.42f),
+                             cache.Get(rt, Hex(0x000000, 0.25f)));
+    const D2D1_ROUNDED_RECT box = D2D1::RoundedRect(D2D1::RectF(c.x - hk, c.y - hk, c.x + hk, c.y + hk), hk * 0.42f, hk * 0.42f);
+    rt->FillRoundedRectangle(box, cache.Get(rt, Hex(0x8B5CF6)));
+    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(c.x - hk, c.y - hk, c.x + hk, c.y - hk * 0.2f), hk * 0.42f, hk * 0.42f),
+                             cache.Get(rt, Hex(0xA78BFA, 0.55f)));
+    rt->DrawRoundedRectangle(box, cache.Get(rt, Hex(0x3B1F7A)), std::max(0.8f, lw * 0.7f));
+    // A crescent moon, the usual sign for Do Not Disturb: it stays readable at
+    // island size, where a struck-through bell is only a few pixels wide.
+    // A small star twinkles beside it.
+    ID2D1Brush* white = cache.Get(rt, Hex(0xFFFFFF));
+    const D2D1_POINT_2F mc = D2D1::Point2F(c.x - h * 0.10f, c.y + h * 0.05f);
+    rt->FillEllipse(D2D1::Ellipse(mc, h * 0.56f, h * 0.56f), white);
+    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(mc.x + h * 0.30f, mc.y - h * 0.22f), h * 0.46f, h * 0.46f), cache.Get(rt, Hex(0x8B5CF6)));
+    const float tw = 0.55f + 0.45f * std::sin(static_cast<float>(t) * 2.6f);
+    const D2D1_POINT_2F star = D2D1::Point2F(c.x + h * 0.48f, c.y - h * 0.42f);
+    ID2D1Brush* sb = cache.Get(rt, Hex(0xFFFFFF, 0.5f + 0.5f * tw));
+    const float sr = h * (0.13f + 0.05f * tw), sw = std::max(0.8f, h * 0.08f);
+    rt->DrawLine(D2D1::Point2F(star.x - sr, star.y), D2D1::Point2F(star.x + sr, star.y), sb, sw);
+    rt->DrawLine(D2D1::Point2F(star.x, star.y - sr), D2D1::Point2F(star.x, star.y + sr), sb, sw);
+}
+
+// ── Live: a dark REC badge with a pulsing red dot and broadcast waves ───────
+void RecBadge(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float s, double t, float lw) {
+    const float h = s * 0.085f;
+    const D2D1_ROUNDED_RECT box = D2D1::RoundedRect(D2D1::RectF(c.x - h, c.y - h, c.x + h, c.y + h), h * 0.40f, h * 0.40f);
+    rt->FillRoundedRectangle(box, cache.Get(rt, Hex(0x2B2933)));
+    rt->DrawRoundedRectangle(box, cache.Get(rt, Hex(0x0F0E13)), std::max(0.8f, lw * 0.8f));
+    // Viewfinder corners.
+    ID2D1Brush* white = cache.Get(rt, Hex(0xFFFFFF, 0.9f));
+    const float o = h * 0.62f, len = h * 0.30f, w = std::max(0.8f, h * 0.10f);
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2) {
+            const D2D1_POINT_2F p = D2D1::Point2F(c.x + sx * o, c.y + sy * o);
+            rt->DrawLine(p, D2D1::Point2F(p.x - sx * len, p.y), white, w);
+            rt->DrawLine(p, D2D1::Point2F(p.x, p.y - sy * len), white, w);
+        }
+    // The dot breathes about once a second, with a soft glow at its brightest.
+    const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(t) * 5.5f);
+    rt->FillEllipse(D2D1::Ellipse(c, h * (0.42f + 0.12f * pulse), h * (0.42f + 0.12f * pulse)), cache.Get(rt, Hex(0xFF3B30, 0.25f * pulse)));
+    rt->FillEllipse(D2D1::Ellipse(c, h * 0.34f, h * 0.34f), cache.Get(rt, Hex(0xFF3B30, 0.75f + 0.25f * pulse)));
+    // Broadcast waves ripple out on the free side, one after the other.
+    for (int i = 0; i < 2; ++i) {
+        const float ph = std::fmod(static_cast<float>(t) * 0.9f + i * 0.5f, 1.0f);
+        const float r = h * (1.25f + ph * 0.9f);
+        ID2D1Brush* wave = cache.Get(rt, Hex(0xFF3B30, (1.0f - ph) * 0.85f));
+        ComPtr<ID2D1GeometrySink> sink;
+        if (ComPtr<ID2D1PathGeometry> arc = NewPath(rt, &sink)) {
+            sink->BeginFigure(D2D1::Point2F(c.x + r * 0.6f, c.y - r * 0.8f), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(c.x + r * 0.6f, c.y + r * 0.8f), D2D1::SizeF(r, r), 0.0f,
+                                          D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            sink->Close();
+            rt->DrawGeometry(arc.Get(), wave, std::max(0.9f, h * 0.16f));
+        }
+    }
 }
 
 // ── Streaming: a striped popcorn bucket by the chin, a kernel on its way up ──
@@ -2384,7 +2457,10 @@ void LuffyFace(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float 
             MouthLine(rt, cache, D2D1::Point2F(c.x + rx * 0.04f, c.y + ry * 0.55f), rx * 0.15f, ry * 0.04f, lw, kLuffyInk);
             ChinHand(rt, cache, c, rx, ry, lw, t, kLuffySkin, kLuffyInk, false);
             break;
-        case Mood::Sleepy: SnotBubble(rt, cache, c, rx, ry, s, t, lw, kLuffyInk); break;
+        case Mood::Sleepy:
+            if (t_dnd) MouthLine(rt, cache, D2D1::Point2F(c.x, c.y + ry * 0.55f), rx * 0.12f, ry * 0.03f, lw, kLuffyInk);  // calm
+            else SnotBubble(rt, cache, c, rx, ry, s, t, lw, kLuffyInk);
+            break;
         case Mood::Sad: Wail(rt, cache, c, rx, ry, t, lw, kLuffyInk, world); break;
         case Mood::Talking: bigMouth(true, 0.34f, 0.16f + 0.32f * TalkOpen(t)); break;  // chattering away
         case Mood::Confused:
@@ -2484,6 +2560,10 @@ void DazaiFace(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float 
     rt->SetTransform(world);
     switch (mood) {
         case Mood::Working: {
+            if (t_live) {  // Live: at the laptop (drawn with the others), a small smile
+                MouthLine(rt, cache, D2D1::Point2F(c.x, c.y + ry * 0.50f), rx * 0.10f, ry * 0.04f, lw, kDazaiInk);
+                break;
+            }
             // Reading: an open book held up, its red cover toward us, a page
             // turning every few seconds.
             const float bob = std::sin(tp * 2.0f) * ry * 0.02f;
@@ -2545,7 +2625,10 @@ void DazaiFace(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float 
             MouthLine(rt, cache, D2D1::Point2F(c.x + rx * 0.02f, c.y + ry * 0.56f), rx * 0.12f, -ry * 0.04f, lw, kDazaiInk);
             ChinHand(rt, cache, c, rx, ry, lw, t, kDazaiSkin, kDazaiInk, true);
             break;
-        case Mood::Sleepy: SnotBubble(rt, cache, c, rx, ry, s, t, lw, kDazaiInk); break;
+        case Mood::Sleepy:
+            if (t_dnd) MouthLine(rt, cache, D2D1::Point2F(c.x, c.y + ry * 0.50f), rx * 0.08f, ry * 0.025f, lw, kDazaiInk);  // calm
+            else SnotBubble(rt, cache, c, rx, ry, s, t, lw, kDazaiInk);
+            break;
         case Mood::Sad: Wail(rt, cache, c, rx, ry, t, lw, kDazaiInk, world); break;
         case Mood::Talking: {  // a lazy drawl: the mouth barely opens
             const float open = TalkOpen(t);
@@ -2785,6 +2868,10 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
     }
     t_streaming = mood == Mood::Streaming;
     if (t_streaming) mood = Mood::Snack;
+    t_dnd = mood == Mood::Dnd;
+    if (t_dnd) mood = Mood::Sleepy;
+    t_live = mood == Mood::Live;
+    if (t_live) mood = Mood::Working;
     if (!st.eyesFollow) look = D2D1::Point2F(0, 0);
     t_spidey = SpideyPaletteFor(st);
     const Look L = LookFor(st);
@@ -2808,7 +2895,7 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         case Mood::Alert: spread = 4.0f; wiggle = std::sin(static_cast<float>(t) * 18.0f) * 3.5f * k; lenK = 1.12f; break;
         case Mood::Happy: spread = 18.0f; wiggle = std::sin(since * 10.0f) * 5.0f * k; break;
         case Mood::Sad: spread = 62.0f; lenK = 0.92f; break;
-        case Mood::Sleepy: spread = 48.0f; lenK = 0.94f; break;
+        case Mood::Sleepy: if (!t_dnd) { spread = 48.0f; lenK = 0.94f; } break;  // DND: ears as usual
         case Mood::Music: spread = 16.0f; wiggle = std::sin(static_cast<float>(t) * kPi * 2.0f) * 7.0f * k; break;
         case Mood::Listening: spread = 6.0f; lenK = 1.08f; wiggle = std::sin(static_cast<float>(t) * 2.5f) * 1.5f * k; break;  // perked up
         case Mood::Talking: wiggle = std::sin(static_cast<float>(t) * 4.5f) * 3.0f * k; break;
@@ -3160,6 +3247,7 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         // on his visor. The originals get a smaller one just under the mouth, so it
         // stays inside their slot.
         if (L.luffy) Laptop(rt, cache, D2D1::Point2F(headC.x, headC.y + headRy * 0.80f), s, t, st.character, world);
+        else if (L.dazai && t_live) Laptop(rt, cache, D2D1::Point2F(headC.x, headC.y + headRy * 0.80f), s, t, st.character, world);
         else if (L.dazai || L.robot) {}  // book (DazaiFace) / terminal visor (above)
         else if (L.spiderman) Laptop(rt, cache, D2D1::Point2F(headC.x, headC.y + headRy * 0.50f), s, t, st.character, world);
         else Laptop(rt, cache, D2D1::Point2F(headC.x, headC.y + headRy * 0.60f), s, t, st.character, world, 0.85f);
@@ -3172,9 +3260,10 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         ThinkQuestion(rt, cache, headC, headRx, headRy, s, t, world, Hex(0xFFF8EE), Hex(0x1A1622, 0.55f), L.spiderman);
 
     // ── Headphones + a floating note while music plays ──────────────────────
-    if (mood == Mood::Music) {
+    // (Do Not Disturb wears them too, without the note.)
+    if (mood == Mood::Music || t_dnd) {
         const D2D1_COLOR_F band = Hex(0x2D2B36);
-        const D2D1_COLOR_F cushion = Hex(0xFF8FC2);
+        const D2D1_COLOR_F cushion = t_dnd ? Hex(0xA78BFA) : Hex(0xFF8FC2);
         const float cupY = headC.y + headRy * 0.02f;
         const float cupDx = headRx * (L.robot ? 1.02f : 0.97f);
         ComPtr<ID2D1Factory> f;
@@ -3204,10 +3293,16 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         const float ns = s * 0.07f;
         const D2D1_POINT_2F n = D2D1::Point2F(headC.x + headRx * 1.25f + phase * s * 0.06f, headC.y - phase * s * 0.35f);
         ID2D1Brush* nb = brush(D2D1::ColorF(0xFF8FC2, std::sin(phase * kPi)));
-        rt->FillEllipse(D2D1::Ellipse(n, ns * 0.6f, ns * 0.45f), nb);
-        rt->DrawLine(D2D1::Point2F(n.x + ns * 0.5f, n.y), D2D1::Point2F(n.x + ns * 0.5f, n.y - ns * 1.8f), nb, lw * 1.1f);
-        rt->DrawLine(D2D1::Point2F(n.x + ns * 0.5f, n.y - ns * 1.8f), D2D1::Point2F(n.x + ns * 1.2f, n.y - ns * 1.3f), nb, lw * 1.1f);
+        if (!t_dnd) {
+            rt->FillEllipse(D2D1::Ellipse(n, ns * 0.6f, ns * 0.45f), nb);
+            rt->DrawLine(D2D1::Point2F(n.x + ns * 0.5f, n.y), D2D1::Point2F(n.x + ns * 0.5f, n.y - ns * 1.8f), nb, lw * 1.1f);
+            rt->DrawLine(D2D1::Point2F(n.x + ns * 0.5f, n.y - ns * 1.8f), D2D1::Point2F(n.x + ns * 1.2f, n.y - ns * 1.3f), nb, lw * 1.1f);
+        }
     }
+
+    // ── Do Not Disturb: a moon badge; Live: a REC badge ─────────────────────
+    if (t_dnd) DndMoonBadge(rt, cache, D2D1::Point2F(headC.x + headRx * 1.08f, headC.y - headRy * 0.95f), s, t, lw);
+    if (t_live) RecBadge(rt, cache, D2D1::Point2F(headC.x + headRx * 1.02f, headC.y - headRy * 0.78f), s, t, lw);
 
     // ── Celebrating: sparks and confetti ────────────────────────────────────
     if (mood == Mood::Happy) Celebrate(rt, cache, headC, headRx, headRy, s, since, world, lw, false);
@@ -3218,10 +3313,12 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
     }
 
     // ── Sleepy "z" ──────────────────────────────────────────────────────────
-    if (mood == Mood::Sleepy) {
+    if (mood == Mood::Sleepy && !t_dnd) {
         const float phase = std::fmod(static_cast<float>(t) * 0.5f, 1.0f);
         const float zs = s * 0.11f;
-        const D2D1_POINT_2F z = D2D1::Point2F(headC.x + headRx * 0.9f + phase * s * 0.1f, headC.y - headRy * 0.9f - phase * s * 0.25f);
+        // Do Not Disturb's muted bell sits up there, so its "z" drifts up beside the cheek.
+        const float zy = t_dnd ? headC.y + headRy * 0.30f : headC.y - headRy * 0.9f;
+        const D2D1_POINT_2F z = D2D1::Point2F(headC.x + headRx * (t_dnd ? 1.05f : 0.9f) + phase * s * 0.1f, zy - phase * s * (t_dnd ? 0.18f : 0.25f));
         const float alpha = std::sin(phase * kPi);
         ID2D1Brush* glow = brush(D2D1::ColorF(0xB69CFF, alpha * 0.85f));
         ID2D1Brush* zb = brush(D2D1::ColorF(0xFFFFFF, alpha * 0.95f));

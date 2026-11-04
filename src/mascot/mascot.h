@@ -26,11 +26,13 @@ enum class Mood {
     Sad,       // droopy ears: error
     Sleepy,    // eyes closed, ears down
     Music,     // headphones on, bobbing to the beat
-    Snack,     // munching a drumstick: do not disturb is on
+    Snack,     // AFK: munching its favourite snack while you're away (pack frames: snack)
     Listening, // ears up, leaning in: you're typing to Bun
     Talking,   // mouth moving, speech bubble: Bun is answering
     Confused,  // head tilt, uneven eyes, a swirl: Bun didn't understand
-    Streaming, // watching a video, munching popcorn from a bucket
+    Streaming, // Streaming Shows: watching a video, munching popcorn from a bucket
+    Dnd,       // Do Not Disturb: headphones on, eyes closed, a crescent-moon badge
+    Live,      // Live: streaming, sharing or recording the screen; a pulsing REC badge
 };
 
 enum class Character { Bunny, Cat, Dog, Fox, Panda, Robot, Spiderman, Luffy, Dazai, Custom };

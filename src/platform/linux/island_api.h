@@ -14,6 +14,8 @@ void IslandSetAgentView(const bb::AgentView& view, bool nudge);
 // returns how many; -1 if the island didn't answer. Any thread; waits for the
 // GTK main loop.
 int IslandCapturePages();
+// Starts the colour picker (bunbun --pick-colour). Any thread.
+void IslandPickColour();
 
 // Settings by "Section.Key" ("Bunbun.ShellApprovals"): true/false read as 1/0.
 int Wh_GetIntSetting(const wchar_t* name, ...);

@@ -6,8 +6,8 @@ import { LivePreview } from "../ui/live";
 import { THEMES } from "../theme";
 
 const SHAPES = [
+  { value: "notch", label: "Notch", desc: "MacBook style, hangs from the top edge (default)", radius: "0 0 14px 14px", top: 0 },
   { value: "default", label: "Pill", desc: "The classic Dynamic Island capsule", radius: "999px", top: 10 },
-  { value: "notch", label: "Notch", desc: "MacBook style, hangs from the top edge", radius: "0 0 14px 14px", top: 0 },
   { value: "w11", label: "Windows 11", desc: "Soft rectangle that matches Fluent", radius: "7px", top: 10 },
 ];
 

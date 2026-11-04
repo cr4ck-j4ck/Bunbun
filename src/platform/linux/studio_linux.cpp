@@ -18,6 +18,7 @@
 #include <pango/pangocairo.h>
 
 #include <dirent.h>
+#include <dlfcn.h>
 
 #include <algorithm>
 #include <cctype>
@@ -25,11 +26,19 @@
 #include <cstdio>
 #include <ctime>
 #include <cwchar>
+#include <mutex>
+#include <thread>
+#include <unistd.h>
 
 #include "../../agents/hook_installer.h"
+#include "../../common/ag_quota.h"
 #include "../../island/studio_icons.h"
 #include "platform.h"
 #include "settings.h"
+#include "calendar_linux.h"
+#include "features_linux.h"
+#include "shelf_linux.h"
+#include "look_linux.h"
 #include "lyrics_linux.h"
 #include "sources.h"
 
@@ -58,8 +67,87 @@ struct StudioSettings {
     uint32_t customAccent = 0x4cc9f0;
     // Pages (the same switches as Windows; File shelf, Mirror and Lyrics aren't on Linux yet)
     bool weather = true, system = true, toggles = true, todo = true, clipboard = true, note = true, focus = true, apps = true;
+    bool antigravityQuota = true;  // Bunbun.AntigravityQuota
 };
 StudioSettings g_s;
+
+// ── Antigravity quota ───────────────────────────────────────────────────────
+// What Antigravity caches about its model quota (common/ag_quota.h), read from its
+// state database once a minute on a worker thread. SQLite is loaded at run time
+// (libsqlite3.so.0, on practically every desktop), so it's no dependency of ours.
+struct AgSnapshot {
+    bool valid = false;
+    float remaining = 1.0f;
+    long long resetAt = 0;
+};
+std::mutex g_agMutex;
+AgSnapshot g_ag;  // guarded by g_agMutex
+
+bool ReadAgQuota(AgSnapshot* out) {
+    std::string path;
+    for (const char* dir : {"/.config/Antigravity IDE", "/.config/Antigravity"}) {
+        const std::string p = bb::plat::HomeDir() + dir + "/User/globalStorage/state.vscdb";
+        if (bb::plat::FileExists(p)) { path = p; break; }
+    }
+    if (path.empty()) return false;
+    static void* lib = dlopen("libsqlite3.so.0", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return false;
+    using OpenFn = int (*)(const char*, void**, int, const char*);
+    using PrepareFn = int (*)(void*, const char*, int, void**, const char**);
+    using StepFn = int (*)(void*);
+    using TextFn = const unsigned char* (*)(void*, int);
+    using BytesFn = int (*)(void*, int);
+    using FinalizeFn = int (*)(void*);
+    using CloseFn = int (*)(void*);
+    auto open = reinterpret_cast<OpenFn>(dlsym(lib, "sqlite3_open_v2"));
+    auto prepare = reinterpret_cast<PrepareFn>(dlsym(lib, "sqlite3_prepare_v2"));
+    auto step = reinterpret_cast<StepFn>(dlsym(lib, "sqlite3_step"));
+    auto text = reinterpret_cast<TextFn>(dlsym(lib, "sqlite3_column_text"));
+    auto bytes = reinterpret_cast<BytesFn>(dlsym(lib, "sqlite3_column_bytes"));
+    auto finalize = reinterpret_cast<FinalizeFn>(dlsym(lib, "sqlite3_finalize"));
+    auto close = reinterpret_cast<CloseFn>(dlsym(lib, "sqlite3_close"));
+    if (!open || !prepare || !step || !text || !bytes || !finalize || !close) return false;
+    void* db = nullptr;
+    constexpr int kReadOnly = 0x00000001;
+    if (open(path.c_str(), &db, kReadOnly, nullptr) != 0 || !db) {
+        if (db) close(db);
+        return false;
+    }
+    std::string value;
+    void* stmt = nullptr;
+    if (prepare(db, "SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.userStatus'", -1, &stmt, nullptr) == 0 && stmt) {
+        if (step(stmt) == 100 /* SQLITE_ROW */)
+            if (const unsigned char* t = text(stmt, 0)) value.assign(reinterpret_cast<const char*>(t), static_cast<size_t>(bytes(stmt, 0)));
+        finalize(stmt);
+    }
+    close(db);
+    bb::agquota::Quota q;
+    if (value.empty() || !bb::agquota::Decode(value, &q)) return false;
+    *out = {true, q.remaining, q.resetAt};
+    return true;
+}
+
+AgSnapshot AgQuota() {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        std::thread([] {
+            for (;;) {
+                AgSnapshot snap;
+                const bool ok = ReadAgQuota(&snap);
+                {
+                    std::lock_guard lock(g_agMutex);
+                    if (ok) g_ag = snap;
+                    else g_ag.valid = false;
+                }
+                if (ok) g_idle_add([](gpointer) -> gboolean { Redraw(); return G_SOURCE_REMOVE; }, nullptr);
+                sleep(60);
+            }
+        }).detach();
+    });
+    if (!g_s.antigravityQuota || !g_s.showAgent[AgentAntigravity]) return {};
+    std::lock_guard lock(g_agMutex);
+    return g_ag;
+}
 
 AgentKind AgentKindFor(const std::wstring& name) {
     std::wstring n = name;
@@ -122,8 +210,7 @@ int MainAgentKind() {
     return AgentClaude;
 }
 
-// The pages switched on (File shelf and Mirror aren't on Linux yet);
-// PageOrder orders them.
+// The pages switched on; PageOrder orders them.
 st::PageSwitches Switches() {
     st::PageSwitches p;
     p.studio = true;
@@ -137,7 +224,8 @@ st::PageSwitches Switches() {
     p.focus = g_s.focus;
     p.apps = g_s.apps;
     p.lyrics = llyrics::PageOn() && g_track.active && g_mediaOn;
-    p.tray = p.mirror = false;
+    p.tray = bb::lshelf::ShelfOn();
+    p.mirror = bb::lshelf::MirrorOn();
     p.agent = g_s.agentTab && AgentsShown();
     p.order = g_s.pageOrder;
     return p;
@@ -153,7 +241,10 @@ Col W(double a) { return {1, 1, 1, a}; }
 Col WithA(Col c, double a) { c.a = a; return c; }
 Col Lerp(Col x, Col y, double t) { return {x.r + (y.r - x.r) * t, x.g + (y.g - x.g) * t, x.b + (y.b - x.b) * t, x.a + (y.a - x.a) * t}; }
 D2D1_COLOR_F D2(Col c) { return D2D1::ColorF(static_cast<float>(c.r), static_cast<float>(c.g), static_cast<float>(c.b), static_cast<float>(c.a)); }
-void Source(cairo_t* cr, Col c) { cairo_set_source_rgba(cr, c.r, c.g, c.b, c.a); }
+void Source(cairo_t* cr, Col c) {
+    bb::llook::Ink(&c.r, &c.g, &c.b, &c.a);  // "white" is the theme's text colour
+    cairo_set_source_rgba(cr, c.r, c.g, c.b, c.a);
+}
 
 double g_alpha = 1.0;  // the frame's fade while the island opens
 Col F(Col c) { c.a *= g_alpha; return c; }
@@ -170,8 +261,8 @@ constexpr FontSpec kFonts[] = {
 
 PangoLayout* Layout(cairo_t* cr, const std::string& text, Font f) {
     PangoLayout* layout = pango_cairo_create_layout(cr);
-    PangoFontDescription* font = pango_font_description_from_string(kFonts[f].mono ? "Monospace" : "Sans");
-    pango_font_description_set_absolute_size(font, kFonts[f].size * PANGO_SCALE);
+    PangoFontDescription* font = pango_font_description_from_string(kFonts[f].mono ? "Monospace" : bb::llook::Font());
+    pango_font_description_set_absolute_size(font, bb::llook::TextSize(kFonts[f].size) * PANGO_SCALE);
     pango_font_description_set_weight(font, kFonts[f].weight);
     pango_layout_set_font_description(layout, font);
     pango_font_description_free(font);
@@ -378,6 +469,7 @@ int g_tabIdx = 0;
 std::vector<double> g_tabW;  // eased tab widths, one per tab
 bool g_offscreen = false;    // drawing a page picture: no easing, no hover
 bool g_wantAgentPage = false;
+bool g_wantShelfPage = false;  // files were just dropped on the island
 double g_scrollAcc = 0, g_scrollAt = 0;
 std::vector<std::pair<std::wstring, std::wstring>> g_links;
 
@@ -529,10 +621,11 @@ Page g_page = Page::Home;
 void UpdateTabs() {
     g_context = g_track.active && g_mediaOn ? 0 : 1;
     g_tabs = st::TabIds(g_context, Switches());
-    if (g_wantAgentPage) {
+    if (g_wantAgentPage || g_wantShelfPage) {
+        const Page want = g_wantShelfPage ? Page::Tray : Page::Agent;
         for (size_t i = 0; i < g_tabs.size(); ++i)
-            if (st::PageFor(g_context, g_tabs[i]) == Page::Agent) g_tabIdx = static_cast<int>(i);
-        g_wantAgentPage = false;
+            if (st::PageFor(g_context, g_tabs[i]) == want) g_tabIdx = static_cast<int>(i);
+        g_wantAgentPage = g_wantShelfPage = false;
     }
     g_tabIdx = std::clamp(g_tabIdx, 0, std::max(0, static_cast<int>(g_tabs.size()) - 1));
     g_page = g_tabs.empty() ? Page::Home : st::PageFor(g_context, g_tabs[static_cast<size_t>(g_tabIdx)]);
@@ -546,12 +639,23 @@ int TabIndexOf(Page page) {
 
 // Whose usage the header ring shows: Claude Code's 5-hour window, from its
 // statusLine, while the reading is younger than the window it describes.
-bool PickUsage(float* used) {
+bool PickUsage(float* used, const char** tag = nullptr) {
     const bool claude = g_s.usageLimits && g_s.showAgent[AgentClaude] && g_agent.usage5h >= 0 &&
                         Now() - g_agent.usageAt < 5 * 3600.0;
-    if (!claude) return false;
-    *used = g_agent.usage5h;
-    return true;
+    const AgSnapshot ag = AgQuota();
+    const int main = MainAgentKind();
+    const bool auto_ = g_s.mainAgent < 0;
+    if (claude && (main == AgentClaude || (auto_ && !(main == AgentAntigravity && ag.valid)))) {
+        *used = g_agent.usage5h;
+        if (tag) *tag = "5h";
+        return true;
+    }
+    if (ag.valid && (main == AgentAntigravity || auto_)) {
+        *used = (1.0f - ag.remaining) * 100.0f;
+        if (tag) *tag = "AG";
+        return true;
+    }
+    return false;
 }
 
 void PaintHeader(cairo_t* cr, const Rect& isl) {
@@ -564,11 +668,7 @@ void PaintHeader(cairo_t* cr, const Rect& isl) {
         SText(cr, second, fx + w1, hy - 10, 150, 20, FTitle, F(PageColour(g_page)));
     }
     // Mini mascot, date and time, centred.
-    const time_t now = time(nullptr);
-    tm lt{};
-    localtime_r(&now, &lt);
-    char date[32];
-    strftime(date, sizeof date, "%a %-d %b", &lt);
+    const std::string date = bb::lfeat::FormatDate(time(nullptr));  // Modules.DateFormat
     const std::string clock = ClockText();
     const double dateW = Measure(cr, date, FBody), timeW = Measure(cr, clock, FTitle);
     const double mascotW = g_mascotOn ? 22 : 0;
@@ -581,16 +681,27 @@ void PaintHeader(cairo_t* cr, const Rect& isl) {
 
     // The settings gear, and the usage ring to its left.
     const double gearX = isl.x + isl.w - 26;
+    // The colour picker's eyedropper, left of the gear (as on Windows).
+    {
+        const double dx = gearX - 28;
+        const bool hover = NextHitHovered();
+        if (hover) Dot(cr, dx, hy, 13, F(C(0x3a3a3c)));
+        cairo_save(cr);
+        st::Eyedropper(PenFor(cr), Pt(dx, hy), hover ? 16.5f : 15.0f, D2(F(hover ? W(1) : C(0x8e8e93))));
+        cairo_restore(cr);
+        g_hits.push_back({{dx - 13, hy - 13, 26, 26}, Action::ColorPick});
+    }
     const bool gearHover = NextHitHovered();
     if (gearHover) Dot(cr, gearX, hy, 13, F(C(0x3a3a3c)));
     Gear(cr, gearX, hy, gearHover ? 16.5 : 15, F(gearHover ? W(1) : C(0x8e8e93)));
     g_hits.push_back({{gearX - 13, hy - 13, 26, 26}, Action::Settings});
     float used = 0;
-    if (AgentsShown() && PickUsage(&used)) {
+    const char* tag = "5h";
+    if (AgentsShown() && PickUsage(&used, &tag)) {
         char pct[16];
-        snprintf(pct, sizeof pct, "5h %d%%", static_cast<int>(used + 0.5f));
+        snprintf(pct, sizeof pct, "%s %d%%", tag, static_cast<int>(used + 0.5f));
         const double pw = Measure(cr, pct, FLabel);
-        const double rx = gearX - 30 - pw;
+        const double rx = gearX - 58 - pw;
         Ring(cr, rx, hy, 6, 2.4, used / 100.0, C(st::UsageColour(used)));
         SText(cr, pct, rx + 10, hy - 8, pw + 2, 16, FLabel, F(C(0x8e8e93)));
         g_hits.push_back({{rx - 9, hy - 10, pw + 21, 20}, Action::AgentPage});
@@ -867,7 +978,16 @@ void PaintMusic(cairo_t* cr, const Rect& pg) {
     SText(cr, g_track.title.empty() ? "Nothing playing" : g_track.title, tx, ay + 22, tw, 24, FSong, W(1));
     SText(cr, g_track.artist, tx, ay + 46, tw, 18, FBody, W(0.65));
     if (!g_track.album.empty()) SText(cr, g_track.album, tx, ay + 64, tw, 16, FSmall, W(0.45));
-    if (g_track.length > 0) SText(cr, Clock(g_track.length), tx, ay + 82, tw, 16, FSmall, W(0.45));
+    if (g_track.length > 0) {
+        // Where the song is, in Appearance.ProgressStyle, with the times beside it.
+        const double pos = std::clamp(bb::mpris::Position(), 0.0, g_track.length);
+        const Col acc = Accent();
+        const double rgb[3] = {acc.r, acc.g, acc.b};
+        const double barW = tw - 90;
+        SText(cr, Clock(pos), tx, ay + 76, 40, 16, FSmall, W(0.45));
+        bb::lfeat::Progress(cr, tx + 42, ay + 84, barW, pos / g_track.length, rgb, g_track.playing, Now());
+        SText(cr, Clock(g_track.length), tx + 48 + barW, ay + 76, 40, 16, FSmall, W(0.45));
+    }
     // Controls: previous, play / pause, next.
     const double cy = ay + art - 22;
     auto hoverDot = [&](double x, double r) { if (NextHitHovered()) Dot(cr, x, cy, r, W(0.14)); };
@@ -879,13 +999,10 @@ void PaintMusic(cairo_t* cr, const Rect& pg) {
     hoverDot(tx + 112, 18);
     Glyph(cr, Action::Next, tx + 112, cy, 11, W(0.92));
     g_hits.push_back({{tx + 94, cy - 18, 36, 36}, Action::Next});
-    // Bars that bob while music plays (not driven by the audio yet).
+    // The music bars in Appearance.SpectrumStyle (not driven by the audio yet).
     const Col acc = Accent();
-    for (int i = 0; i < 5; ++i) {
-        const double v = g_track.playing ? 0.3 + 0.7 * std::fabs(std::sin(Now() * (2.6 + i * 0.7) + i * 1.3)) : 0.2;
-        const double h = 28 * v, x = pg.x + pg.w - 46 + i * 9;
-        Fill(cr, x, cy - h / 2, 5, h, 2.5, WithA(acc, 0.9));
-    }
+    const double rgb[3] = {acc.r, acc.g, acc.b};
+    bb::lfeat::Spectrum(cr, pg.x + pg.w - 50, cy, 44, 28, rgb, 0.9, g_track.playing, Now());
 }
 
 // ── Agent ───────────────────────────────────────────────────────────────────
@@ -978,13 +1095,16 @@ void PaintCalendar(cairo_t* cr, const Rect& pg) {
     char month[32];
     strftime(month, sizeof month, "%B %Y", &lt);
     SText(cr, month, pg.x, pg.y, gridW, 18, FLabel, kRed);
-    static const char* kDays[] = {"M", "T", "W", "T", "F", "S", "S"};
-    for (int d = 0; d < 7; ++d) SText(cr, kDays[d], pg.x + d * cellW, pg.y + 20, cellW, 14, FSmall, C(0x636366), 1);
+    // Monday or Sunday first (Modules.FirstDayOfWeek).
+    const bool monday = bb::lfeat::Get().mondayFirst;
+    static const char* kDays[] = {"S", "M", "T", "W", "T", "F", "S"};
+    for (int d = 0; d < 7; ++d)
+        SText(cr, kDays[(d + (monday ? 1 : 0)) % 7], pg.x + d * cellW, pg.y + 20, cellW, 14, FSmall, C(0x636366), 1);
     tm first = lt;
     first.tm_mday = 1;
     first.tm_isdst = -1;
     mktime(&first);
-    const int lead = (first.tm_wday + 6) % 7;  // Monday first
+    const int lead = monday ? (first.tm_wday + 6) % 7 : first.tm_wday;
     tm next = first;
     next.tm_mon += 1;
     next.tm_isdst = -1;
@@ -1008,7 +1128,7 @@ void PaintCalendar(cairo_t* cr, const Rect& pg) {
         const bool today = day == lt.tm_mday;
         if (today) Dot(cr, cx, cy, rowH / 2 - 1, kRed);
         SText(cr, std::to_string(day), cx - cellW / 2, cy - rowH / 2, cellW, rowH, today ? FLabel : FSmall,
-              today ? W(1) : (cell % 7 >= 5 ? C(0x8e8e93) : C(0xd1d1d6)), 1);
+              today ? W(1) : ((monday ? cell % 7 >= 5 : cell % 7 == 0 || cell % 7 == 6) ? C(0x8e8e93) : C(0xd1d1d6)), 1);
         if (marked[day] && !today) Dot(cr, cx, cy + rowH / 2 - 2.5, 1.6, Accent());
     }
     // The agenda: today's open to-dos with their times.
@@ -1018,6 +1138,18 @@ void PaintCalendar(cairo_t* cr, const Rect& pg) {
     double y = ag.y + 28;
     const double epoch = static_cast<double>(now);
     bool any = false;
+    // Today's meetings from your calendar links first (Modules.CalendarIcsUrl).
+    for (const bb::ics::Meeting& m : bb::lcal::Today()) {
+        if (y + 30 > ag.y + ag.h - 4) break;
+        if (m.endsAt <= epoch) continue;  // already over
+        const bool live = m.startsAt <= epoch;
+        Fill(cr, ag.x + 10, y + 3, 3, 24, 1.5, live ? C(0x22e05a) : C(0x0a84ff));
+        SText(cr, (live ? std::string("Now") + kDot : std::string()) + HourMinute(static_cast<long long>(m.startsAt)), ag.x + 19, y,
+              ag.w - 27, 13, FSmall, kGrey);
+        SText(cr, U(m.title), ag.x + 19, y + 13, ag.w - 27, 16, FBody, W(1));
+        y += 34;
+        any = true;
+    }
     for (const auto* t : TodayTodos()) {
         if (y + 30 > ag.y + ag.h - 4) break;
         const bool overdue = t->due > 0 && t->due < epoch;
@@ -1327,6 +1459,7 @@ void PaintApps(cairo_t* cr, const Rect& r) {
         const Page p = st::PageFor(g_context, g_tabs[i]);
         if (p != Page::Apps) apps.push_back({p, static_cast<int>(i), nullptr});
     }
+    apps.push_back({Page::Home, -2, "Colour"});  // the colour picker
     apps.push_back({Page::Home, -1, "Settings"});
     const int cols = 6;
     const double cellW = r.w / cols, cellH = 84;
@@ -1337,15 +1470,96 @@ void PaintApps(cairo_t* cr, const Rect& r) {
         const bool hover = NextHitHovered();
         const double ix = x + cellW / 2 - 22;
         Fill(cr, ix, y, 44, 44, 10, hover ? C(0x3a3a3c) : C(0x1c1c1e));
-        if (a.tab < 0) Gear(cr, ix + 22, y + 22, 20, C(0xe8e8ee));
+        if (a.tab == -2) {
+            cairo_save(cr);
+            st::Eyedropper(PenFor(cr), Pt(ix + 22, y + 22), 20, D2(C(0xe8e8ee)));
+            cairo_restore(cr);
+        } else if (a.tab < 0) Gear(cr, ix + 22, y + 22, 20, C(0xe8e8ee));
         else Icon(cr, a.page, ix + 22, y + 22, 20, C(0xe8e8ee));
         SText(cr, a.name ? std::string(a.name) : U(st::TabLabel(a.page)), x, y + 48, cellW, 16, FSmall, W(1), 1);
         if (a.page == Page::Agent && waiting) {
             Dot(cr, ix + 42, y + 2, 9, C(0xff4245));
             SText(cr, "1", ix + 33, y - 7, 18, 18, FSmall, W(1), 1);
         }
-        g_hits.push_back({{x + 4, y, cellW - 8, 66}, a.tab < 0 ? Action::Settings : Action::OpenPage, a.tab});
+        g_hits.push_back({{x + 4, y, cellW - 8, 66}, a.tab == -2 ? Action::ColorPick : a.tab < 0 ? Action::Settings : Action::OpenPage, a.tab});
     }
+}
+
+// ── File shelf ──────────────────────────────────────────────────────────────
+// What you dropped on the island: click a file to open it, drag it out to use it
+// somewhere else, x to take it off.
+
+void PaintShelf(cairo_t* cr, const Rect& r) {
+    const auto& items = bb::lshelf::Items();
+    if (items.empty()) {
+        Icon(cr, Page::Tray, r.x + r.w / 2, r.y + 54, 30, Accent());
+        SText(cr, "Drop files on the island to keep them here", r.x, r.y + 86, r.w, 20, FBody, W(0.75), 1);
+        SText(cr, "Click one to open it, or drag it out again", r.x, r.y + 108, r.w, 16, FSmall, kGrey, 1);
+        return;
+    }
+    SText(cr, std::to_string(items.size()) + (items.size() == 1 ? " file" : " files"), r.x, r.y, 120, 18, FLabel, kGrey);
+    Pill(cr, {r.x + r.w - 64, r.y - 2, 64, 22}, "Clear", false, Action::ShelfClear);
+    const int cols = 2;
+    const double cellW = (r.w - 10) / cols, cellH = 34, top = r.y + 26;
+    const int rows = std::max(1, static_cast<int>((r.h - 26) / (cellH + 6)));
+    for (size_t i = 0; i < items.size() && static_cast<int>(i) < rows * cols; ++i) {
+        const double x = r.x + (i % cols) * (cellW + 10), y = top + (i / cols) * (cellH + 6);
+        const bool hover = NextHitHovered();
+        Fill(cr, x, y, cellW, cellH, 9, hover ? C(0x2c2c2e) : C(0x1c1c1e));
+        // A folder tab or a page with a folded corner.
+        cairo_save(cr);
+        Source(cr, items[i].folder ? C(0x0a84ff) : C(0xaeaeb2));
+        if (items[i].folder) {
+            cairo_rectangle(cr, x + 10, y + 11, 16, 12);
+            cairo_rectangle(cr, x + 10, y + 9, 7, 3);
+            cairo_fill(cr);
+        } else {
+            cairo_move_to(cr, x + 12, y + 8);
+            cairo_line_to(cr, x + 20, y + 8);
+            cairo_line_to(cr, x + 25, y + 13);
+            cairo_line_to(cr, x + 25, y + 26);
+            cairo_line_to(cr, x + 12, y + 26);
+            cairo_close_path(cr);
+            cairo_fill(cr);
+        }
+        cairo_restore(cr);
+        SText(cr, items[i].name, x + 34, y, cellW - 34 - 26, cellH, FBody, W(1));
+        g_hits.push_back({{x, y, cellW - 26, cellH}, Action::ShelfOpen, static_cast<int>(i)});
+        const bool xHover = NextHitHovered();
+        SText(cr, "\xC3\x97", x + cellW - 24, y, 20, cellH, FTitle, xHover ? W(1) : W(0.45), 1);
+        g_hits.push_back({{x + cellW - 26, y, 26, cellH}, Action::ShelfRemove, static_cast<int>(i)});
+    }
+}
+
+// ── Mirror ──────────────────────────────────────────────────────────────────
+// A camera preview for a quick look before a call. The camera only turns on when
+// you ask, and off again when you leave the page.
+
+void PaintMirror(cairo_t* cr, const Rect& r) {
+    cairo_surface_t* frame = bb::lshelf::CameraFrame();
+    if (!bb::lshelf::CameraRunning() || !frame) {
+        const std::string error = bb::lshelf::CameraError();
+        Icon(cr, Page::Mirror, r.x + r.w / 2, r.y + 44, 30, Accent());
+        SText(cr, error.empty() ? (bb::lshelf::CameraRunning() ? "Starting the camera\xE2\x80\xA6" : "Check how you look before a call")
+                                : error,
+              r.x, r.y + 74, r.w, 20, FBody, W(0.75), 1);
+        if (!bb::lshelf::CameraRunning())
+            Pill(cr, {r.x + r.w / 2 - 70, r.y + 104, 140, 30}, "Turn on the camera", true, Action::MirrorToggle);
+        return;
+    }
+    // The picture fills the page, mirrored like a real mirror, with round corners.
+    const double fw = cairo_image_surface_get_width(frame), fh = cairo_image_surface_get_height(frame);
+    const double k = std::max(r.w / fw, r.h / fh);
+    cairo_save(cr);
+    RoundRect(cr, r.x, r.y, r.w, r.h, 14);
+    cairo_clip(cr);
+    cairo_translate(cr, r.x + r.w / 2, r.y + r.h / 2);
+    cairo_scale(cr, -k, k);
+    cairo_set_source_surface(cr, frame, -fw / 2, -fh / 2);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+    cairo_paint(cr);
+    cairo_restore(cr);
+    Pill(cr, {r.x + r.w - 84, r.y + r.h - 34, 74, 26}, "Turn off", false, Action::MirrorToggle);
 }
 
 // ── More Home cards ─────────────────────────────────────────────────────────
@@ -1395,9 +1609,9 @@ constexpr double kPillTextSize = 13.0;
 double FittedLine(cairo_t* cr, const std::string& text, double x, double y, double w, double h, double size, Col c) {
     if (text.empty() || w <= 4) return 0;
     PangoLayout* layout = pango_cairo_create_layout(cr);
-    PangoFontDescription* font = pango_font_description_from_string("Sans");
+    PangoFontDescription* font = pango_font_description_from_string(bb::llook::Font());
     pango_font_description_set_weight(font, PANGO_WEIGHT_SEMIBOLD);
-    pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
+    pango_font_description_set_absolute_size(font, bb::llook::TextSize(size) * PANGO_SCALE);
     pango_layout_set_font_description(layout, font);
     pango_layout_set_text(layout, text.c_str(), -1);
     int pw = 0, ph = 0;
@@ -1422,9 +1636,9 @@ double FittedLine(cairo_t* cr, const std::string& text, double x, double y, doub
 
 double WidthAt(cairo_t* cr, const std::string& text, double size) {
     PangoLayout* layout = pango_cairo_create_layout(cr);
-    PangoFontDescription* font = pango_font_description_from_string("Sans");
+    PangoFontDescription* font = pango_font_description_from_string(bb::llook::Font());
     pango_font_description_set_weight(font, PANGO_WEIGHT_SEMIBOLD);
-    pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
+    pango_font_description_set_absolute_size(font, bb::llook::TextSize(size) * PANGO_SCALE);
     pango_layout_set_font_description(layout, font);
     pango_layout_set_text(layout, text.c_str(), -1);
     int pw = 0, ph = 0;
@@ -1546,6 +1760,12 @@ void PaintLyrics(cairo_t* cr, const Rect& pg) {
         return;
     }
     const double rowH = 30;
+    // Modules.LyricsVisualizer: a small live spectrum in the corner while it plays.
+    if (bb::lfeat::LyricsVisualizer() && g_track.playing) {
+        const Col acc = Accent();
+        const double rgb[3] = {acc.r, acc.g, acc.b};
+        bb::lfeat::Spectrum(cr, pg.x + pg.w - 34, pg.y + 8, 30, 14, rgb, 0.85, true, Now());
+    }
     if (!st.synced) {  // plain lyrics: the opening lines, as they are
         SText(cr, "Not synced", pg.x, pg.y, pg.w, 16, FSmall, kGrey, 1);
         double y = pg.y + 22;
@@ -1587,8 +1807,36 @@ void PaintLyrics(cairo_t* cr, const Rect& pg) {
         } else {
             continue;
         }
-        const double fade = k == 0 ? 1.0 : std::max(0.12, 0.42 - 0.1 * (std::abs(k) - 1));
-        FittedLine(cr, text, pg.x, y, pg.w, rowH, k == 0 ? 19 : 15, k == 0 ? Lerp(W(0.85), accent, 0.25) : W(fade));
+        // The lines around the current one are a faint ghost, or readable with
+        // Modules.LyricsNeighborLinesVisible.
+        const double near = bb::lfeat::Get().neighbours ? 0.72 : 0.42;
+        const double fade = k == 0 ? 1.0 : std::max(0.12, near - 0.1 * (std::abs(k) - 1));
+        const Col lit = Lerp(W(0.85), accent, 0.25);
+        const auto& feat = bb::lfeat::Get();
+        if (k == 0 && feat.karaoke && i >= 0 && text != kNote) {
+            // Karaoke: the line lights up left to right as it's sung; with the letter
+            // glow, the letters at the edge of the light glow in the accent colour.
+            const int64_t start = st.lines[i].timeMs;
+            int64_t end = start + 4000;
+            if (i + 1 < static_cast<int>(st.lines.size()) && st.lines[i + 1].timeMs > start) end = st.lines[i + 1].timeMs;
+            const double frac = std::clamp(double(posMs - start) / double(std::max<int64_t>(1, end - start)), 0.0, 1.0);
+            const double pw = FittedLine(cr, text, pg.x, y, pg.w, rowH, 19, W(0.38));
+            const double left = pg.x + std::max(0.0, (pg.w - pw) / 2), edge = left + pw * frac;
+            cairo_save(cr);
+            cairo_rectangle(cr, left - 2, y, edge - left + 2, rowH);
+            cairo_clip(cr);
+            FittedLine(cr, text, pg.x, y, pg.w, rowH, 19, lit);
+            cairo_restore(cr);
+            if (feat.karaokeGlow && frac > 0 && frac < 1) {
+                cairo_save(cr);
+                cairo_rectangle(cr, edge - 10, y, 12, rowH);
+                cairo_clip(cr);
+                FittedLine(cr, text, pg.x, y, pg.w, rowH, 19, WithA(accent, 0.95));
+                cairo_restore(cr);
+            }
+            continue;
+        }
+        FittedLine(cr, text, pg.x, y, pg.w, rowH, k == 0 ? 19 : 15, k == 0 ? lit : W(fade));
     }
     cairo_restore(cr);
 }
@@ -1700,9 +1948,12 @@ void PaintAgentPage(cairo_t* cr, const Rect& r) {
             }
             SText(cr, kSteps[i], x, by + 7, segW, 15, FSmall, done || current ? W(1) : C(0x636366));
         }
-    } else if (g_s.usageLimits && g_s.showAgent[AgentClaude] && (a.usage5h >= 0 || a.contextPct >= 0)) {
+    } else if ((g_s.usageLimits && g_s.showAgent[AgentClaude] && (a.usage5h >= 0 || a.contextPct >= 0)) || AgQuota().valid) {
         struct Bar { const char* name; float pct; };
-        const Bar bars[3] = {{"5-hour limit", a.usage5h}, {"Week", a.usage7d}, {"Context", a.contextPct}};
+        const AgSnapshot ag = AgQuota();
+        const bool claude = g_s.usageLimits && g_s.showAgent[AgentClaude];
+        const Bar bars[3] = {{"5-hour limit", claude ? a.usage5h : -1.0f}, {"Week", claude ? a.usage7d : -1.0f},
+                             ag.valid ? Bar{"Antigravity", (1.0f - ag.remaining) * 100.0f} : Bar{"Context", claude ? a.contextPct : -1.0f}};
         const double segW = (r.w - 2 * 14) / 3;
         for (int i = 0; i < 3; ++i) {
             const double x = r.x + i * (segW + 14);
@@ -1712,6 +1963,7 @@ void PaintAgentPage(cairo_t* cr, const Rect& r) {
             std::string label = bars[i].name;
             if (p >= 0) label += kDot + std::to_string(static_cast<int>(p + 0.5f)) + "%";
             if (i == 0 && p >= 0 && a.usage5hResets > 0) label += ResetsIn(a.usage5hResets);
+            if (i == 2 && ag.valid && ag.resetAt > 0) label += ResetsIn(ag.resetAt);
             SText(cr, label, x, by + 7, segW, 15, FSmall, p >= 0 ? C(0xaeaeb2) : C(0x636366));
         }
     } else if (g_s.usageLimits && g_s.showAgent[AgentClaude]) {
@@ -1828,6 +2080,8 @@ void StudioLoadSettings() {
     g_s.note = s::GetBool(L"Bunbun.QuickNote");
     g_s.focus = s::GetBool(L"Bunbun.FocusPage");
     g_s.apps = s::GetBool(L"Bunbun.AppsPage");
+    g_s.antigravityQuota = s::GetBool(L"Bunbun.AntigravityQuota");
+    bb::lshelf::LoadSettings();
     lsrc::LoadSettings();
     const std::wstring accent = s::Get(L"Themes.AccentColorMode");
     g_s.accentMode = st::EqualsNoCase(accent, L"custom") ? 2 : st::EqualsNoCase(accent, L"system") ? 1 : 0;
@@ -1841,6 +2095,8 @@ bool StudioLayout() { return g_s.studio; }
 int StudioContext() { return g_track.active && g_mediaOn ? 0 : 1; }
 
 void StudioShowAgentPage() { g_wantAgentPage = true; }
+void StudioShowShelf() { g_wantShelfPage = true; }
+bool StudioOnMirror() { return g_page == Page::Mirror; }
 
 void PaintStudio(cairo_t* cr, const Rect& isl, double mix) {
     CheckCompose();
@@ -1882,6 +2138,8 @@ void PaintStudioFrame(cairo_t* cr, const Rect& isl, double mix) {
         case Page::Note: PaintNote(cr, pg); break;
         case Page::Focus: PaintFocus(cr, pg); break;
         case Page::Apps: PaintApps(cr, pg); break;
+        case Page::Tray: PaintShelf(cr, pg); break;
+        case Page::Mirror: PaintMirror(cr, pg); break;
         default: PaintHome(cr, pg); break;
     }
     cairo_pop_group_to_source(cr);
@@ -2035,6 +2293,13 @@ bool StudioDo(const Hit& h) {
     const AgentView& a = g_agent;
     const std::wstring who = a.project.empty() ? a.agent : a.agent + L" \x00B7 " + a.project;
     switch (h.action) {
+        case Action::ShelfOpen: bb::lshelf::Open(h.index); return true;
+        case Action::ShelfRemove: bb::lshelf::Remove(h.index); return true;
+        case Action::ShelfClear: bb::lshelf::Clear(); return true;
+        case Action::MirrorToggle:
+            if (bb::lshelf::CameraRunning()) bb::lshelf::CameraStop();
+            else bb::lshelf::CameraStart([] { Redraw(); });
+            return true;
         case Action::Tab:
             g_tabIdx = h.index;
             return true;
@@ -2047,6 +2312,12 @@ bool StudioDo(const Hit& h) {
             }
             return true;
         case Action::OpenMusic:
+            // Bunbun.MusicApp: the app that's playing, or the one you picked. With
+            // nothing playing on "auto", the Music page instead.
+            if (g_track.active || bb::lfeat::Get().musicApp != L"auto") {
+                bb::lfeat::OpenMusicApp();
+                return true;
+            }
             if (const int i = TabIndexOf(Page::Music); i >= 0) g_tabIdx = i;
             return true;
         case Action::AgentPage:

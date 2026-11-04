@@ -18,6 +18,9 @@ void Start(std::function<void()> changed);
 // Rereads the settings that matter here (weather city and units, clipboard history).
 void LoadSettings();
 
+// GET an http(s) URL (GIO, else curl); `done` gets the body, or "" on failure. Main loop.
+void FetchUrl(const std::string& url, std::function<void(const std::string&)> done);
+
 // ── System (/proc, /sys) ────────────────────────────────────────────────────
 struct Load {
     int cpu = 0, mem = 0, disk = 0;  // percent
@@ -65,6 +68,10 @@ void SetDnd(bool on);
 const std::vector<std::string>& ClipHistory();
 void CopyClip(int index);
 void ClearClips();
+// Puts `text` on the clipboard from Bunbun itself: into the history, without a copy preview.
+void CopyText(const std::string& text);
+// Called with each new text you copy (even with the history off), for the copy preview.
+void OnCopy(std::function<void(const std::string&)> listener);
 
 // ── Quick note: note.txt next to settings.ini, the same file as on Windows ──
 const std::vector<std::wstring>& NoteLines();

@@ -173,7 +173,7 @@ What the Linux version does and how it's put together is in [Bunbun on Linux](li
 **Packages** (Ubuntu 22.04 or newer, Debian 12 or newer):
 
 ```bash
-sudo apt install build-essential cmake ninja-build pkg-config dpkg-dev libgtk-3-dev libgtk-layer-shell-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev desktop-file-utils
+sudo apt install build-essential cmake ninja-build pkg-config dpkg-dev libgtk-3-dev libgtk-layer-shell-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev libx11-dev desktop-file-utils
 ```
 
 On Fedora: `gcc-c++ cmake ninja-build gtk3-devel gtk-layer-shell-devel libsoup3-devel webkit2gtk4.1-devel`. On Arch:

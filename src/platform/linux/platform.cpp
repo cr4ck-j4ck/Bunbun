@@ -170,4 +170,43 @@ bool Spawn(const std::vector<std::string>& argv) {
 
 bool OpenWithDefault(const std::string& target) { return Spawn({"xdg-open", target}); }
 
+// ── Start at login ──────────────────────────────────────────────────────────
+// ~/.config/autostart/bunbun.desktop, which GNOME, KDE, XFCE, Cinnamon and MATE read.
+
+std::string AutostartFile() {
+    const char* xdg = getenv("XDG_CONFIG_HOME");
+    return (xdg && xdg[0] == '/' ? std::string(xdg) : HomeDir() + "/.config") + "/autostart/bunbun.desktop";
+}
+
+bool AutostartEnabled() { return FileExists(AutostartFile()); }
+
+// The island to start at login: the AppImage itself when we run from one (its
+// mount point changes every run), else bunbun next to us.
+std::string IslandCommand() {
+    if (const char* appimage = getenv("APPIMAGE"); appimage && *appimage) return appimage;
+    return ExeDir() + "/bunbun";
+}
+
+void SetAutostart(bool on) {
+    if (!on) {
+        unlink(AutostartFile().c_str());
+        return;
+    }
+    std::string exe = IslandCommand();
+    std::string quoted = "\"";
+    for (char c : exe) {
+        if (c == '"' || c == '\\' || c == '`' || c == '$') quoted += '\\';
+        quoted += c;
+    }
+    quoted += '"';
+    WriteFileAtomic(AutostartFile(), "[Desktop Entry]\n"
+                                               "Type=Application\n"
+                                               "Name=Bunbun\n"
+                                               "Comment=Dynamic Island with a mascot and coding-agent companions\n"
+                                               "Exec=" + quoted + "\n"
+                                               "Icon=bunbun\n"
+                                               "X-GNOME-Autostart-enabled=true\n"
+                                               "NoDisplay=false\n");
+}
+
 }  // namespace bb::plat

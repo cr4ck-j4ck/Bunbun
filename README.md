@@ -94,7 +94,7 @@ settles in with a snack when you turn on mascot do-not-disturb. You can also loa
 | **Focus** | A focus page with an hours/minutes picker, presets, +5 min and an optional nudge when a distracting app comes up |
 | **Home your way** | Pick what each Home card shows (agent, music, focus, weather, calendar, battery or system), add up to four links under them, and open any page from All apps |
 | **Mirror** | An optional camera preview before a call; the camera runs only while it's on |
-| **Tuck away** | Ctrl+Alt+H folds the island to a thin status line; point at it to bring it back. It can also tuck itself while a video or game is full screen |
+| **Tuck away** | Ctrl+Alt+H folds the island to a thin status line; point at it to bring it back. In full screen it tucks itself by default; Settings → Animations → **In full screen** can keep it showing (hover and all) or hide it |
 | **Notifications & clipboard** | App toasts and a peek at what you copy |
 | **Local AI (optional)** | Turn on a small language model that runs offline on your PC. Bun then answers free-form questions and works like an agent: "get me ready for a meeting" turns on DND, lowers the volume and opens Teams; "is it warmer in Delhi or Mumbai?" looks both up and compares. No account, no keys; you download the model yourself ([guide](docs/local-ai.md)) |
 | **Privacy dots** | Orange while the microphone is in use, green for the camera, blue while the screen is recorded, and a short note naming the app ("Discord is using your microphone") |

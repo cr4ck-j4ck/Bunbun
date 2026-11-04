@@ -24,3 +24,4 @@ fi
 ./build/test_core.exe "$win_scratch"
 "$CXX" -std=c++20 -DUNICODE -D_UNICODE -O1 -static tests/test_studio.cpp -o build/test_studio.exe
 ./build/test_studio.exe
+python tests/check_linux_settings.py

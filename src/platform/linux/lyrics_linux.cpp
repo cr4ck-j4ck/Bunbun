@@ -1,4 +1,5 @@
 // Bunbun — synced lyrics on Linux (see lyrics_linux.h).
+#include "features_linux.h"
 #include "lyrics_linux.h"
 
 #include <glib.h>
@@ -676,7 +677,11 @@ bool Usable(const bb::mpris::Track& t) {
 
 int LineAt(double positionSec, bool playing, int64_t* posMs) {
     double pos = positionSec;
-    if (playing) pos += kBaseLookaheadSec + g_offsetMs / 1000.0;
+    // Modules.LyricsOffsetBluetoothMs replaces the usual offset while Bluetooth audio
+    // plays (headphones lag behind the player).
+    const auto& feat = bb::lfeat::Get();
+    const int offset = feat.btOffsetMs != 0 && bb::lfeat::BluetoothAudio() ? feat.btOffsetMs : g_offsetMs;
+    if (playing) pos += kBaseLookaheadSec + offset / 1000.0;
     *posMs = std::max<int64_t>(0, static_cast<int64_t>(pos * 1000.0));
     const auto& lines = g_state.lines;
     int lo = 0, hi = static_cast<int>(lines.size());

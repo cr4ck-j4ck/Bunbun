@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { RotateCcw } from "lucide-react";
 import { ReactNode, useEffect, useId, useState } from "react";
-import { notOnLinux, useIsLinux } from "../platform";
+import { neverOnLinux, notOnLinux, useIsLinux } from "../platform";
 import { schema, useStore } from "../store";
 
 const spring = { type: "spring", stiffness: 520, damping: 34 } as const;
@@ -90,10 +90,17 @@ export function Section({ title, children }: { title?: string; children: ReactNo
   );
 }
 
+/** "Not on Linux yet" next to a custom control's heading, when none of its settings work there. */
+export function LinuxBadge({ keys }: { keys: string[] }) {
+  return useIsLinux() && notOnLinux(keys) ? <em className="badge muted linux">Not on Linux yet</em> : null;
+}
+
 export function Row({ label, description, children, settingKeys }: { label: ReactNode; description?: ReactNode; children: ReactNode; settingKeys?: string[] }) {
   const store = useStore();
   const changed = settingKeys?.some((k) => !store.isDefault(k));
-  const linuxMissing = useIsLinux() && notOnLinux(settingKeys);
+  const linux = useIsLinux();
+  const linuxMissing = linux && notOnLinux(settingKeys);
+  if (linux && neverOnLinux(settingKeys)) return null;  // Windows-only for good
   return (
     <div className="row">
       <div className="label">
@@ -129,6 +136,7 @@ const SLIDER_RANGES: Record<string, [number, number, number, string]> = {
   "Bunbun.MascotMotion": [0, 200, 5, "%"],
   "Bunbun.MascotHop": [0, 200, 5, "%"],
   "Bunbun.MascotBlinkEvery": [0, 12, 1, " s"],
+  "Bunbun.AfkMinutes": [0, 30, 1, " min"],
 };
 
 /** A row for any setting, with the control chosen from its schema entry. */

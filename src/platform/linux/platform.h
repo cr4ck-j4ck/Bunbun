@@ -38,4 +38,11 @@ bool Spawn(const std::vector<std::string>& argv);
 // Opens a file, folder or https link with the desktop's default app.
 bool OpenWithDefault(const std::string& target);
 
+// Start at login (~/.config/autostart/bunbun.desktop).
+std::string AutostartFile();
+bool AutostartEnabled();
+void SetAutostart(bool on);
+// The island to start: the AppImage itself when we run from one, else bunbun next to us.
+std::string IslandCommand();
+
 }  // namespace bb::plat

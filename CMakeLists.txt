@@ -32,6 +32,8 @@ pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 pkg_check_modules(LAYERSHELL REQUIRED IMPORTED_TARGET gtk-layer-shell-0>=0.6)
 # Lyrics (LRCLIB, NetEase) are fetched with libsoup 3.
 pkg_check_modules(SOUP REQUIRED IMPORTED_TARGET libsoup-3.0)
+# Full-screen detection and the hide / tuck hotkeys on X11.
+pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 if(BUNBUN_BUILD_SETTINGS)
     pkg_check_modules(WEBKIT REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
 endif()
@@ -65,11 +67,17 @@ target_link_libraries(bunbun_shared PUBLIC PkgConfig::GTK)
 add_executable(bunbun
     ${LINUX}/island_linux.cpp
     ${LINUX}/studio_linux.cpp
+    ${LINUX}/look_linux.cpp
+    ${LINUX}/features_linux.cpp
+    ${LINUX}/calendar_linux.cpp
+    ${LINUX}/shelf_linux.cpp
+    ${LINUX}/picker_linux.cpp
+    ${LINUX}/tray_linux.cpp
     ${LINUX}/sources.cpp
     ${LINUX}/lyrics_linux.cpp
     ${LINUX}/mpris.cpp
     ${SRC}/agents/agent_bridge.cpp)
-target_link_libraries(bunbun PRIVATE bunbun_shared PkgConfig::GTK PkgConfig::LAYERSHELL PkgConfig::SOUP)
+target_link_libraries(bunbun PRIVATE bunbun_shared PkgConfig::GTK PkgConfig::LAYERSHELL PkgConfig::SOUP PkgConfig::X11 ${CMAKE_DL_LIBS})
 find_package(Threads REQUIRED)
 target_link_libraries(bunbun PRIVATE Threads::Threads)
 

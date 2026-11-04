@@ -93,6 +93,52 @@ with Approve / Change it… and one question at a time. **Reply…** on a finish
 on a plan and **Other…** on a question let you type on the island: the keyboard goes to the island
 while you type (Enter sends, Esc cancels) and back to your windows after.
 
+**Look and sounds** follow the same settings as on Windows: the shape (the Notch, flush with the top
+edge and the default; Pill; or Windows 11), the theme presets and Custom colours (background, primary
+and secondary text, border), Fill (Transparent, or Opaque in one solid colour), the border, the drop
+shadow, depth shading, accent bloom, tint, font and text size. The chimes (agent done, a question, an
+error, the open / close blips, reminders) play through `paplay`, or `pw-play` or `aplay` when that's
+what the system has; the `.deb` recommends one. **Privacy dots** show on the small island while an app
+uses the camera (green: one of your processes has a `/dev/video*` device open) or the microphone
+(orange: an ALSA capture stream is running, which is also true under PipeWire and PulseAudio).
+
+**Where it sits and when it hides** follow Appearance and Behavior too: top or bottom, left, centre
+or right, on the monitor you pick (or the one your pointer is on), Offset X / Y and a separate offset
+while open, Border-merged mode, Always on top; auto-hide after a while, hide or tuck in full screen,
+and unhide on hover. Full-screen detection and the hide (Ctrl+Alt+D) and tuck (Ctrl+Alt+H) hotkeys
+work on X11 (including GNOME, which runs Bunbun through XWayland); on a Wayland compositor with
+layer-shell the island sits under full-screen windows by itself, and Tuck away is in the right-click
+menu.
+
+**Alerts** appear on the island as on Windows: low battery and charging (with time to full),
+Caps Lock and Num Lock, brightness (from `/sys/class/backlight`), volume (`pactl subscribe`),
+Bluetooth devices connecting and running low (BlueZ), Do not disturb, and a preview of what you copy.
+The motion styles and speeds, frame rate and battery saver, the idle eyes face, the music-pill options
+(title, clock, auto-expand, swipe to skip), the progress and spectrum styles, karaoke lyrics, the date
+format and the first day of the week all work as on Windows.
+
+**Pages and extras** that came later: the **File shelf** (drop files on the island; click to open,
+drag out again; kept in `$XDG_STATE_HOME/Bunbun/shelf.txt`), the **Mirror** camera page (V4L2,
+`/dev/video*`, only while you've turned it on), **calendar links** (today's meetings on the Calendar
+page and a meeting pill with Join before each one), **island copies on other displays**
+(Appearance → Displays), **music bars from the real audio** (`parec` on the default output's
+monitor; the bars animate without it), and **Antigravity's quota** (its `state.vscdb`, read with the
+system's `libsqlite3.so.0`, loaded at run time). The **blue privacy dot** lights while the screen is
+shared or recorded: PipeWire screencasts, browsers sharing on X11, OBS outputs, and recorders such as
+ffmpeg, wf-recorder, gpu-screen-recorder and SimpleScreenRecorder; the island names the app and says
+whether it's streaming, recording or sharing.
+
+**The tray icon** is your mascot in the panel with the same menu as on Windows (the version, hide /
+show the island, Settings, Pick a colour, Connect Claude Code, Start when you log in, Quit…). It uses
+AppIndicator (KDE, Ubuntu's GNOME, XFCE, Cinnamon, MATE, Budgie), loaded at run time from
+`libayatana-appindicator3` or `libappindicator3` (the `.deb` recommends it), and the classic X11 tray
+where that's all the panel has. **The colour picker** (the eyedropper in the Studio header, Colour in
+All apps, the right-click and tray menus, or `bunbun --pick-colour` bound to a key in your desktop's
+keyboard settings) works as on Windows on X11: the screen freezes under a loupe, a click picks, arrow
+keys nudge by a pixel, Esc cancels; the hex is copied and the island shows HEX, RGB and HSL, a click
+copying each. On Wayland, where apps can't see the screen, it uses the desktop's own picker through
+the screenshot portal (`xdg-desktop-portal`).
+
 **Without a compositor** (some X11 window managers, or XFCE with compositing off) transparency isn't
 possible, so the window is cut to the pill's shape instead: the island still looks like a pill, only
 without its soft shadow.
@@ -101,20 +147,16 @@ without its soft shadow.
 
 | Feature | Why | Plan |
 |---|---|---|
-| The lyric pill and the Lyrics page | Fetching lyrics needs the island to make web requests (a new library on Linux) | Waiting on a decision; the music pill shows the title meanwhile |
-| Tray icon | Linux has no single tray; it needs StatusNotifierItem over D-Bus | Right-click the island for the same menu. SNI tray later |
 | Ask Bun (Ctrl+Alt+B) | Its commands open Windows apps and Settings pages | Port the commands to Linux equivalents (`xdg-open`, desktop files, `pactl`) |
-| Calendar links (`.ics`), browser downloads | Built into the Windows island; not ported yet | Later |
-| Volume, brightness, battery, Wi-Fi, Bluetooth pop-ups | Need Linux system APIs | PipeWire/PulseAudio, `brightnessctl`/logind, UPower. Wi-Fi and Bluetooth already switch from the Quick toggles page |
-| Notifications and clipboard peek | Need the desktop's notification service | `org.freedesktop.Notifications` monitoring |
-| Music waveform from the real audio | Needs audio capture | PipeWire monitor stream. The bars animate while music plays for now |
-| Several displays, other positions | The island sits top-centre on the primary display | Per-monitor layer surfaces / windows |
-| File shelf (drop files on the island) and Mirror (camera preview) pages; colour picker; volume slider; tuck in full screen | Windows-only for now | File shelf through GTK drag and drop, Mirror through PipeWire's camera portal |
-| Live island preview in Settings, character-sheet import, Local AI | Windows-only for now | Later |
-| Update check | Packages are updated by your package manager or a new AppImage | Not planned |
+| Discord sharing on X11 | Discord reads the screen itself there and leaves no sign | Detected on Wayland, through PipeWire |
+| A tray icon on plain GNOME | GNOME shows tray icons only with the AppIndicator extension (Ubuntu has it on) | Right-click the island for the same menu |
+| Live island preview in Settings, character-sheet import, Local AI, the island's languages | Windows-only for now | Later |
 
 Settings for features that aren't on Linux yet still show in the settings app, marked **Not on Linux
 yet** (in Island pages, Features and the other screens), so it's clear which switches do something.
+Settings that stay Windows-only are hidden on Linux: Windows' own blur and DPI scaling, the update
+check (your package manager updates Bunbun), the game overlay, the downloads and progress alerts,
+notifications and poke reactions.
 
 ## Files
 

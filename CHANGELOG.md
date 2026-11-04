@@ -5,6 +5,93 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.4]
+
+A Linux release: 148 of the 177 settings now work on Linux (up from 56), with the tray icon and the
+colour picker, and the island is a notch by default everywhere.
+
+### Added
+- **In full screen** (Settings → Animations → When the island appears) now has three choices, on
+  Windows and Linux: **Tuck** (the new default: a thin line you point at to bring the island back),
+  **Show** (the island stays, hover and all) and **Hide**. It replaces *Hide on full screen* and *Tuck
+  instead of hiding*; if you'd turned hiding off, you get Show. On Linux it needs X11.
+- **New moods for every mascot.** **Do Not Disturb** (mascot DND or Focus): headphones on, eyes
+  closed and a crescent-moon badge, instead of the snack. **Live**: while an app streams, shares or
+  records your screen, the mascot is at its laptop with a pulsing REC badge (uses the screen privacy
+  dot's detection; switch: *Live while the screen is shared*). **AFK**: after 3 minutes without
+  keyboard or mouse (*AFK after*, 0 turns it off), the mascot munches its favourite snack, then naps
+  after 20. The movie mood is now called **Streaming Shows**. Skin packs can add `dnd` and `live`
+  frames (falling back to `sleepy` and `working`), and Mascot studio's importer lists them. On
+  Linux: Do Not Disturb and Live; AFK is Windows-only for now.
+
+### Changed
+- **The Notch is the default shape**, on Windows and Linux: the island hangs from the top edge of the
+  screen. Pick Pill or Windows 11 in Appearance → Shape. If you chose a shape before, it stays.
+- **The blue privacy dot means your screen is shared or recorded**, on Windows and Linux alike, and
+  the island says which: "OBS Studio is streaming your screen", "… is recording your screen", "… is
+  sharing your screen". It now also sees Firefox sharing, Xbox Game Bar recording, Camtasia and
+  ShareX on Windows; on Linux, PipeWire screen sharing (browsers, Discord, Zoom, GNOME's recorder),
+  browsers sharing on X11, OBS, ffmpeg, wf-recorder, gpu-screen-recorder and SimpleScreenRecorder.
+
+### Added
+- **Linux: shape and colours.** The Linux island now follows Appearance like Windows does: the Notch
+  (flush with the top of the screen, with the same curved ears), Pill and Windows 11 shapes, every
+  theme preset including the light Porcelain, Custom colours (background, primary and secondary
+  text, border), Fill (Transparent or Opaque), the border, the drop shadow, depth shading, accent
+  bloom, tint, the font and the text size. Before, it always drew a dark pill.
+- **Linux: where it sits.** Position (top or bottom, left, centre or right), the monitor (a number,
+  the primary one, or the one your pointer is on), Offset X and Y, a separate offset while open,
+  Border-merged mode, and Always on top.
+- **Linux: hiding.** Auto-hide after a while, hide in full screen or tuck into a line instead, unhide
+  on hover, and the hide (Ctrl+Alt+D) and tuck (Ctrl+Alt+H) hotkeys on X11; Tuck away in the
+  right-click menu everywhere.
+- **Linux: motion.** The motion styles (Smooth, Default, Bouncy, Snappy) and speeds, the frame rate,
+  the battery saver, the ambient frame rate, the cover spin and the expanded player's transitions.
+- **Linux: the music pill.** Song title on or off, the clock in the pill, auto-expand on a new song
+  (never for videos) with its blocklist, swipe sideways to skip, the Music tile opening your music
+  app, the progress line styles and the spectrum styles (bars, LED, plasma, orb).
+- **Linux: alerts on the island.** Low battery and charging (with time to full), the mascot's battery
+  moods, Caps Lock and Num Lock, brightness, volume (through `pactl`), Bluetooth devices connecting
+  with their battery and running low, Do not disturb, a preview of what you copy, the countdown bar,
+  and the focus timer in the right-click menu. Reminders play a sound, kept quiet in full screen or
+  while focusing.
+- **Linux: the face and the date.** The idle eyes face with its colours and agent colours, what sits
+  beside the face, the mascot's do-not-disturb snack, a custom date format, and the first day of the
+  week. Focus guard nudges you when a distracting app comes up during a focus timer (X11).
+- **Linux: lyrics.** Karaoke lighting and the letter glow, readable neighbouring lines, and a
+  separate offset for Bluetooth headphones.
+- **Linux: the File shelf and Mirror pages.** Drop files on the island to park them on the shelf,
+  click one to open it or drag it out again; they're kept across restarts. The Mirror page shows your
+  camera (read through the kernel's video interface, no extra libraries), only after you turn it on.
+- **Linux: calendar links.** Your calendars' private iCal links show today's meetings on the Calendar
+  page, and the island shows the next one shortly before it starts, with Join for Meet, Zoom, Teams
+  and Webex links. Windows and Linux now read calendars with the same code.
+- **Linux: the island on every display**, as a view-only copy on each other monitor, placed like the
+  main one or per display.
+- **Linux: music bars from the real audio**, through `parec` (PulseAudio or PipeWire), and the small
+  visualizer on the Lyrics page. Without `parec` the bars still animate.
+- **Linux: Antigravity's quota** in the header ring and on the Agent page, read from Antigravity's
+  own database with the system's SQLite (loaded only when needed).
+- **Linux: the tray icon.** Your mascot in the panel with the same menu as on Windows: the version,
+  hide or show the island, Settings, Pick a colour, Connect Claude Code, Start when you log in, Quit.
+  Through AppIndicator (KDE, Ubuntu's GNOME, XFCE, Cinnamon, MATE, Budgie) or the classic X11 tray.
+- **Linux: the colour picker**, from the eyedropper in the Studio header, Colour in All apps, the
+  menus, or `bunbun --pick-colour` on a key of your choice. On X11 the screen freezes under a loupe as
+  on Windows; on Wayland it uses the desktop's own picker. The hex is copied, and the island shows
+  HEX, RGB and HSL to copy.
+
+- **Linux: sounds.** The chimes for an agent that finishes, asks or hits an error, and the open /
+  close blips, as on Windows (General → Sounds). They play through `paplay`, `pw-play` or `aplay`;
+  the `.deb` recommends one.
+- **Linux: privacy dots.** A green dot while an app uses the camera and an orange one while
+  something records from the microphone, on the right of the small island.
+
+### Fixed
+- **Settings on Linux** marked some working settings **Not on Linux yet** and left others unmarked.
+  The list is now checked against the Linux code by the tests, so it stays right. Settings that will
+  stay Windows-only (Windows' blur, DPI scaling, the update check, the game overlay, downloads and
+  progress alerts, notifications, poke reactions) are hidden on Linux instead.
+
 ## [0.3.3]
 
 Everything that was briefly out as 0.3.1 and 0.3.2, plus a solid-colour island.
