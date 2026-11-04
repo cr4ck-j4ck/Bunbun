@@ -5,6 +5,13 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.5]
+
+### Fixed
+- Linux: the notch hung below a top panel instead of touching the top of the screen. It now
+  touches the edge on KDE, Sway, Hyprland and X11 desktops. On GNOME, whose top bar covers app
+  windows, it sits directly under the bar, and moves to the edge when the bar is hidden.
+
 ## [0.3.4]
 
 A Linux release: 148 of the 177 settings now work on Linux (up from 56), with the tray icon and the

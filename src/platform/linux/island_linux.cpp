@@ -1430,6 +1430,22 @@ void ShowMenu(GdkEvent* event) {
 
 // ── Window placement ────────────────────────────────────────────────────────
 
+// GNOME Shell draws its top bar over every app window (Bunbun runs there through
+// XWayland), so an island pushed to the very top would mostly hide behind it.
+bool GnomeShell() {
+    const char* d = getenv("XDG_CURRENT_DESKTOP");
+    return d && (strstr(d, "GNOME") || strstr(d, "gnome"));
+}
+
+// The top the island hangs from. A notch (or the merged island) touches the screen's
+// real edge, above the work area's top margin (top panels), unless GNOME's top bar
+// would cover it; then it hangs right under the bar. Other shapes keep clear of panels.
+int IslandTop(const GdkRectangle& area, const GdkRectangle& geo) {
+    const bool flush = bb::llook::TopGap(1.0) == 0.0;
+    const bool gnomeBar = GnomeShell() && area.y > geo.y;
+    return flush && !gnomeBar ? geo.y : area.y;
+}
+
 // Places the window on the chosen monitor (Appearance.TargetMonitor), at the
 // chosen edge and side (Position), moved by OffsetX / OffsetY; above other windows
 // or not (Behavior.AlwaysOnTop).
@@ -1457,12 +1473,14 @@ void PlaceWindow() {
         gtk_layer_set_anchor(GTK_WINDOW(g_window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
         gtk_layer_set_margin(GTK_WINDOW(g_window), f.bottom ? GTK_LAYER_SHELL_EDGE_BOTTOM : GTK_LAYER_SHELL_EDGE_TOP, dy);
         gtk_layer_set_margin(GTK_WINDOW(g_window), GTK_LAYER_SHELL_EDGE_LEFT, x - geo.x);
+        // A notch touches the screen's edge itself: -1 ignores panels' exclusive zones
+        // (0 would hang it below a top panel, leaving a gap).
+        gtk_layer_set_exclusive_zone(GTK_WINDOW(g_window), !f.bottom && bb::llook::TopGap(1.0) == 0.0 ? -1 : 0);
         return;
     }
     gtk_window_set_keep_above(GTK_WINDOW(g_window), f.onTop);
     if (!f.onTop) gtk_window_set_keep_below(GTK_WINDOW(g_window), FALSE);
-    const int y = f.bottom ? area.y + area.height - h - dy : area.y + dy;
-    gtk_window_move(GTK_WINDOW(g_window), x, y);
+    const int y = f.bottom ? area.y + area.height - h - dy : IslandTop(area, geo) + dy;    gtk_window_move(GTK_WINDOW(g_window), x, y);
 }
 
 // ── Mirrors on other displays ───────────────────────────────────────────────
@@ -1511,9 +1529,10 @@ void PlaceMirror(Mirror& m) {
         gtk_layer_set_anchor(GTK_WINDOW(m.window), GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
         gtk_layer_set_margin(GTK_WINDOW(m.window), m.bottom ? GTK_LAYER_SHELL_EDGE_BOTTOM : GTK_LAYER_SHELL_EDGE_TOP, dy);
         gtk_layer_set_margin(GTK_WINDOW(m.window), GTK_LAYER_SHELL_EDGE_LEFT, x - geo.x);
+        gtk_layer_set_exclusive_zone(GTK_WINDOW(m.window), !m.bottom && bb::llook::TopGap(1.0) == 0.0 ? -1 : 0);
         return;
     }
-    gtk_window_move(GTK_WINDOW(m.window), x, m.bottom ? area.y + area.height - h - dy : area.y + dy);
+    gtk_window_move(GTK_WINDOW(m.window), x, m.bottom ? area.y + area.height - h - dy : IslandTop(area, geo) + dy);
 }
 
 // Rebuilds the mirror windows for the current monitors and settings.

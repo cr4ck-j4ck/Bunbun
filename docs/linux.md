@@ -139,6 +139,11 @@ keys nudge by a pixel, Esc cancels; the hex is copied and the island shows HEX, 
 copying each. On Wayland, where apps can't see the screen, it uses the desktop's own picker through
 the screenshot portal (`xdg-desktop-portal`).
 
+**The notch and the top bar.** The notch hangs from the very top edge of the screen, over any top
+panel, on KDE, Sway, Hyprland and other desktops. GNOME draws its top bar over every app window, so
+there the notch sits directly under the bar instead; hide the top bar (for example with the *Hide Top
+Bar* or *Just Perfection* extension) and it moves up to the edge by itself.
+
 **Without a compositor** (some X11 window managers, or XFCE with compositing off) transparency isn't
 possible, so the window is cut to the pill's shape instead: the island still looks like a pill, only
 without its soft shadow.
