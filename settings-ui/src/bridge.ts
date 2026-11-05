@@ -36,6 +36,7 @@ export function call<T = unknown>(cmd: string, args: Record<string, unknown> = {
 // ── Browser mock ───────────────────────────────────────────────────────────
 const mockValues: Record<string, string> = {};
 type MockTodo = { id: number; text: string; due: number; done: boolean; repeat: string };
+let mockNote = "Quick note\n[ ] Book the dentist\n[x] Ship 0.3.6\n- Try the Water page";
 let mockTodos: MockTodo[] = [
   { id: 1, text: "Send the report", due: Math.round(Date.now() / 1000) + 3600, done: false, repeat: "" },
   { id: 2, text: "Stand up and stretch", due: Math.round(Date.now() / 1000) + 7200, done: false, repeat: "weekdays" },
@@ -63,6 +64,11 @@ async function mock(cmd: string, args: Record<string, unknown>): Promise<unknown
         { index: 1, name: "Built-in display", primary: true, bounds: { x: 0, y: 0, w: 1920, h: 1080 }, work: { x: 0, y: 0, w: 1920, h: 1032 } },
         { index: 2, name: "DELL U2720Q", primary: false, bounds: { x: 1920, y: -300, w: 2560, h: 1440 }, work: { x: 1920, y: -300, w: 2560, h: 1400 } },
       ];
+    case "readNote":
+      return mockNote;
+    case "writeNote":
+      mockNote = String(args.text ?? "");
+      return true;
     case "listTodos":
       return mockTodos.map((t) => ({ ...t }));  // a fresh list each time, like the host
     case "saveTodo": {

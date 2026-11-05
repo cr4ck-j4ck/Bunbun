@@ -393,44 +393,35 @@ bool TodoTabClick(const MediaContentPoint& pt) {
     return true;
 }
 
-// Where the reminder pill last drew its buttons, in window (client) pixels. The
-// pill records them while drawing, so the click test matches whatever layout it
-// had: split beside music or an agent, scaled, or at any DPI. Render thread only.
-D2D1_RECT_F g_reminderDoneRect{};
-D2D1_RECT_F g_reminderSnoozeRect{};
-D2D1_RECT_F g_reminderQuietRect{};  // the whole quiet pill
-double g_reminderButtonsAt = -1.0;
+// Water reminders share the pill (water_module.inc, included after this file).
+void WaterReminderDone(int id);
+void WaterReminderLater();
 
-// The reminder pill: Done or Snooze 10 min. Returns true when a button was hit.
-bool ReminderPillClick(int x, int y) {
-    if (NowSeconds() - g_reminderButtonsAt > 1.0) return false;  // not on screen
-    auto inside = [&](const D2D1_RECT_F& r) {
-        return x >= r.left - 3.0f && x <= r.right + 3.0f && y >= r.top - 4.0f && y <= r.bottom + 4.0f;  // a little slack
-    };
-    bool quiet = false;
-    {
-        std::lock_guard lock(g_stateMutex);
-        quiet = g_state.reminder.active && g_state.reminder.quiet;
-    }
-    if (quiet) {  // a tap on the small pill opens the full one, with its buttons
-        if (!inside(g_reminderQuietRect)) return false;
-        std::lock_guard lock(g_stateMutex);
-        g_state.reminder.quiet = false;
-        g_state.reminder.expiresAt = NowSeconds() + 60.0;
-        g_layoutDirty = true;
-        return true;
-    }
-    const bool done = inside(g_reminderDoneRect);
-    const bool snooze = !done && inside(g_reminderSnoozeRect);
-    if (!done && !snooze) return false;
+// The reminder pill's buttons, from HandleStudioClick: the pill records them as
+// Studio hits (todos_draw.inc), mapped like every Studio button. 1 = Done (Drank,
+// Refilled), 2 = Snooze 10 min (Later: 15), 3 = open the quiet pill.
+// Bunbun: they had their own hit test, which recorded the buttons in the wrong
+// space at some sizes and only took clicks on a pill drawn in the last second.
+void ReminderPillAction(int which) {
     int id = 0;
     {
         std::lock_guard lock(g_stateMutex);
-        if (!g_state.reminder.active) return false;
+        if (!g_state.reminder.active) return;
         id = g_state.reminder.id;
+        if (which == 3) {
+            g_state.reminder.quiet = false;
+            g_state.reminder.expiresAt = NowSeconds() + 60.0;
+            g_layoutDirty = true;
+            return;
+        }
     }
-    if (done) SetTodoDone(id, true);
-    else SnoozeTodo(id, 10);
+    if (IsWaterReminderId(id)) {
+        if (which == 1) WaterReminderDone(id);
+        else WaterReminderLater();
+    } else if (which == 1) {
+        SetTodoDone(id, true);
+    } else {
+        SnoozeTodo(id, 10);
+    }
     g_layoutDirty = true;
-    return true;
 }

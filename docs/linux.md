@@ -120,6 +120,7 @@ their data:
 | **Clipboard** | The last 8 texts you copied; click one to copy it again. On Wayland it may miss copies made while another app has the keyboard |
 | **Note** | `note.txt` next to `settings.ini`; click a `[ ]` line to tick it, **Edit** opens it in your text editor |
 | **Focus** | A focus timer with presets; the island tells you when time is up |
+| **Water** | Today's water against your goal, + glass, undo and the week. Reminders (Features → Water) come as a toast: click it to log the glass |
 | **All apps** | Every page and Settings in one grid |
 
 **Page order** (Settings → Island pages) orders these the same way as on Windows; the pages Linux

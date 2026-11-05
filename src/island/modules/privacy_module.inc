@@ -306,6 +306,63 @@ void ScreenRecorders(std::vector<std::wstring>* out) {
     }
 }
 
+// ── Screen: apps encoding video on the GPU ──────────────────────────────────
+// Bunbun: Discord's screen share has no sharing bar or log, and Meet's bar can be
+// hidden. What every share (and recording) does is encode video, usually on the
+// GPU's video encoder, which Windows counts per process ("GPU Engine",
+// engtype_VideoEncode). An app encoding on two polls in a row (~3 s) counts as
+// sharing. Not when that app has the camera on (a video call encodes the camera),
+// and not the always-on replay recorders (NVIDIA Instant Replay, AMD ReLive).
+void GpuVideoEncoders(std::vector<std::wstring>* out, const std::vector<std::wstring>& cameraApps) {
+    static PDH_HQUERY query = nullptr;
+    static PDH_HCOUNTER counter = nullptr;
+    static std::map<DWORD, int> streak;  // pid -> polls in a row it was encoding
+    if (!query) {
+        if (PdhOpenQueryW(nullptr, 0, &query) != ERROR_SUCCESS) return;
+        if (PdhAddEnglishCounterW(query, L"\\GPU Engine(*engtype_VideoEncode)\\Utilization Percentage", 0, &counter) != ERROR_SUCCESS) {
+            PdhCloseQuery(query);
+            query = nullptr;
+            return;
+        }
+        PdhCollectQueryData(query);  // a rate counter needs a first sample
+        return;
+    }
+    if (PdhCollectQueryData(query) != ERROR_SUCCESS) return;
+    DWORD bytes = 0, count = 0;
+    if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count, nullptr) != PDH_MORE_DATA || bytes == 0) {
+        streak.clear();
+        return;
+    }
+    std::vector<BYTE> buf(bytes);
+    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+    if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count, items) != ERROR_SUCCESS) return;
+    std::set<DWORD> encoding;
+    for (DWORD i = 0; i < count; ++i) {
+        if (items[i].FmtValue.CStatus != ERROR_SUCCESS || items[i].FmtValue.doubleValue < 0.5) continue;
+        const wchar_t* p = wcsstr(items[i].szName, L"pid_");
+        if (p) encoding.insert(static_cast<DWORD>(_wtoi(p + 4)));
+    }
+    std::map<DWORD, int> next;
+    for (DWORD pid : encoding) next[pid] = (streak.count(pid) ? streak[pid] : 0) + 1;
+    streak = std::move(next);
+    for (const auto& [pid, polls] : streak) {
+        if (polls < 2 || pid == GetCurrentProcessId()) continue;
+        std::wstring name = ProcessName(pid);
+        std::wstring lower = name;
+        for (auto& c : lower) c = towlower(c);
+        static const wchar_t* kReplay[] = {L"nvcontainer", L"nvidia share", L"nvsphelper", L"amdrsserv", L"radeonsoftware", L"bcastdvr"};
+        bool skip = false;
+        for (const wchar_t* r : kReplay) skip = skip || lower.find(r) != std::wstring::npos;
+        // OBS by its own executables only (its log covers it); "obs" alone also matched Obsidian.
+        static const wchar_t* kObs[] = {L"obs64", L"obs32", L"obs", L"obs64.exe", L"obs32.exe", L"obs.exe"};
+        for (const wchar_t* o : kObs) skip = skip || lower == o;
+        // A video call: the same app has the camera on (matched by name: Chrome
+        // encodes in its GPU process, not the one holding the camera).
+        for (const std::wstring& cam : cameraApps) skip = skip || _wcsnicmp(cam.c_str(), name.c_str(), name.size()) == 0;
+        if (!skip) AddUnique(out, name + L" (sharing)");
+    }
+}
+
 // "Discord", "Discord & OBS Studio", "Discord, OBS Studio +1".
 std::wstring JoinNames(const std::vector<std::wstring>& names) {
     if (names.empty()) return {};
@@ -355,6 +412,17 @@ void UpdatePrivacyIndicators() {
         ScreenRecorders(&screen);
         ConsentStoreApps(L"graphicsCaptureProgrammatic", &screen);
         ConsentStoreApps(L"graphicsCaptureWithoutBorder", &screen);
+        // Bunbun: Discord and other apps that share without a bar (see GpuVideoEncoders).
+        std::vector<std::wstring> camNow = cam;
+        if (camNow.empty()) {  // the camera list is only filled when its dot is on
+            std::vector<DWORD> pids;
+            {
+                std::lock_guard lock(g_cameraMutex);
+                pids = g_cameraPids;
+            }
+            for (DWORD pid : pids) AddUnique(&camNow, ProcessName(pid));
+        }
+        GpuVideoEncoders(&screen, camNow);
     }
 
     // Name an app the moment it starts using something: "Discord is using your microphone".

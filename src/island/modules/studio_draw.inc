@@ -837,7 +837,7 @@
     // ── Extra pages (both layouts) ──
     bool DrawStudioExtraPage(int tabId, const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
         if (tabId != kTabAgent && tabId != kTabClipboard && tabId != kTabNote && tabId != kTabFocus && tabId != kTabApps &&
-            tabId != kTabMirror && tabId != kTabHome)
+            tabId != kTabMirror && tabId != kTabHome && tabId != kTabWater)
             return false;
         if (tabId == kTabHome) {
             DrawStudioHome(state, rect, settings, now);
@@ -853,8 +853,148 @@
         else if (tabId == kTabFocus) DrawStudioFocusPage(state, r, now);
         else if (tabId == kTabApps) DrawStudioAppsPage(state, r);
         else if (tabId == kTabMirror) DrawStudioMirrorPage(r);
+        else if (tabId == kTabWater) DrawStudioWaterPage(state, r, now);
         else DrawStudioNotePage(r, now);
         return true;
+    }
+
+    // ── Water (water_module.inc) ──
+    // A glass filling up to the day's goal (its surface moves gently), then today:
+    // the amount, a drop per glass, + glass / undo / refilled and the next reminder;
+    // then the week against the goal.
+    void DrawStudioWaterPage(const SharedState& state, D2D1_RECT_F r, double now) {
+        const WaterSnapshot& w = state.water;
+        const D2D1_COLOR_F blue = SCol(0x5ac8fa), deep = SCol(0x0a84ff), white = SCol(0xffffff), grey = SCol(0x8e8e93);
+        const float H = r.bottom - r.top;
+        auto amount = [](int ml) {
+            wchar_t b[24];
+            if (ml >= 1000) swprintf_s(b, ml % 100 ? L"%.2f L" : L"%.1f L", ml / 1000.0);
+            else swprintf_s(b, L"%d ml", ml);
+            return std::wstring(b);
+        };
+        const float frac = w.goalMl > 0 ? Clamp(static_cast<float>(w.takenMl) / w.goalMl, 0.0f, 1.0f) : 0.0f;
+
+        // ── The glass ──
+        const float gW = std::min(92.0f, H * 0.5f), gH = H - 12.0f;
+        const D2D1_RECT_F glass = D2D1::RectF(r.left + 4, r.top + 6, r.left + 4 + gW, r.top + 6 + gH);
+        const float gr = 18.0f;
+        SFillRound(glass, gr, D2D1::ColorF(1, 1, 1, 0.05f));
+        ComPtr<ID2D1RoundedRectangleGeometry> shape;
+        ComPtr<ID2D1Layer> layer;
+        if (frac > 0.0f && SUCCEEDED(d2dFactory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(glass, gr, gr), &shape)) &&
+            SUCCEEDED(target_->CreateLayer(&layer))) {
+            target_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), shape.Get()), layer.Get());
+            // Two waves: a pale one behind, the water in front, moving at different speeds.
+            const float level = glass.bottom - (glass.bottom - glass.top) * std::max(frac, 0.04f);
+            auto wave = [&](float amp, float speed, float phase, D2D1_COLOR_F col) {
+                ComPtr<ID2D1PathGeometry> path;
+                ComPtr<ID2D1GeometrySink> sink;
+                if (FAILED(d2dFactory_->CreatePathGeometry(&path)) || FAILED(path->Open(&sink))) return;
+                sink->BeginFigure(D2D1::Point2F(glass.left, glass.bottom), D2D1_FIGURE_BEGIN_FILLED);
+                for (float x = glass.left; x <= glass.right + 0.5f; x += 3.0f) {
+                    const float t = static_cast<float>(now) * speed + phase + (x - glass.left) * 0.11f;
+                    sink->AddLine(D2D1::Point2F(x, level + std::sin(t) * amp));
+                }
+                sink->AddLine(D2D1::Point2F(glass.right, glass.bottom));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink->Close();
+                if (ID2D1SolidColorBrush* b = AcquireBrush(col)) target_->FillGeometry(path.Get(), b);
+            };
+            wave(3.0f, 1.6f, 1.7f, D2D1::ColorF(blue.r, blue.g, blue.b, 0.35f));
+            wave(2.4f, 2.3f, 0.0f, D2D1::ColorF(deep.r, deep.g, deep.b, 0.85f));
+            target_->PopLayer();
+        }
+        if (ID2D1SolidColorBrush* rim = AcquireBrush(D2D1::ColorF(1, 1, 1, 0.16f)))
+            target_->DrawRoundedRectangle(D2D1::RoundedRect(glass, gr, gr), rim, 1.5f);
+        wchar_t pct[8];
+        swprintf_s(pct, L"%d%%", static_cast<int>(frac * 100.0f + 0.5f));
+        SText(pct, D2D1::RectF(glass.left, glass.top + 10, glass.right, glass.top + 34), SFSong, white, 1);
+
+        // ── Today ──
+        // Today takes about half of what is right of the glass (at least 210), the week the rest.
+        const float x0 = glass.right + 22, colR = std::min(r.right, x0 + std::max(210.0f, (r.right - x0) * 0.52f));
+        SText(L"Today", D2D1::RectF(x0, r.top + 4, colR, r.top + 20), SFSmall, grey);
+        const std::wstring big = amount(w.takenMl);
+        SText(big, D2D1::RectF(x0, r.top + 18, colR, r.top + 52), SFBig, white);
+        const float bigW = SMeasureBox(big, SFBig, 400).width;
+        SText(L"of " + amount(w.goalMl), D2D1::RectF(x0 + bigW + 8, r.top + 30, colR, r.top + 50), SFBody, grey);
+
+        // A drop per glass of the goal: filled ones are drunk.
+        const int glasses = std::clamp(w.glassMl > 0 ? (w.goalMl + w.glassMl - 1) / w.glassMl : 8, 1, 12);
+        for (int i = 0; i < glasses; ++i) {
+            const D2D1_POINT_2F c = D2D1::Point2F(x0 + 8 + i * 18.0f, r.top + 66);
+            SIcon(StudioPage::Water, c, 14.0f, i < w.glasses ? blue : SCol(0x48484a));
+        }
+
+        auto pill = [&](D2D1_RECT_F b, const std::wstring& label, bool primary, StudioAction action) {
+            const float hover = SHover(action);
+            SFillRound(b, (b.bottom - b.top) * 0.5f,
+                       primary ? D2D1::ColorF(blue.r, blue.g, blue.b, SLerp(0.9f, 1.0f, hover))
+                               : D2D1::ColorF(1, 1, 1, SLerp(0.09f, 0.18f, hover)));
+            SText(label, b, SFLabel, primary ? SCol(0x061a26) : white, 1);
+            SHit(b, action);
+        };
+        const float by = r.top + 84;
+        pill(D2D1::RectF(x0, by, x0 + 112, by + 30), L"+ " + std::to_wstring(w.glassMl) + L" ml", true, StudioAction::WaterAdd);
+        float bx = x0 + 120;
+        if (w.glasses > 0) {
+            pill(D2D1::RectF(bx, by, bx + 60, by + 30), L"Undo", false, StudioAction::WaterUndo);
+            bx += 68;
+        }
+        if (w.bottleMl > 0) pill(D2D1::RectF(bx, by, std::min(colR, bx + 86), by + 30), L"Refilled", false, StudioAction::WaterRefill);
+
+        std::wstring status;
+        D2D1_COLOR_F statusCol = grey;
+        if (w.takenMl >= w.goalMl) {
+            status = L"Goal reached. Nicely done!";
+            statusCol = blue;
+        } else if (!w.reminders) {
+            status = L"Reminders off \x00B7 Settings \x2192 Productivity \x2192 Water";
+        } else if (w.nextMinute < 0) {
+            status = L"No more reminders today";
+        } else {
+            wchar_t b[48];
+            swprintf_s(b, L"Next reminder at %02d:%02d", w.nextMinute / 60, w.nextMinute % 60);
+            status = b;
+        }
+        SText(status, D2D1::RectF(x0, by + 38, colR, by + 56), SFSmall, statusCol);
+        if (w.bottleMl > 0)
+            SText(std::to_wstring(w.bottleLeftMl) + L" ml left in your bottle", D2D1::RectF(x0, by + 56, colR, by + 74), SFSmall, grey);
+
+        // ── The week ──
+        const D2D1_RECT_F card = D2D1::RectF(colR + 14, r.top + 4, r.right, r.bottom - 4);
+        if (card.right - card.left < 120 || w.week.empty()) return;
+        SFillRound(card, 14, D2D1::ColorF(1, 1, 1, 0.05f));
+        long long sum = 0;
+        for (const auto& d : w.week) sum += d.second;
+        const int avg = static_cast<int>(sum / static_cast<long long>(w.week.size()));
+        SText(L"This week", D2D1::RectF(card.left + 12, card.top + 8, card.right - 12, card.top + 24), SFSmall, grey);
+        SText(L"avg " + amount(avg), D2D1::RectF(card.left + 12, card.top + 8, card.right - 12, card.top + 24), SFSmall, white, 2);
+        const float top = card.top + 34, bottom = card.bottom - 24;
+        const int n = static_cast<int>(w.week.size());
+        const float slot = (card.right - card.left - 24) / 7.0f;
+        // The goal line, dashed.
+        for (float x = card.left + 12; x < card.right - 12; x += 7)
+            SFillRound(D2D1::RectF(x, top - 1, std::min(x + 4, card.right - 12), top + 1), 1, D2D1::ColorF(1, 1, 1, 0.18f));
+        static const wchar_t* kDays = L"SMTWTFS";
+        for (int i = 0; i < n; ++i) {
+            const int date = w.week[static_cast<size_t>(i)].first, ml = w.week[static_cast<size_t>(i)].second;
+            const float cx = card.left + 12 + slot * (7 - n + i) + slot * 0.5f, bw = std::min(14.0f, slot * 0.5f);
+            const float h = (bottom - top) * Clamp(w.goalMl > 0 ? static_cast<float>(ml) / w.goalMl : 0.0f, 0.0f, 1.0f);
+            const bool today = i == n - 1;
+            SFillRound(D2D1::RectF(cx - bw * 0.5f, top, cx + bw * 0.5f, bottom), bw * 0.5f, D2D1::ColorF(1, 1, 1, 0.06f));
+            if (h > 0.5f)
+                SFillRound(D2D1::RectF(cx - bw * 0.5f, bottom - std::max(h, bw), cx + bw * 0.5f, bottom), bw * 0.5f,
+                           today ? blue : D2D1::ColorF(blue.r, blue.g, blue.b, ml >= w.goalMl ? 0.75f : 0.4f));
+            tm t{};
+            t.tm_year = date / 10000 - 1900;
+            t.tm_mon = date / 100 % 100 - 1;
+            t.tm_mday = date % 100;
+            t.tm_hour = 12;
+            mktime(&t);
+            const wchar_t day[2] = {kDays[std::clamp(t.tm_wday, 0, 6)], 0};
+            SText(day, D2D1::RectF(cx - 10, bottom + 4, cx + 10, bottom + 20), SFSmall, today ? white : grey, 1);
+        }
     }
 
     void DrawStudioAgentPage(const SharedState& state, D2D1_RECT_F r, double now) {

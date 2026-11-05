@@ -5,6 +5,67 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Status ring** (Settings → Appearance, beside "Beside the face"): a thin ring next to the clock
+  on the small island that fills up as you go: the focus timer while one runs, today's water, or the
+  to-dos ticked off. Auto (the default) shows focus, else water when its reminders are on. With
+  "just the face", the ring sits beside the face. Windows and Linux.
+- **Calendar month and week views.** The Calendar page names the month it shows, with ‹ › to move
+  between months (click the title to come back to today), and dots under busy days: one per meeting
+  from your calendar link and per to-do due. **Week** (on the Studio page) lists each day's meetings
+  and to-dos with their times; a day in the month opens its week. Windows.
+- **Notes in Settings.** A Notes page edits the island's quick note right in Bunbun (it used to open
+  Notepad); it saves as you type and the island shows the change at once. The Note page's Edit opens
+  it. Windows and Linux.
+- **Settings, sorted.** The sidebar groups everything: the island (pages, appearance, position,
+  motion and behaviour), its features with a page per area (Music & lyrics, Notifications & alerts,
+  Productivity, System & tools, plus All features), Bun and the agents, and your own lists (To-dos,
+  Notes). Each feature page shows every option with its switch, nothing folded away.
+- **Live while sharing from Discord.** Besides the browser's sharing bar and OBS, an app that keeps
+  the GPU's video encoder busy now counts as sharing (not while it has the camera on, which is a
+  video call, and not NVIDIA or AMD replay recorders). On GPUs whose one video engine also plays
+  video (some AMD graphics), it can't tell the two apart and doesn't guess. Windows.
+- **Water.** A Water page: a glass filling up to your daily goal, a drop per glass, + glass and
+  undo, when the next reminder is due, and the week against the goal. Water reminders (Settings →
+  Features → Water, off by default) are paced across your active hours: one comes when you've fallen
+  a glass behind, at least 20 minutes after the last, with **Drank** and **Later** (15 minutes) on
+  the island; with a bottle size set, it asks you to refill when it's probably empty. Not while
+  you're away from the keyboard. Goal, glass and bottle sizes and the hours are in Settings; the
+  page can be switched off in Island pages. Kept in `water.txt` on your PC. Windows and Linux (on
+  Linux the reminder is a toast; click it to log the glass).
+
+### Changed
+- **Tuck away is quicker and peeks.** Folding to the line and coming back take about 0.3 s (they
+  took 0.65 to 0.9 s, most of it a slow crawl at the end). Pointing at the tucked line opens the
+  island as a peek, and it tucks back 0.4 s after the pointer leaves, whether you tucked it by hand
+  or full screen did; *Bring the island back* or Ctrl+Alt+H brings it back for good. Windows.
+- **Notifications, Samsung-style.** The island grows in its own shape: the app's icon first, then
+  the title, then a second line with the app and the message, and steps back the same way when the
+  notification goes. The title and the message are on lines of their own (they were joined into one
+  scrolling line), and Store apps' logos fill their circle. A notification also peeks out of the
+  tucked island, except in full screen. Windows.
+- **Follow Windows' Do Not Disturb** (Features → Notifications, first): on, the island stays quiet
+  during Do Not Disturb; off, your apps' notifications still show on the island. It's the old
+  *Notifications respect Do Not Disturb*, renamed so it says what it does. Windows.
+
+### Fixed
+- **A tucked island in full screen couldn't open.** In a full-screen app that tucks the island, it
+  peeked out of the line but never opened on hover or click. Windows.
+- Linux: the To-dos page in Settings was always empty (a placeholder answered before the real list).
+- **Settings: the bottom of long pages was cut off.** The page area grew past the window instead of
+  scrolling, so the last options sat under the taskbar out of reach (the sidebar too). Both scroll
+  now. The window also opens sized for the screen under the pointer and stays above the taskbar when
+  moved to a screen with a different scale. Windows and Linux (the page fix).
+- **Reminder buttons.** Done, Snooze (and the water reminder's Drank and Later) could do nothing: the
+  pill recorded its buttons in the wrong place, only took clicks while it was being redrawn, and a
+  coding agent's card it had replaced could take the click instead (an old Reply button). Windows.
+- **Lyrics staying in sync.** The line no longer flicks back and forth near its start when a player
+  (Spotify, browsers) nudges its position back a little; pausing no longer drops back a line; after
+  a seek on the island the line doesn't jump back to where the song was; the Lyrics tab no longer
+  shows the previous song's lyrics against the new song while the new ones load; and lyrics stay in
+  time in players that only report their position on a seek. Lyrics files' own `[offset:]` is
+  applied, and `[mm:ss:xx]` times keep their fraction. Windows (the `[offset:]` fix on Linux too).
+
 ## [0.3.6]
 
 ### Changed

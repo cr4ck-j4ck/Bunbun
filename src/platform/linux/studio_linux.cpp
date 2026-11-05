@@ -41,6 +41,7 @@
 #include "look_linux.h"
 #include "lyrics_linux.h"
 #include "sources.h"
+#include "water_linux.h"
 
 namespace bb::lisland {
 namespace {
@@ -226,6 +227,7 @@ st::PageSwitches Switches() {
     p.lyrics = llyrics::PageOn() && g_track.active && g_mediaOn;
     p.tray = bb::lshelf::ShelfOn();
     p.mirror = bb::lshelf::MirrorOn();
+    p.water = bb::lwater::PageOn();
     p.agent = g_s.agentTab && AgentsShown();
     p.order = g_s.pageOrder;
     return p;
@@ -1536,6 +1538,113 @@ void PaintShelf(cairo_t* cr, const Rect& r) {
 // A camera preview for a quick look before a call. The camera only turns on when
 // you ask, and off again when you leave the page.
 
+// The Water page, as on Windows (studio_draw.inc's DrawStudioWaterPage): a glass
+// filling up to the goal, today with a drop per glass and the buttons, the week.
+void PaintWater(cairo_t* cr, const Rect& r) {
+    const bb::lwater::Snapshot w = bb::lwater::Now();
+    const Col blue = C(0x5ac8fa), deep = C(0x0a84ff), grey = C(0x8e8e93);
+    auto amount = [](int ml) {
+        char b[24];
+        if (ml >= 1000) snprintf(b, sizeof b, ml % 100 ? "%.2f L" : "%.1f L", ml / 1000.0);
+        else snprintf(b, sizeof b, "%d ml", ml);
+        return std::string(b);
+    };
+    const double frac = w.goalMl > 0 ? std::clamp(static_cast<double>(w.takenMl) / w.goalMl, 0.0, 1.0) : 0.0;
+
+    // The glass, its water moving gently.
+    const double gW = std::min(92.0, r.h * 0.5), gH = r.h - 12, gx = r.x + 4, gy = r.y + 6, gr = 18;
+    Fill(cr, gx, gy, gW, gH, gr, W(0.05));
+    if (frac > 0) {
+        cairo_save(cr);
+        RoundRect(cr, gx, gy, gW, gH, gr);
+        cairo_clip(cr);
+        const double level = gy + gH - gH * std::max(frac, 0.04);
+        auto wave = [&](double amp, double speed, double phase, Col c) {
+            cairo_move_to(cr, gx, gy + gH);
+            for (double x = gx; x <= gx + gW + 0.5; x += 3)
+                cairo_line_to(cr, x, level + std::sin(Now() * speed + phase + (x - gx) * 0.11) * amp);
+            cairo_line_to(cr, gx + gW, gy + gH);
+            cairo_close_path(cr);
+            Source(cr, c);
+            cairo_fill(cr);
+        };
+        wave(3.0, 1.6, 1.7, WithA(blue, 0.35));
+        wave(2.4, 2.3, 0.0, WithA(deep, 0.85));
+        cairo_restore(cr);
+    }
+    RoundRect(cr, gx + 0.75, gy + 0.75, gW - 1.5, gH - 1.5, gr);
+    Source(cr, W(0.16));
+    cairo_set_line_width(cr, 1.5);
+    cairo_stroke(cr);
+    SText(cr, std::to_string(static_cast<int>(frac * 100 + 0.5)) + "%", gx, gy + 10, gW, 24, FSong, W(1), 1);
+
+    // Today.
+    const double x0 = gx + gW + 22, colR = std::min(r.x + r.w, x0 + std::max(210.0, (r.x + r.w - x0) * 0.52));
+    SText(cr, "Today", x0, r.y + 4, colR - x0, 16, FSmall, grey);
+    const std::string big = amount(w.takenMl);
+    SText(cr, big, x0, r.y + 18, colR - x0, 34, FBig, W(1));
+    SText(cr, "of " + amount(w.goalMl), x0 + Measure(cr, big, FBig) + 8, r.y + 30, colR - x0, 20, FBody, grey);
+    const int glasses = std::clamp(w.glassMl > 0 ? (w.goalMl + w.glassMl - 1) / w.glassMl : 8, 1, 12);
+    for (int i = 0; i < glasses; ++i) Icon(cr, Page::Water, x0 + 8 + i * 18, r.y + 66, 14, i < w.glasses ? blue : C(0x48484a));
+    const double by = r.y + 84;
+    Button(cr, {x0, by, 112, 30}, "+ " + std::to_string(w.glassMl) + " ml", true, Action::WaterAdd);
+    double bx = x0 + 120;
+    if (w.glasses > 0) {
+        Button(cr, {bx, by, 60, 30}, "Undo", false, Action::WaterUndo);
+        bx += 68;
+    }
+    if (w.bottleMl > 0) Button(cr, {bx, by, std::min(86.0, colR - bx), 30}, "Refilled", false, Action::WaterRefill);
+    std::string status;
+    Col statusCol = grey;
+    if (w.takenMl >= w.goalMl) {
+        status = "Goal reached. Nicely done!";
+        statusCol = blue;
+    } else if (!w.reminders) {
+        status = "Reminders off \xC2\xB7 Settings \xE2\x86\x92 Productivity \xE2\x86\x92 Water";
+    } else if (w.nextMinute < 0) {
+        status = "No more reminders today";
+    } else {
+        char b[48];
+        snprintf(b, sizeof b, "Next reminder at %02d:%02d", w.nextMinute / 60, w.nextMinute % 60);
+        status = b;
+    }
+    SText(cr, status, x0, by + 38, colR - x0, 18, FSmall, statusCol);
+    if (w.bottleMl > 0)
+        SText(cr, std::to_string(w.bottleLeftMl) + " ml left in your bottle", x0, by + 56, colR - x0, 18, FSmall, grey);
+
+    // The week against the goal.
+    const double cx0 = colR + 14, cw = r.x + r.w - cx0, cy0 = r.y + 4, ch = r.h - 8;
+    if (cw < 120 || w.week.empty()) return;
+    Fill(cr, cx0, cy0, cw, ch, 14, W(0.05));
+    long long sum = 0;
+    for (const auto& d : w.week) sum += d.second;
+    SText(cr, "This week", cx0 + 12, cy0 + 8, cw - 24, 16, FSmall, grey);
+    SText(cr, "avg " + amount(static_cast<int>(sum / static_cast<long long>(w.week.size()))), cx0 + 12, cy0 + 8, cw - 24, 16, FSmall,
+          W(1), 2);
+    const double top = cy0 + 34, bottom = cy0 + ch - 24, slot = (cw - 24) / 7.0;
+    for (double x = cx0 + 12; x < cx0 + cw - 12; x += 7) Fill(cr, x, top - 1, std::min(4.0, cx0 + cw - 12 - x), 2, 1, W(0.18));
+    const int n = static_cast<int>(w.week.size());
+    static const char* kDays = "SMTWTFS";
+    for (int i = 0; i < n; ++i) {
+        const int date = w.week[static_cast<size_t>(i)].first, ml = w.week[static_cast<size_t>(i)].second;
+        const double cx = cx0 + 12 + slot * (7 - n + i) + slot * 0.5, bw = std::min(14.0, slot * 0.5);
+        const double h = (bottom - top) * std::clamp(w.goalMl > 0 ? static_cast<double>(ml) / w.goalMl : 0.0, 0.0, 1.0);
+        const bool today = i == n - 1;
+        Fill(cr, cx - bw / 2, top, bw, bottom - top, bw / 2, W(0.06));
+        if (h > 0.5)
+            Fill(cr, cx - bw / 2, bottom - std::max(h, bw), bw, std::max(h, bw), bw / 2,
+                 today ? blue : WithA(blue, ml >= w.goalMl ? 0.75 : 0.4));
+        tm t{};
+        t.tm_year = date / 10000 - 1900;
+        t.tm_mon = date / 100 % 100 - 1;
+        t.tm_mday = date % 100;
+        t.tm_hour = 12;
+        mktime(&t);
+        const char day[2] = {kDays[std::clamp(t.tm_wday, 0, 6)], 0};
+        SText(cr, day, cx - 10, bottom + 4, 20, 16, FSmall, today ? W(1) : grey, 1);
+    }
+}
+
 void PaintMirror(cairo_t* cr, const Rect& r) {
     cairo_surface_t* frame = bb::lshelf::CameraFrame();
     if (!bb::lshelf::CameraRunning() || !frame) {
@@ -1978,7 +2087,7 @@ void PaintAgentPage(cairo_t* cr, const Rect& r) {
 
 const char* PageKey(Page p) {
     static const char* kKeys[] = {"home", "music", "calendar", "weather", "system", "toggles", "tray", "todo",
-                                  "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror"};
+                                  "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water"};
     return kKeys[std::clamp(static_cast<int>(p), 0, static_cast<int>(std::size(kKeys)) - 1)];
 }
 
@@ -2057,6 +2166,7 @@ int StudioCapturePages() {
 
 void StudioLoadSettings() {
     namespace s = bb::settings;
+    bb::lwater::LoadSettings();
     g_s.studio = st::EqualsNoCase(s::Get(L"Bunbun.Layout"), L"studio");
     g_s.agentTab = s::GetBool(L"Bunbun.AgentTab");
     g_s.usageLimits = s::GetBool(L"Bunbun.UsageLimits");
@@ -2141,6 +2251,7 @@ void PaintStudioFrame(cairo_t* cr, const Rect& isl, double mix) {
         case Page::Apps: PaintApps(cr, pg); break;
         case Page::Tray: PaintShelf(cr, pg); break;
         case Page::Mirror: PaintMirror(cr, pg); break;
+        case Page::Water: PaintWater(cr, pg); break;
         default: PaintHome(cr, pg); break;
     }
     cairo_pop_group_to_source(cr);
@@ -2350,6 +2461,9 @@ bool StudioDo(const Hit& h) {
         case Action::PlanChange:
             StartCompose(ComposePlan, a.requestId, -1, "What should change in the plan?");
             return true;
+        case Action::WaterAdd: bb::lwater::Drink(); return true;
+        case Action::WaterUndo: bb::lwater::Undo(); return true;
+        case Action::WaterRefill: bb::lwater::Refill(); return true;
         case Action::QuestionToggle:
             g_answers.Toggle(a, h.index);
             // One single-choice question: the pick is the answer.
@@ -2384,9 +2498,9 @@ bool StudioDo(const Hit& h) {
         case Action::ClipCopy: lsrc::CopyClip(h.index); return true;
         case Action::ClipClear: lsrc::ClearClips(); return true;
         case Action::NoteToggle: lsrc::NoteToggle(h.index); return true;
-        case Action::NoteEdit: lsrc::NoteEdit(); return true;
+        case Action::NoteEdit: OpenSettings("notes"); return true;  // Settings' Notes page (it was the text editor)
         case Action::TodoToggle: lsrc::TodoToggle(h.index); return true;
-        case Action::TodoOpen: OpenSettings(); return true;
+        case Action::TodoOpen: OpenSettings("todos"); return true;
         case Action::FocusStart:
             if (h.index < 0) {  // a preset: set the picker
                 lsrc::FocusState().pickH = -h.index / 60;

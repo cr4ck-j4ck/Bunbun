@@ -13,6 +13,7 @@
 #include "../src/common/todos.h"
 #include "../src/common/chime_wav.h"
 #include "../src/common/applist.h"
+#include "../src/common/water.h"
 
 #include <algorithm>
 #include <cwchar>
@@ -385,6 +386,51 @@ static void TestAppList() {
     CHECK(Matches(std::string("mpv, celluloid"), std::string("io.github.celluloid_player.celluloid")));  // narrow too
 }
 
+static void TestWater() {
+    namespace w = bb::water;
+    w::Settings s;
+    s.reminders = true;
+    s.goalMl = 2400;  // 9:00 to 21:00: 200 ml an hour
+    s.glassMl = 200;
+    w::Log log;
+    w::RollOver(log, 20261105);
+    w::Day& d = log.today;
+    CHECK(w::ExpectedBy(s, 9 * 60) == 0 && w::ExpectedBy(s, 15 * 60) == 1200 && w::ExpectedBy(s, 22 * 60) == 2400);
+    CHECK(w::Check(s, d, 8 * 60) == w::Due::None);               // before the active hours
+    CHECK(w::Check(s, d, 9 * 60 + 30) == w::Due::None);          // not a glass behind yet
+    CHECK(w::Check(s, d, 10 * 60) == w::Due::Drink);             // an hour in: a glass behind
+    CHECK(w::NextReminder(s, d, 9 * 60 + 30) == 10 * 60);
+    d.lastRemindMinute = 10 * 60;
+    CHECK(w::Check(s, d, 10 * 60 + 10) == w::Due::None);         // too soon after the last one
+    w::Snooze(d, 10 * 60 + 25);
+    CHECK(w::Check(s, d, 10 * 60 + 30) == w::Due::None);         // snoozed for 15 min
+    CHECK(w::Check(s, d, 10 * 60 + 41) == w::Due::Drink);
+    w::Drink(s, d, 200);
+    CHECK(d.takenMl == 200 && d.glasses == 1 && w::Check(s, d, 10 * 60 + 41) == w::Due::None);
+    w::Undo(s, d);
+    CHECK(d.takenMl == 0 && d.glasses == 0);
+    d.takenMl = 2400;
+    CHECK(w::Check(s, d, 15 * 60) == w::Due::None && w::NextReminder(s, d, 15 * 60) == -1);  // goal reached
+    // A bottle: empty asks for a refill, refilled is full again.
+    s.bottleMl = 500;
+    w::Day b;
+    w::Drink(s, b, 200);
+    w::Drink(s, b, 300);
+    CHECK(w::BottleLeft(s, b) == 0 && w::Check(s, b, 12 * 60) == w::Due::Refill);
+    w::Refill(s, b);
+    CHECK(w::BottleLeft(s, b) == 500);
+    // A new day moves today into the history; the file keeps both.
+    log.today.takenMl = 1800;
+    w::RollOver(log, 20261106);
+    CHECK(log.today.date == 20261106 && log.today.takenMl == 0 && log.history.size() == 1 && log.history[0].ml == 1800);
+    log.today.takenMl = 400;
+    const w::Log back = w::Parse(w::Serialize(log));
+    CHECK(back.today.date == 20261106 && back.today.takenMl == 400 && back.history.size() == 1 &&
+          back.history[0].date == 20261105 && back.history[0].ml == 1800);
+    for (int i = 0; i < 10; ++i) w::RollOver(log, 20261107 + i);
+    CHECK(log.history.size() == static_cast<size_t>(w::kHistoryDays));
+}
+
 static void TestStudioChat() {
     // 1. Text formatting logic
     auto formatAnswer = [](int status, const std::wstring& title, const std::wstring& source,
@@ -465,6 +511,7 @@ int wmain(int argc, wchar_t** argv) {
     TestLyricsText();
     TestStudioChat();
     TestAppList();
+    TestWater();
     TestChimes();
     std::printf(g_failed ? "%d check(s) failed\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;

@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwmapi.h>
+#include <shellscalingapi.h>  // Bunbun: GetDpiForMonitor (the window's first size)
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -587,6 +588,45 @@ Value TodoCommand(const std::string& cmd, const Value& args, std::string* err) {
     return bb::todos::Command(cmd, args, TodosPath(), err);  // common/todo_commands.h, shared with Linux
 }
 
+// ── Notes (the Quick note: note.txt next to settings.ini, UTF-8) ──────────────
+// The Notes page edits the same file the island's Note page shows; the island
+// re-reads it when it changes.
+std::wstring NotePath() {
+    std::wstring dir = bb::SettingsPath();
+    dir.erase(dir.find_last_of(L"\\/"));
+    return dir + L"\\note.txt";
+}
+
+Value ReadNote() {
+    std::string text;
+    if (HANDLE f = CreateFileW(NotePath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        f != INVALID_HANDLE_VALUE) {
+        char buf[4096];
+        DWORD got = 0;
+        while (ReadFile(f, buf, sizeof buf, &got, nullptr) && got > 0) text.append(buf, got);
+        CloseHandle(f);
+    }
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF) text.erase(0, 3);  // a BOM from Notepad
+    std::string out;
+    for (char c : text) if (c != '\r') out += c;
+    return Value::String(out);
+}
+
+bool WriteNote(const std::string& text) {
+    std::string crlf;  // Notepad-friendly line ends
+    for (char c : text) {
+        if (c == '\n') crlf += '\r';
+        crlf += c;
+    }
+    const std::wstring path = NotePath(), tmp = path + L".tmp";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    const bool ok = WriteFile(f, crlf.data(), static_cast<DWORD>(crlf.size()), &wrote, nullptr) && wrote == crlf.size();
+    CloseHandle(f);
+    return ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
 // The optional local AI: is the helper built, and which models are in the
 // models folder (%LOCALAPPDATA%\Bunbun\models; the island picks the first).
 std::wstring ModelsFolder() {
@@ -702,6 +742,11 @@ Value LocalAiCommand(const std::string& cmd) {
 
 Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
     if (cmd == "listTodos" || cmd == "saveTodo" || cmd == "deleteTodo" || cmd == "clearDoneTodos") return TodoCommand(cmd, args, err);
+    if (cmd == "readNote") return ReadNote();
+    if (cmd == "writeNote") {
+        if (!WriteNote(args.getString("text"))) { *err = "couldn't write note.txt"; return {}; }
+        return Value::Bool(true);
+    }
     if (cmd == "capturePreview") return CapturePreview(args);
     if (cmd == "capturePages") {
         Value reply;
@@ -1003,6 +1048,20 @@ bool StartWebView() {
     return SUCCEEDED(create(nullptr, dataDir.c_str(), nullptr, onEnv.Get()));
 }
 
+// Bunbun: `r` moved and shrunk to fit the work area (above the taskbar) of the
+// monitor it's mostly on, with a small margin.
+RECT FitToWorkArea(RECT r) {
+    MONITORINFO mi{sizeof mi};
+    if (!GetMonitorInfoW(MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST), &mi)) return r;
+    const RECT work = mi.rcWork;
+    const int margin = 8;
+    const int maxW = (work.right - work.left) - 2 * margin, maxH = (work.bottom - work.top) - 2 * margin;
+    int w = std::min<int>(r.right - r.left, maxW), h = std::min<int>(r.bottom - r.top, maxH);
+    int x = std::clamp<int>(r.left, work.left + margin, work.right - margin - w);
+    int y = std::clamp<int>(r.top, work.top + margin, work.bottom - margin - h);
+    return RECT{x, y, x + w, y + h};
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_APP_ASYNC_REPLY: {
@@ -1020,9 +1079,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_DPICHANGED: {
-            const RECT* r = reinterpret_cast<RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            // Bunbun: Windows' suggested size, kept on the new monitor above its taskbar
+            // (moving to a screen at a higher scale grew it past the bottom).
+            const RECT r = FitToWorkArea(*reinterpret_cast<RECT*>(lp));
+            SetWindowPos(hwnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
+        }
+        case WM_COPYDATA: {  // Bunbun: another `bunbun-settings --page <id>`: show that page here
+            const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lp);
+            if (cds && cds->dwData == 0x50414745 /* 'PAGE' */ && cds->cbData > 0 && cds->cbData < 128 && g_webview) {
+                std::wstring id(static_cast<const wchar_t*>(cds->lpData), cds->cbData / sizeof(wchar_t));
+                std::wstring clean;
+                for (wchar_t c : id) if (iswalnum(c)) clean += c;  // a page id is a plain word
+                if (!clean.empty()) g_webview->ExecuteScript((L"location.hash = '" + clean + L"';").c_str(), nullptr);
+            }
+            return TRUE;
         }
         case WM_DESTROY:
             g_controller.Reset();
@@ -1052,6 +1123,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int show) {
         if (HWND existing = FindWindowW(kWindowClass, nullptr)) {
             ShowWindow(existing, SW_RESTORE);
             SetForegroundWindow(existing);
+            // Bunbun: and switch it to the page asked for (the island's note Edit opens Notes).
+            if (!g_startPage.empty()) {
+                COPYDATASTRUCT cds{0x50414745, static_cast<DWORD>(g_startPage.size() * sizeof(wchar_t)),
+                                   const_cast<wchar_t*>(g_startPage.data())};
+                SendMessageW(existing, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds));
+            }
         }
         return 0;
     }
@@ -1069,13 +1146,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int show) {
     wc.lpszClassName = kWindowClass;
     RegisterClassExW(&wc);
 
-    const UINT dpi = GetDpiForSystem();
-    const int w = MulDiv(1180, dpi, 96), h = MulDiv(780, dpi, 96);
-    RECT work;
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    g_hwnd = CreateWindowExW(0, kWindowClass, L"Bunbun Settings", WS_OVERLAPPEDWINDOW,
-                             work.left + (work.right - work.left - w) / 2, work.top + (work.bottom - work.top - h) / 2, w, h,
-                             nullptr, nullptr, instance, nullptr);
+    // Bunbun: on the monitor under the pointer, at its scale, and never bigger than the
+    // room above its taskbar (sized at the system scale and centred on the primary
+    // screen, it could run under the taskbar and hide the bottom of every page).
+    POINT pointer{};
+    GetCursorPos(&pointer);
+    HMONITOR mon = MonitorFromPoint(pointer, MONITOR_DEFAULTTOPRIMARY);
+    UINT dpiX = 96, dpiY = 96;
+    if (FAILED(GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) dpiX = GetDpiForSystem();
+    MONITORINFO mi{sizeof mi};
+    GetMonitorInfoW(mon, &mi);
+    const RECT work = mi.rcWork;
+    const int w = MulDiv(1180, dpiX, 96), h = MulDiv(780, dpiX, 96);
+    const RECT start = FitToWorkArea(RECT{work.left + (work.right - work.left - w) / 2, work.top + (work.bottom - work.top - h) / 2,
+                                          work.left + (work.right - work.left - w) / 2 + w, work.top + (work.bottom - work.top - h) / 2 + h});
+    g_hwnd = CreateWindowExW(0, kWindowClass, L"Bunbun Settings", WS_OVERLAPPEDWINDOW, start.left, start.top,
+                             start.right - start.left, start.bottom - start.top, nullptr, nullptr, instance, nullptr);
 
     // Dark title bar + Mica, like the Windows 11 Settings app.
     const BOOL dark = TRUE;

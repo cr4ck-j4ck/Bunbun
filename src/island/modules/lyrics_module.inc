@@ -167,6 +167,7 @@ std::vector<std::string> SplitJsonObjectArray(const std::string& json) {
 
 std::vector<LyricsLine> ParseSyncedLyrics(const std::wstring& text) {
     std::vector<LyricsLine> lines;
+    int64_t offsetMs = 0;  // Bunbun: the file's [offset:+/-ms]; positive = lyrics sooner
     size_t start = 0;
     while (start <= text.size()) {
         size_t end = text.find(L'\n', start);
@@ -183,9 +184,16 @@ std::vector<LyricsLine> ParseSyncedLyrics(const std::wstring& text) {
             const size_t close = line.find(L']', pos);
             if (close == std::wstring::npos) break;
             const std::wstring ts = line.substr(pos + 1, close - pos - 1);
+            // Bunbun: the file's own timing correction (it was skipped).
+            if (ts.size() > 7 && _wcsnicmp(ts.c_str(), L"offset:", 7) == 0) {
+                offsetMs = _wtoi64(ts.c_str() + 7);
+                break;
+            }
             int minutes = 0, seconds = 0;
             wchar_t fraction[8] = {};
-            const int got = swscanf_s(ts.c_str(), L"%d:%d.%7[0-9]", &minutes, &seconds, fraction,
+            // Bunbun: [mm:ss.xx] or [mm:ss:xx] (some files use a colon); the colon form
+            // lost its fraction and landed up to a second early.
+            const int got = swscanf_s(ts.c_str(), L"%d:%d%*1[.:]%7[0-9]", &minutes, &seconds, fraction,
                                       static_cast<unsigned>(ARRAYSIZE(fraction)));
             if (got < 2) break;
             int64_t ms = static_cast<int64_t>(minutes) * 60000 + static_cast<int64_t>(seconds) * 1000;
@@ -215,6 +223,8 @@ std::vector<LyricsLine> ParseSyncedLyrics(const std::wstring& text) {
         if (end == text.size()) break;
         start = end + 1;
     }
+    if (offsetMs != 0)
+        for (LyricsLine& l : lines) l.timeMs = std::max<int64_t>(0, l.timeMs - offsetMs);
     // Repeated lines (several timestamps) are listed out of order; play order wins.
     std::stable_sort(lines.begin(), lines.end(),
                      [](const LyricsLine& a, const LyricsLine& b) { return a.timeMs < b.timeMs; });

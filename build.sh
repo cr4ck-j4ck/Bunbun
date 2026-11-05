@@ -75,7 +75,7 @@ echo "  LD  build/bunbun-hook.exe"
 [ -f build/bunbun-hook.exe ] && mv -f build/bunbun-hook.exe "build/bunbun-hook.exe.old-$(date +%s%N)"
 mv -f build/bunbun-hook.exe.new build/bunbun-hook.exe
 echo "  LD  build/bunbun-settings.exe"
-"$CXX" "${LDOPT[@]}" -municode -mwindows -static -o build/bunbun-settings.exe     build/obj/settings_host.o build/obj/wh_shim.o build/obj/mascot.o build/obj/pack_sheet.o build/obj/hook_installer.o build/obj/bunbun_res.o     -lole32 -loleaut32 -luuid -lshlwapi -lshell32 -ld2d1 -lwindowscodecs -ldwmapi -luser32 -ladvapi32 -lgdi32 -lwinhttp
+"$CXX" "${LDOPT[@]}" -municode -mwindows -static -o build/bunbun-settings.exe     build/obj/settings_host.o build/obj/wh_shim.o build/obj/mascot.o build/obj/pack_sheet.o build/obj/hook_installer.o build/obj/bunbun_res.o     -lole32 -loleaut32 -luuid -lshlwapi -lshell32 -ld2d1 -lwindowscodecs -ldwmapi -luser32 -ladvapi32 -lgdi32 -lwinhttp -lshcore
 cp -f "$WEBVIEW2/x64/WebView2Loader.dll" build/
 
 # Optional: bunbun-brain.exe, the local AI helper (docs/local-ai.md). Built only

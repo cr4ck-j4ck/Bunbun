@@ -138,6 +138,11 @@ const SLIDER_RANGES: Record<string, [number, number, number, string]> = {
   "Bunbun.MascotBlinkEvery": [0, 12, 1, " s"],
   "Bunbun.AfkMinutes": [0, 30, 1, " min"],
   "Appearance.SizeScale": [0.6, 2.5, 0.05, "x"],
+  "Bunbun.WaterGoalMl": [500, 5000, 250, " ml"],
+  "Bunbun.WaterGlassMl": [50, 1000, 50, " ml"],
+  "Bunbun.WaterBottleMl": [0, 2000, 50, " ml"],
+  "Bunbun.WaterStartHour": [0, 23, 1, ":00"],
+  "Bunbun.WaterEndHour": [1, 24, 1, ":00"],
   "Bunbun.SleepMinutes": [0, 120, 5, " min"],
   "Bunbun.TuckRevealMs": [0, 2000, 50, " ms"],
 };

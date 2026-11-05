@@ -74,6 +74,7 @@ add_executable(bunbun
     ${LINUX}/picker_linux.cpp
     ${LINUX}/tray_linux.cpp
     ${LINUX}/sources.cpp
+    ${LINUX}/water_linux.cpp
     ${LINUX}/lyrics_linux.cpp
     ${LINUX}/mpris.cpp
     ${SRC}/agents/agent_bridge.cpp)

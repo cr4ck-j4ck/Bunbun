@@ -35,6 +35,7 @@ export const LINUX_SETTINGS = new Set([
   "Appearance.OffsetYExpanded", "Appearance.BorderMergedMode", "Appearance.ProgressStyle", "Appearance.SpectrumStyle",
   "Behavior.AlwaysOnTop", "Behavior.AutoHideIdleSeconds", "Behavior.FullscreenMode", "Behavior.FullscreenShowApps", "Behavior.FullscreenTuckApps",
   "Behavior.FullscreenHideApps", "Bunbun.TuckRevealMs", "Bunbun.DndFollowSystem", "Bunbun.AfkMinutes", "Bunbun.SleepMinutes",
+  "Bunbun.WaterPage", "Bunbun.WaterReminders", "Bunbun.WaterGoalMl", "Bunbun.WaterGlassMl", "Bunbun.WaterBottleMl", "Bunbun.WaterStartHour", "Bunbun.WaterEndHour",
   "Bunbun.MusicApps", "Bunbun.VideoApps",
   "Behavior.UnhideOnHover", "Shortcuts.HideShowHotkeyEnabled", "Shortcuts.HideShowModifiers", "Shortcuts.HideShowKey",
   "Bunbun.TuckHotkey",
@@ -48,7 +49,7 @@ export const LINUX_SETTINGS = new Set([
   "Modules.DoNotDisturbIndicator", "Modules.Clipboard", "Modules.StatusCountdownProgress", "Modules.TimerModule",
   "Modules.ReminderSound", "Modules.QuietReminders", "Bunbun.FocusGuard", "Bunbun.FocusGuardApps",
   "Modules.DateFormat", "Modules.FirstDayOfWeek",
-  "Bunbun.IdleFace", "Bunbun.EyeColor", "Bunbun.EyeStatusColors", "Bunbun.IdleStripItems", "Bunbun.MascotDnd",
+  "Bunbun.IdleFace", "Bunbun.EyeColor", "Bunbun.EyeStatusColors", "Bunbun.IdleStripItems", "Bunbun.StatusRing", "Bunbun.MascotDnd",
   "Modules.KaraokeLyrics", "Modules.LyricsVisualizer", "Modules.KaraokeLetterGlow", "Modules.LyricsNeighborLinesVisible", "Modules.LyricsOffsetBluetoothMs",
   "Modules.ClockFormat", "Modules.ShowSeconds", "Modules.Media", "Behavior.ExpandOnHover",
   "Modules.Weather", "Modules.WeatherCity", "Modules.WeatherFahrenheit", "Modules.HardwareMonitorModule",
@@ -82,6 +83,6 @@ export const notOnLinux = (keys: string[] | undefined) => !!keys?.length && keys
 export const neverOnLinux = (keys: string[] | undefined) => !!keys?.length && keys.every((k) => LINUX_NEVER.has(k));
 
 // Island pages Linux has (Home and Music are always there): all of them.
-export const LINUX_PAGES = new Set(["calendar", "weather", "system", "toggles", "tray", "todo", "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror"]);
+export const LINUX_PAGES = new Set(["calendar", "weather", "system", "toggles", "tray", "todo", "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water"]);
 // Home cards Linux shows something else for, until those pages exist (none left).
 export const LINUX_CARD_STAND_IN: Record<string, string> = {};

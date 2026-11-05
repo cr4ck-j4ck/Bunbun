@@ -179,6 +179,10 @@ inline void Icon(const Pen& pen, Page page, D2D1_POINT_2F c, float size, D2D1_CO
                 for (float gy : {6.5f, 13.5f})
                     rt->DrawRoundedRectangle(D2D1::RoundedRect(box(gx - 3, gy - 3, gx + 3, gy + 3), 1.6f * s, 1.6f * s), b, w);
             break;
+        case Page::Water:  // a drop: two sides meeting at the top, a round bottom
+            Poly(pen, {P(6.2f, 14.5f), P(12, 3.5f), P(17.8f, 14.5f)}, c, s, col, w);
+            Arc(pen, at(12, 14.5f), 5.8f * s, 0.0f, 3.14159265f, col, w);
+            break;
         case Page::Note:
             Poly(pen, {P(6, 3.5f), P(14, 3.5f), P(19, 8.5f), P(19, 20.5f), P(6, 20.5f)}, c, s, col, w, true);
             Poly(pen, {P(9, 12), P(16, 12)}, c, s, col, w);

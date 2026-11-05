@@ -4,7 +4,7 @@ import { CSSProperties, ReactNode } from "react";
 
 export type PageKey =
   | "home" | "music" | "calendar" | "weather" | "system" | "toggles" | "tray" | "todo"
-  | "lyrics" | "agent" | "clipboard" | "note" | "focus" | "mirror" | "apps";
+  | "lyrics" | "agent" | "clipboard" | "note" | "focus" | "mirror" | "apps" | "water";
 
 const box = (s: CSSProperties): CSSProperties => ({ position: "absolute", ...s });
 const line = (left: number, top: number, width: number, o = 0.35, h = 5): ReactNode => (
@@ -87,6 +87,17 @@ function Body({ page, accent }: { page: PageKey; accent: string }) {
           background: `conic-gradient(${a} 70%, rgba(255,255,255,.1) 0)`,
           WebkitMask: "radial-gradient(circle, transparent 20px, #000 21px)", mask: "radial-gradient(circle, transparent 20px, #000 21px)" })} />
         <b style={box({ left: 0, right: 0, top: 22, textAlign: "center", fontSize: 11, fontWeight: 650, color: "#fff" })}>25:00</b>
+      </>;
+    case "water":
+      return <>
+        <i style={box({ left: 14, top: 6, width: 52, height: 52, borderRadius: "50%",
+          background: "conic-gradient(#5ac8fa 45%, rgba(255,255,255,.1) 0)",
+          WebkitMask: "radial-gradient(circle, transparent 20px, #000 21px)", mask: "radial-gradient(circle, transparent 20px, #000 21px)" })} />
+        <i style={box({ left: 80, top: 8, width: 64, height: 16, borderRadius: 8, background: "#5ac8fa" })} />
+        {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+          <i key={i} style={box({ left: 82 + i * 9, top: 30 + (i * 7) % 18, width: 5, height: 26 - (i * 7) % 18, borderRadius: 3,
+            background: i === 6 ? "#5ac8fa" : "rgba(90,200,250,.45)" })} />
+        ))}
       </>;
     case "mirror":
       return <>

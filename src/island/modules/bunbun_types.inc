@@ -22,6 +22,12 @@ struct BluetoothListDevice {
 
 // The next meeting from the user's calendar link(s), with a join link when the
 // event carries one (Meet, Zoom, Teams, Webex).
+// One event from the calendar link, for the Calendar page's month and week views.
+struct CalendarItem {
+    double startsAt = 0.0, endsAt = 0.0;  // Unix seconds (EpochNow)
+    std::wstring title;
+};
+
 struct MeetingSnapshot {
     bool valid = false;
     std::wstring title;
@@ -52,6 +58,20 @@ struct ReminderSnapshot {
     double expiresAt = 0.0;  // NowSeconds clock
     bool quiet = false;      // small, silent pill (full screen, presenting, meeting, focus)
 };
+
+// Today's water, for the Water page (water_module.inc).
+struct WaterSnapshot {
+    int goalMl = 2000, glassMl = 250, bottleMl = 0;
+    int takenMl = 0, glasses = 0, bottleLeftMl = 0;
+    bool reminders = false;
+    int nextMinute = -1;                    // minute of the day of the next reminder; -1 = none today
+    std::vector<std::pair<int, int>> week;  // (yyyymmdd, ml), oldest first, today last
+};
+
+// The reminder pill shows water reminders under these ids (water_module.inc).
+constexpr int kWaterDrinkId = -7001;
+constexpr int kWaterRefillId = -7002;
+inline bool IsWaterReminderId(int id) { return id == kWaterDrinkId || id == kWaterRefillId; }
 
 // A browser download in progress (or just finished) in the Downloads folder.
 struct DownloadSnapshot {

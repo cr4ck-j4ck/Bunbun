@@ -27,6 +27,7 @@ using bb::studio::kTabNote;
 using bb::studio::kTabFocus;
 using bb::studio::kTabApps;
 using bb::studio::kTabMirror;
+using bb::studio::kTabWater;
 using bb::studio::kTabHome;
 
 // ── Which agents the island shows ────────────────────────────────────────────
@@ -103,7 +104,7 @@ int MainAgentKind(const Settings& s) {
 }
 
 int StudioExtraTabCount(const Settings& s) {
-    return (s.agentTab && AgentsShown(s) ? 1 : 0) + (s.clipboardHistory ? 1 : 0) + (s.quickNote ? 1 : 0) + (s.focusPage ? 1 : 0) + (s.appsPage ? 1 : 0) + (s.mirrorPage ? 1 : 0);
+    return (s.agentTab && AgentsShown(s) ? 1 : 0) + (s.clipboardHistory ? 1 : 0) + (s.quickNote ? 1 : 0) + (s.focusPage ? 1 : 0) + (s.appsPage ? 1 : 0) + (s.mirrorPage ? 1 : 0) + (s.waterPage ? 1 : 0);
 }
 
 // The dashboard's tabs, in scroll order. context 0 = the media view (first tab is
@@ -126,6 +127,7 @@ bb::studio::PageSwitches PageSwitchesFor(const Settings& s) {
     p.note = s.quickNote;
     p.focus = s.focusPage;
     p.mirror = s.mirrorPage;
+    p.water = s.waterPage;
     p.apps = s.appsPage;
     p.order = s.pageOrder;
     return p;
@@ -862,7 +864,16 @@ enum class StudioAction {
     ClipCopy, ClipClear, NoteToggle, NoteEdit, Settings,
     ChatChip, ChatNew, ChatPanel, ColorPicker, ModelCycle, AgentReply,
     FocusWheel, FocusPreset, FocusAdd5, FocusPause, FocusPage, OpenTab, OpenLink, MirrorStart, MirrorStop, HomeEdit, HomeTileCycle,
+    WaterAdd, WaterUndo, WaterRefill,  // Bunbun: the Water page
+    ReminderDone, ReminderSnooze, ReminderExpand,  // Bunbun: the reminder pill (todos_draw.inc)
+    CalPrev, CalNext, CalToday, CalView, CalOpenWeek,  // Bunbun: the Calendar page's month / week views
 };
+
+// Bunbun: the Calendar page's view (render thread): 0 = month, 1 = week, and how far
+// from today's month / week it has been moved with ‹ ›.
+int g_calView = 0;
+int g_calMonthOffset = 0;
+int g_calWeekOffset = 0;
 
 // Rects are in the published content space (see PublishContentGeometry), so
 // MediaContentFromClient maps a click into the same coordinates. Render thread only.
@@ -921,14 +932,16 @@ void CycleClaudeModel() {
     }
 }
 
-void OpenSettingsApp() {
+// `page` opens it on that page (bunbun-settings --page notes), also when it's already open.
+void OpenSettingsApp(const wchar_t* page = nullptr) {
     wchar_t appPath[MAX_PATH] = {};
     const DWORD len = GetModuleFileNameW(nullptr, appPath, ARRAYSIZE(appPath));
     if (len == 0 || len >= ARRAYSIZE(appPath)) return;
     if (wchar_t* slash = wcsrchr(appPath, L'\\')) {
         *(slash + 1) = L'\0';
         const std::wstring exe = std::wstring(appPath) + L"bunbun-settings.exe";
-        ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, appPath, SW_SHOWNORMAL);
+        const std::wstring args = page ? std::wstring(L"--page ") + page : std::wstring();
+        ShellExecuteW(nullptr, L"open", exe.c_str(), page ? args.c_str() : nullptr, appPath, SW_SHOWNORMAL);
     }
 }
 
@@ -1122,8 +1135,8 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
         case StudioAction::NoteToggle:
             QuickNote::Toggle(hit.arg);
             break;
-        case StudioAction::NoteEdit:
-            QuickNote::OpenInEditor();
+        case StudioAction::NoteEdit:  // Bunbun: Settings' Notes page (it was Notepad)
+            OpenSettingsApp(L"notes");
             break;
         case StudioAction::Settings:
             OpenSettingsApp();
@@ -1157,6 +1170,60 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             break;
         case StudioAction::MirrorStop:
             Mirror::Stop();
+            break;
+        case StudioAction::WaterAdd:  // Bunbun: the Water page
+            WaterDrink();
+            break;
+        case StudioAction::WaterUndo:
+            WaterUndo();
+            break;
+        case StudioAction::WaterRefill:
+            WaterRefill();
+            break;
+        case StudioAction::CalPrev:  // Bunbun: the Calendar page
+        case StudioAction::CalNext: {
+            const int step = hit.action == StudioAction::CalNext ? 1 : -1;
+            if (g_calView == 0) g_calMonthOffset = std::clamp(g_calMonthOffset + step, -24, 24);
+            else g_calWeekOffset = std::clamp(g_calWeekOffset + step, -104, 104);
+            break;
+        }
+        case StudioAction::CalToday:
+            g_calMonthOffset = g_calWeekOffset = 0;
+            break;
+        case StudioAction::CalView:
+            // Bunbun: the week view opens on a week of the month on screen (its first week,
+            // or this week when that's the current month), and back again.
+            if (hit.arg == 1 && g_calView == 0) {
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                int y = st.wYear, m = st.wMonth + g_calMonthOffset;
+                while (m < 1) { m += 12; --y; }
+                while (m > 12) { m -= 12; ++y; }
+                const int64_t todayDays = bb::ics::DaysFromCivil(st.wYear, st.wMonth, st.wDay);
+                const int64_t firstDays = bb::ics::DaysFromCivil(y, m, 1);
+                const int64_t delta = g_calMonthOffset == 0 ? 0 : firstDays - todayDays;
+                g_calWeekOffset = static_cast<int>(delta >= 0 ? (delta + 6) / 7 : -((-delta) / 7));
+            } else if (hit.arg == 0 && g_calView == 1) {
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                int y = 0, m = 0, d = 0;
+                bb::ics::CivilFromDays(bb::ics::DaysFromCivil(st.wYear, st.wMonth, st.wDay) + 7LL * g_calWeekOffset, &y, &m, &d);
+                g_calMonthOffset = (y - st.wYear) * 12 + (m - st.wMonth);
+            }
+            g_calView = hit.arg;
+            break;
+        case StudioAction::CalOpenWeek:  // a day in the month: its week
+            g_calView = 1;
+            g_calWeekOffset = hit.arg;
+            break;
+        case StudioAction::ReminderDone:  // Bunbun: the reminder pill
+            ReminderPillAction(1);
+            break;
+        case StudioAction::ReminderSnooze:
+            ReminderPillAction(2);
+            break;
+        case StudioAction::ReminderExpand:
+            ReminderPillAction(3);
             break;
         case StudioAction::OpenTab:
             ShowDashboardTab(DashboardTabIndexOf(hit.arg));

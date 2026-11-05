@@ -36,6 +36,8 @@ enum class Action {
     ShelfOpen, ShelfRemove, ShelfClear, MirrorToggle,
     // The colour picker: start it, copy a row of the colour card
     ColorPick, ColorCopy,
+    // The Water page (water_linux.cpp)
+    WaterAdd, WaterUndo, WaterRefill,
 };
 struct Hit {
     Rect r;
@@ -60,7 +62,7 @@ extern ID2D1RenderTarget* g_rt;
 
 double Now();
 void Redraw();
-void OpenSettings();
+void OpenSettings(const char* page = nullptr);  // page: "notes", "todos"…
 
 // ── Drawing helpers ─────────────────────────────────────────────────────────
 

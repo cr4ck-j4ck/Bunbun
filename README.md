@@ -93,6 +93,7 @@ settles in with a snack when you turn on mascot do-not-disturb. You can also loa
 | **Colour picker** | Pick any pixel on screen with a magnifier and copy it as HEX, RGB or HSL |
 | **Focus** | A focus page with an hours/minutes picker, presets, +5 min and an optional nudge when a distracting app comes up |
 | **Home your way** | Pick what each Home card shows (agent, music, focus, weather, calendar, battery or system), add up to four links under them, and open any page from All apps |
+| **Water** | A Water page (a glass filling up to your daily goal, a drop per glass, + glass and the week), and optional reminders paced across your active hours: **Drank** or **Later** right on the island, and a nudge to refill your bottle. Stored on your PC only |
 | **Mirror** | An optional camera preview before a call; the camera runs only while it's on |
 | **Tuck away** | Ctrl+Alt+H folds the island to a thin status line; point at it to bring it back. In full screen it tucks itself by default; Settings → Animations → **In full screen** can keep it showing (hover and all) or hide it |
 | **Notifications & clipboard** | App toasts and a peek at what you copy |

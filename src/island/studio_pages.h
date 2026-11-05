@@ -31,7 +31,7 @@ constexpr float kPageH = 184.0f;
 constexpr float kIslandH = kPageH + kHeaderH + kFooterH;
 
 // ── Pages and tab ids ────────────────────────────────────────────────────────
-enum class Page { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror };
+enum class Page { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror, Water };
 
 // Extra pages share their ids in both views; the built-in ids differ per view
 // (context 0 = the media view, 1 = the idle view; see PageFor).
@@ -42,6 +42,7 @@ constexpr int kTabFocus = 23;
 constexpr int kTabApps = 24;
 constexpr int kTabMirror = 25;
 constexpr int kTabHome = 26;  // Home in the media view (Studio), so it stays while music plays
+constexpr int kTabWater = 27;
 
 // Which pages are switched on (and exist on this system). Calendar has no switch
 // on Windows; Linux turns off what it hasn't ported.
@@ -49,7 +50,7 @@ struct PageSwitches {
     bool studio = true;              // Bunbun.Layout = studio
     bool lyricsPinnedFirst = false;  // the media view opens on Lyrics
     bool calendar = true, weather = true, system = true, toggles = true, tray = false, todo = true, lyrics = true;
-    bool agent = true, clipboard = true, note = true, focus = true, mirror = false, apps = true;
+    bool agent = true, clipboard = true, note = true, focus = true, mirror = false, apps = true, water = true;
     std::wstring order;              // Bunbun.PageOrder: page keys, comma-separated
 };
 
@@ -65,8 +66,8 @@ constexpr OrderedPage kOrderedPages[] = {
     {L"calendar", 1, 0},  {L"weather", 2, 1},           {L"system", 3, 2},           {L"toggles", 6, 5},
     {L"tray", 4, 4},      {L"todo", 7, 7},              {L"lyrics", 5, -1},          {L"agent", kTabAgent, kTabAgent},
     {L"clipboard", kTabClipboard, kTabClipboard},       {L"note", kTabNote, kTabNote},
-    {L"focus", kTabFocus, kTabFocus},                   {L"mirror", kTabMirror, kTabMirror},
-    {L"apps", kTabApps, kTabApps},
+    {L"focus", kTabFocus, kTabFocus},                   {L"water", kTabWater, kTabWater},
+    {L"mirror", kTabMirror, kTabMirror},                {L"apps", kTabApps, kTabApps},
 };
 
 inline bool PageOn(std::wstring_view k, const PageSwitches& s) {
@@ -82,6 +83,7 @@ inline bool PageOn(std::wstring_view k, const PageSwitches& s) {
     if (k == L"note") return s.note;
     if (k == L"focus") return s.focus;
     if (k == L"mirror") return s.mirror;
+    if (k == L"water") return s.water;
     return s.apps;
 }
 
@@ -132,6 +134,7 @@ inline Page PageFor(int context, int id) {
     if (id == kTabFocus) return Page::Focus;
     if (id == kTabApps) return Page::Apps;
     if (id == kTabMirror) return Page::Mirror;
+    if (id == kTabWater) return Page::Water;
     if (context == 0) {
         switch (id) {
             case 0: return Page::Music;
@@ -173,6 +176,7 @@ inline void PageName(Page page, const std::wstring& agentName, std::wstring* fir
         case Page::Focus: *first = L"Focus "; *second = L"Timer"; break;
         case Page::Apps: *first = L"All "; *second = L"Apps"; break;
         case Page::Mirror: *first = L"Mir"; *second = L"ror"; break;
+        case Page::Water: *first = L"Stay "; *second = L"Hydrated"; break;
         case Page::Agent: {
             const std::wstring name = agentName.empty() ? L"Coding Agents" : agentName;
             const size_t space = name.find(L' ');
@@ -200,6 +204,7 @@ inline const wchar_t* TabLabel(Page page) {
         case Page::Focus: return L"Focus";
         case Page::Apps: return L"Apps";
         case Page::Mirror: return L"Mirror";
+        case Page::Water: return L"Water";
     }
     return L"";
 }

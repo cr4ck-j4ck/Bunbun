@@ -331,8 +331,8 @@
     $name: Do Not Disturb status alert
     $description: Shows a status alert card when Do Not Disturb is toggled in the Windows notification panel.
   - NotificationRespectDnD: true
-    $name: Notifications respect Do Not Disturb
-    $description: Suppresses Dynamic Island notification alerts when Windows Do Not Disturb is active.
+    $name: Follow Windows' Do Not Disturb
+    $description: On, the island stays quiet while Windows' Do Not Disturb is on, like Windows does. Off, your apps' notifications still show on the island during Do Not Disturb (Windows itself keeps them quiet).
   - HardwareMonitorModule: true
     $name: Include Hardware Monitor in scroll loop
     $description: Add CPU, GPU, RAM, FPS and Network stats card to mouse-wheel scroll loop.
@@ -585,7 +585,7 @@
       - studio: Studio
   - TuckHotkey: true
     $name: Tuck away (Ctrl+Alt+H)
-    $description: Ctrl+Alt+H, or Tuck away in the right-click menu, hides the island to a thin line at the top of the screen, coloured by what's going on. Point at the line for a moment to bring the island back. It comes back by itself when an agent needs you.
+    $description: Ctrl+Alt+H tucks the island into a thin line at the top of the screen, coloured by what's going on, and pressing it again brings the island back (so does Tuck away in the right-click menu). Point at the line for a moment and the island peeks out until you move away. It comes back by itself when an agent needs you.
   - TuckRevealMs: 450
     $name: Point at the tucked line for
     $description: How long the pointer rests on the tucked line before the island comes back, in milliseconds. Longer helps in games where the mouse passes over the top of the screen.
@@ -692,6 +692,15 @@
       - time: Time only
       - weather: Weather only
       - nothing: Nothing (just the face)
+  - StatusRing: auto
+    $name: Status ring
+    $description: A thin ring beside the clock on the small island, filling up as you go. Auto shows the focus timer while one runs, else today's water when water reminders are on.
+    $options:
+      - auto: Auto
+      - water: Water today
+      - tasks: Tasks done
+      - focus: Focus timer
+      - off: Off
   - HomeTile1: auto
     $name: First Home tile
     $description: Automatic shows your main agent, or the weather when no agent is on. Pick it in Settings, Island pages.
@@ -752,6 +761,27 @@
   - MirrorPage: false
     $name: Mirror page
     $description: A camera preview page for a quick look before a call. The camera only turns on when you press Turn on camera, and off when you leave the page. Nothing is saved.
+  - WaterPage: true
+    $name: Water page
+    $description: A Water page in the scroll loop with today's progress, a + glass button, when the next reminder is due and the last week.
+  - WaterReminders: false
+    $name: Water reminders
+    $description: Reminds you to drink, spread across your active hours. A reminder comes when you've fallen a glass behind your goal's pace, at least 20 minutes after the last one. Drank logs a glass; Later snoozes 15 minutes.
+  - WaterGoalMl: 2000
+    $name: Daily goal (ml)
+    $description: How much water a day.
+  - WaterGlassMl: 250
+    $name: Glass size (ml)
+    $description: How much one glass (one tap on Drank or + glass) counts for.
+  - WaterBottleMl: 0
+    $name: Bottle size (ml)
+    $description: If you drink from a bottle, its size; the island asks you to refill it when it's probably empty. 0 for no bottle.
+  - WaterStartHour: 9
+    $name: Active from (hour)
+    $description: Reminders start at this hour (0 to 23).
+  - WaterEndHour: 21
+    $name: Active until (hour)
+    $description: And stop at this hour (1 to 24). The goal is paced across these hours.
   - FocusPage: true
     $name: Focus page
     $description: A Focus page in the scroll loop with an hours and minutes picker (scroll or click the numbers), 5 / 15 / 25 / 50 minute chips, +5 min, pause and stop.

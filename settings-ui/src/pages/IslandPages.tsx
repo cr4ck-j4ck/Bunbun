@@ -1,7 +1,7 @@
 import { Reorder, useDragControls } from "framer-motion";
 import { call } from "../bridge";
 import {
-  Battery, Bot, CalendarDays, ChevronDown, ChevronUp, Clipboard, CloudSun, Cpu, FolderDown, GripVertical, Home, Camera,
+  Battery, Bot, CalendarDays, ChevronDown, ChevronUp, Clipboard, CloudSun, Cpu, Droplet, FolderDown, GripVertical, Home, Camera,
   LayoutGrid, Link2, ListChecks, Music2, Plus, Quote, RefreshCw, Sparkles, StickyNote, Timer, ToggleRight, X,
 } from "lucide-react";
 import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
@@ -25,6 +25,7 @@ const PAGES: PageInfo[] = [
   { key: "clipboard", name: "Clipboard", desc: "Your last 8 copies; click one to copy it again.", icon: <Clipboard size={16} />, setting: "Bunbun.ClipboardHistory" },
   { key: "note", name: "Quick note", desc: "One note with checkboxes.", icon: <StickyNote size={16} />, setting: "Bunbun.QuickNote" },
   { key: "focus", name: "Focus", desc: "A focus timer with presets.", icon: <Timer size={16} />, setting: "Bunbun.FocusPage" },
+  { key: "water", name: "Water", desc: "Today's water, a + glass button and the week. Reminders are in Features.", icon: <Droplet size={16} />, setting: "Bunbun.WaterPage" },
   { key: "mirror", name: "Mirror", desc: "A camera preview before a call.", icon: <Camera size={16} />, setting: "Bunbun.MirrorPage" },
   { key: "apps", name: "All apps", desc: "Every page, the colour picker and Settings in one grid.", icon: <LayoutGrid size={16} />, setting: "Bunbun.AppsPage" },
 ];

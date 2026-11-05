@@ -22,6 +22,7 @@
 #include "../common/ag_quota.h"   // Bunbun: Antigravity's quota, shared with Linux
 #include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
 #include "../agents/agent_diff.h"      // Bunbun: the approval card's diff lines, shared with Linux
+#include "../common/water.h"           // Bunbun: the water reminder's rules, shared with Linux
 #include "../updater.h"  // Bunbun: one-click updates from the island's update notice
 #include "studio_icons.h"  // Bunbun: Studio page model and icons, shared with the Linux island
 #include <windows.h>
@@ -776,12 +777,15 @@ struct Settings {
     bool musicSwipe = true;
     bool idleEyes = false;  // Bunbun: eyes instead of the mascot beside the clock
     bool idleShowClock = true;    // Bunbun: Bunbun.IdleStripItems
+    int statusRing = 1;           // Bunbun: Bunbun.StatusRing: 0 off, 1 auto, 2 water, 3 tasks, 4 focus
     bool focusPage = true;        // Bunbun: Focus page and guard (studio_module.inc)
     bool appsPage = true;         // Bunbun: All apps page
     int homeTile[3] = {-1, -1, -1};  // Bunbun: Home slots, -1 = automatic (HomeTile order)
     bool bluetoothLowWarning = true;  // Bunbun: heads-up at 20% for connected BT devices
     bool sounds = true;           // Bunbun: chimes (sounds_module.inc)
     bool mirrorPage = false;      // Bunbun: camera preview page
+    bool waterPage = true;        // Bunbun: Water page (Bunbun.WaterPage)
+    bb::water::Settings water;    // Bunbun: the water reminder (Bunbun.Water*)
     bool soundOpenClose = false;
     int soundVolume = 40;
     std::wstring homeLinks;       // Bunbun: "Name|address; ..." under the Home tiles
@@ -898,6 +902,7 @@ struct NotificationSnapshot {
     std::wstring body;
     PixelsRef icon;
     double expiresAt = 0.0;
+    double shownAt = 0.0;  // Bunbun: when it appeared (its lifetime is expiresAt - shownAt)
 };
 
 struct VolumeSnapshot {
@@ -1238,9 +1243,13 @@ struct SharedState {
     DoNotDisturbSnapshot doNotDisturb;
     BatterySnapshot battery;
     MeetingSnapshot meeting;    // Bunbun: calendar link
+    // Bunbun: its events from 6 weeks back to 10 ahead, by start. Shared, so the per-frame
+    // state copy doesn't copy every event (the calendar thread swaps in a new list).
+    std::shared_ptr<const std::vector<CalendarItem>> calendar;
     PrivacyAlertSnapshot privacyAlert;  // Bunbun: "<app> is using your microphone"
     std::vector<TodoItem> todos;        // Bunbun: to-dos (todos_module.inc)
     ReminderSnapshot reminder;          // Bunbun: a reminder that's due
+    WaterSnapshot water;                // Bunbun: today's water (water_module.inc)
     DownloadSnapshot download;  // Bunbun: browser downloads
     ProgressSnapshot progress;
     SystemSnapshot system;
@@ -1406,6 +1415,9 @@ std::mutex g_bluetoothBatteryCacheMutex;
 std::unordered_map<std::wstring, int> g_bluetoothBatteryCache;  // Bluetooth device Id -> last known battery percent (-1 = never learned)
 std::atomic<uint64_t> g_bluetoothConnectGeneration = 0;
 std::atomic<bool> g_isDnDActive = false;
+// Bunbun: until this GetTickCount64(), the media poll keeps the position the scrubber
+// set on release instead of a stale one from the player.
+std::atomic<ULONGLONG> g_seekHoldUntil{0};
 bool FocusModeActive();             // Bunbun: focus_module.inc
 void HoldNotificationForFocus();    // Bunbun: focus_module.inc
 void* g_wnfDndSubscription = nullptr;
@@ -2642,6 +2654,14 @@ void LoadSettings() {
     next.bluetoothLowWarning = Wh_GetIntSetting(L"Bunbun.BluetoothLowWarning") != 0;
     next.sounds = Wh_GetIntSetting(L"Bunbun.Sounds") != 0;
     next.mirrorPage = Wh_GetIntSetting(L"Bunbun.MirrorPage") != 0;
+    // Bunbun: the water reminder and its page.
+    next.waterPage = Wh_GetIntSetting(L"Bunbun.WaterPage") != 0;
+    next.water.reminders = Wh_GetIntSetting(L"Bunbun.WaterReminders") != 0;
+    next.water.goalMl = std::clamp(Wh_GetIntSetting(L"Bunbun.WaterGoalMl"), 250, 8000);
+    next.water.glassMl = std::clamp(Wh_GetIntSetting(L"Bunbun.WaterGlassMl"), 50, 2000);
+    next.water.bottleMl = std::clamp(Wh_GetIntSetting(L"Bunbun.WaterBottleMl"), 0, 5000);
+    next.water.startHour = std::clamp(Wh_GetIntSetting(L"Bunbun.WaterStartHour"), 0, 23);
+    next.water.endHour = std::clamp(Wh_GetIntSetting(L"Bunbun.WaterEndHour"), 1, 24);
     next.soundOpenClose = Wh_GetIntSetting(L"Bunbun.SoundOpenClose") != 0;
     next.soundVolume = Wh_GetIntSetting(L"Bunbun.SoundVolume");
     next.homeLinks = GetStringSettingCopy(L"Bunbun.HomeLinks");
@@ -2664,6 +2684,10 @@ void LoadSettings() {
         for (auto& c : items) c = towlower(c);
         next.idleShowClock = items.empty() || items == L"time-weather" || items == L"time";
         next.idleShowWeather = items.empty() || items == L"time-weather" || items == L"weather";
+        // Bunbun: the ring beside the clock.
+        std::wstring ring = GetStringSettingCopy(L"Bunbun.StatusRing");
+        for (auto& c : ring) c = towlower(c);
+        next.statusRing = ring == L"off" ? 0 : ring == L"water" ? 2 : ring == L"tasks" ? 3 : ring == L"focus" ? 4 : 1;
         std::wstring eye = GetStringSettingCopy(L"Bunbun.EyeColor");
         for (auto& c : eye) c = towlower(c);
         const wchar_t* names[] = {L"mint", L"white", L"blue", L"pink", L"purple", L"yellow"};
@@ -4979,6 +5003,39 @@ BOOL CALLBACK FindAppIconWindowProc(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
+// Bunbun: crops an icon to its visible pixels plus a small margin, square, so a Store
+// app's logo (drawn small inside a big transparent tile) fills the notification's
+// tile like a desktop app's icon does. False when nothing is visible.
+bool TrimTransparentMargin(BitmapPixels* px) {
+    if (!px || px->width == 0 || px->height == 0 || px->bgra.size() < size_t(px->width) * px->height * 4) return false;
+    UINT left = px->width, top = px->height, right = 0, bottom = 0;
+    for (UINT y = 0; y < px->height; ++y)
+        for (UINT x = 0; x < px->width; ++x)
+            if (px->bgra[(size_t(y) * px->width + x) * 4 + 3] > 16) {
+                left = std::min(left, x);
+                right = std::max(right, x);
+                top = std::min(top, y);
+                bottom = std::max(bottom, y);
+            }
+    if (right < left || bottom < top) return false;
+    const UINT side = std::max(right - left, bottom - top) + 1;
+    const UINT pad = side / 10;
+    const UINT out = side + pad * 2;
+    if (out >= std::min(px->width, px->height)) return true;  // already fills its tile
+    const int cx = static_cast<int>(left + right) / 2, cy = static_cast<int>(top + bottom) / 2;
+    const int x0 = cx - static_cast<int>(out) / 2, y0 = cy - static_cast<int>(out) / 2;
+    std::vector<uint8_t> cropped(size_t(out) * out * 4, 0);
+    for (UINT y = 0; y < out; ++y)
+        for (UINT x = 0; x < out; ++x) {
+            const int sx = x0 + static_cast<int>(x), sy = y0 + static_cast<int>(y);
+            if (sx < 0 || sy < 0 || sx >= static_cast<int>(px->width) || sy >= static_cast<int>(px->height)) continue;
+            memcpy(&cropped[(size_t(y) * out + x) * 4], &px->bgra[(size_t(sy) * px->width + sx) * 4], 4);
+        }
+    px->bgra = std::move(cropped);
+    px->width = px->height = out;
+    return true;
+}
+
 PixelsRef FindAppIconByName(const std::wstring& appName, UINT size) {
     PixelsRef pixels;
     if (appName.empty()) {
@@ -5381,13 +5438,18 @@ DWORD WINAPI MediaThreadProc(void*) {
                         const int64_t rawPos = timeline.Position().count();
                         int64_t np = rawPos;
                         int64_t ne = timeline.EndTime().count();
-                        bool npP = (playback.PlaybackStatus() == PlaybackStatus::Playing);
+                        // Bunbun: the status read once (next.playing), so the extrapolation and
+                        // the play state can't disagree for a poll.
+                        bool npP = next.playing;
                         if (npP) {
                             // Position() is the position at LastUpdatedTime, not "now".
+                            // Bunbun: up to an hour old (was 10 s). Browsers and some players
+                            // only update the timeline on a seek or pause; past 10 s the old
+                            // limit fell back to that stale position, a jump back.
                             try {
                                 const auto lastUpdated = timeline.LastUpdatedTime();
                                 const int64_t ageTicks = (winrt::clock::now() - lastUpdated).count();
-                                if (ageTicks > 0 && ageTicks < 10 * 10000000LL) {
+                                if (ageTicks > 0 && ageTicks < 3600 * 10000000LL) {
                                     np = rawPos + ageTicks;
                                 }
                             } catch (...) {
@@ -5398,7 +5460,10 @@ DWORD WINAPI MediaThreadProc(void*) {
                         // Some sources (notably the Spotify desktop app) refresh LastUpdatedTime
                         // without moving Position(), which makes the estimate jump backwards.
                         // Hold off until a second poll confirms it is a real seek.
-                        constexpr int64_t kJitterToleranceTicks = 15000000LL;   // 1.5s
+                        // Bunbun: 0.25 s (was 1.5 s). A smaller step back went straight through,
+                        // and near a line's start the lyrics flicked back a line and forward
+                        // again on the next poll. Steps back under 0.25 s are dropped (below).
+                        constexpr int64_t kJitterToleranceTicks = 2500000LL;    // 0.25s
                         constexpr int64_t kConfirmToleranceTicks = 5000000LL;   // 0.5s
                         const bool sameTrackPlaying =
                             npP && g_state.media.playing && ne == g_state.media.endTicks;
@@ -5429,6 +5494,14 @@ DWORD WINAPI MediaThreadProc(void*) {
                                 }
                             } else {
                                 pendingSeekBaseline = -1;
+                                // Bunbun: a hair behind what we show: keep going forward.
+                                if (np < predictedNow) np = predictedNow;
+                            }
+                            // Bunbun: just after our own seek (the scrubber), a poll may still
+                            // report where the song was; don't let it pull the line back there.
+                            if (g_seekHoldUntil > GetTickCount64()) {
+                                const int64_t d = np - predictedNow;
+                                if ((d < 0 ? -d : d) > kConfirmToleranceTicks) np = predictedNow;
                             }
                         } else {
                             pendingSeekBaseline = -1;
@@ -5867,6 +5940,7 @@ DWORD WINAPI NotificationThreadProc(void*) {
                             seenIds.insert(id);
 
                             if (g_settings.notificationRespectDnD && g_isDnDActive.load()) {
+                                Wh_Log(L"Notification %u: held back, Windows' Do Not Disturb is on.", id);  // Bunbun
                                 continue;
                             }
                             // Bunbun: Focus mode holds notifications back (they stay in Windows'
@@ -5879,6 +5953,7 @@ DWORD WINAPI NotificationThreadProc(void*) {
                             NotificationSnapshot snapshot;
                             snapshot.active = true;
                             snapshot.expiresAt = NowSeconds() + 4.0;
+                            snapshot.shownAt = NowSeconds();  // Bunbun: the pill's animation counts from here
                             auto appInfo = userNotification.AppInfo();
                             auto displayInfo = appInfo.DisplayInfo();
                             snapshot.app = displayInfo.DisplayName().c_str();
@@ -5888,14 +5963,18 @@ DWORD WINAPI NotificationThreadProc(void*) {
                             if (lowerApp.find(L"powershell") != std::wstring::npos ||
                                 lowerApp.find(L"pwsh") != std::wstring::npos ||
                                 lowerApp.find(L"cmd.exe") != std::wstring::npos) {
+                                Wh_Log(L"Notification %u from \"%ls\": skipped (console app).", id, snapshot.app.c_str());  // Bunbun
                                 continue;
                             }
+                            Wh_Log(L"Notification %u from \"%ls\".", id, snapshot.app.c_str());  // Bunbun
                             try {
-                                auto logo = displayInfo.GetLogo({32.0f, 32.0f});
+                                // Bunbun: 64 px, sharp on the pill; Store apps' logos have a wide
+                                // transparent margin, trimmed so the logo fills its tile.
+                                auto logo = displayInfo.GetLogo({64.0f, 64.0f});
                                 std::vector<uint8_t> logoBytes = ReadWinRtStreamBytes(logo);
                                 if (!logoBytes.empty()) {
                                     BitmapPixels decoded;
-                                    if (DecodeImageBytesToPixels(logoBytes, &decoded)) {
+                                    if (DecodeImageBytesToPixels(logoBytes, &decoded) && TrimTransparentMargin(&decoded)) {
                                         snapshot.icon = PixelsRef(std::move(decoded));
                                     }
                                 }
@@ -5921,12 +6000,14 @@ DWORD WINAPI NotificationThreadProc(void*) {
                             if (snapshot.title.empty()) {
                                 snapshot.title = snapshot.app.empty() ? L"New notification" : snapshot.app;
                             }
-                            if (!snapshot.body.empty()) {
-                                snapshot.title += L" - " + snapshot.body;
-                            }
-                            if (snapshot.title.size() > 120) {
-                                snapshot.title.resize(120);
-                                snapshot.title += L"...";
+                            // Bunbun: the title and the message on lines of their own (they
+                            // were joined with " - " into one scrolling line).
+                            for (std::wstring* s : {&snapshot.title, &snapshot.body}) {
+                                for (wchar_t& c : *s) if (c == L'\n' || c == L'\r') c = L' ';
+                                if (s->size() > 120) {
+                                    s->resize(119);
+                                    *s += L'\x2026';
+                                }
                             }
 
                             {
@@ -6456,6 +6537,7 @@ DWORD WINAPI BluetoothThreadProc(void*) {
                 g_state.notification.body = std::to_wstring(pct) + L"% left \x00B7 charge it soon";
                 g_state.notification.icon = {};
                 g_state.notification.expiresAt = NowSeconds() + 5.0;
+                g_state.notification.shownAt = NowSeconds();  // Bunbun: the pill's animation counts from here
             }
             g_layoutDirty = true;
             if (HWND hwnd = g_hwnd) PostMessageW(hwnd, WM_APP_NEW_EVENT, 0, 0);
@@ -7155,6 +7237,8 @@ void FormatBitRate(wchar_t (&buf)[N], float mbps, bool fresh) {
 #include "modules/downloads_module.inc"
 // Bunbun: to-dos and reminders.
 #include "modules/todos_module.inc"
+// Bunbun: the water reminder (it shows the reminder pill above).
+#include "modules/water_module.inc"
 
 // ---- Endpoint volume notifications ----
 // Event-driven rather than polled: a 1s poll turned a held volume key into
@@ -7875,6 +7959,7 @@ void CaptureShellNotification(HWND hwnd) {
     notification.app = L"Notification";
     notification.title = title;
     notification.expiresAt = NowSeconds() + 4.0;
+    notification.shownAt = NowSeconds();  // Bunbun: the pill's animation counts from here
     // Fetch a 64px icon to ensure crisp rendering inside the pill
     notification.icon = GetWindowIconPixels(hwnd, 64);
 
@@ -9715,6 +9800,7 @@ struct IdleStripMetrics {
     bool hasWeather = false;
     bool hasPrivacy = false;
     float privacyReserve = 0.0f;  // Bunbun: width kept clear for the privacy dots
+    float ringWidth = 0.0f;       // Bunbun: the status ring beside the clock (gap included)
     float totalWidth = IdleStripLayout::kMinWidth;
 };
 
@@ -9854,6 +9940,10 @@ class Renderer {
                 const std::optional<Activity>& secondary, float width, float height,
                 float nudge, bool hover, bool pinned, double now) {
         EnsureTextFormats(settings.sizeScale, settings.fontFamily, settings.textScale);
+        // Bunbun: the agent card's buttons belong to this frame only; DrawAgent records
+        // them again whenever it draws. They used to outlive the card, so a pill that
+        // took its place (a water reminder's Drank) sent its clicks to a stale Reply.
+        g_agentButtons.clear();
 
         width = std::max(width, 0.0f);
         if (UsesFixedStage(settings)) {
@@ -10131,6 +10221,38 @@ class Renderer {
     // DrawIdleDashboard calls this too and lays the slots out from the same
     // numbers, so the pill can never be sized for a clock width the painter is
     // not using.
+    // Bunbun: the status ring beside the clock (Bunbun.StatusRing). Its fill (0..1)
+    // and colour, or false for no ring: the focus timer (left of the session), today's
+    // water against the goal, or the to-dos ticked off. Auto: focus while a timer
+    // runs, else water when its reminders are on.
+    static constexpr float kStatusRingSize = 15.0f, kStatusRingGap = 8.0f;
+    bool StatusRing(const SharedState& state, const Settings& settings, double now, float* frac, D2D1_COLOR_F* col) {
+        const int mode = settings.statusRing;
+        if (mode == 0) return false;
+        const TimerSnapshot& tm = state.timer;
+        if ((mode == 1 || mode == 4) && tm.active && tm.totalSeconds > 0) {
+            const double left = tm.running ? std::max(0.0, tm.endsAt - now) : tm.remainingAtPause;
+            *frac = Clamp(static_cast<float>(left / tm.totalSeconds), 0.0f, 1.0f);
+            *col = tm.isBreak ? D2D1::ColorF(0x30d158) : material_.accent;
+            return true;
+        }
+        if ((mode == 1 && settings.water.reminders) || mode == 2) {
+            const WaterSnapshot& w = state.water;
+            if (w.goalMl <= 0) return false;
+            *frac = Clamp(static_cast<float>(w.takenMl) / w.goalMl, 0.0f, 1.0f);
+            *col = D2D1::ColorF(0x5ac8fa);
+            return true;
+        }
+        if (mode == 3 && !state.todos.empty()) {
+            int done = 0;
+            for (const TodoItem& t : state.todos) done += t.done ? 1 : 0;
+            *frac = static_cast<float>(done) / static_cast<float>(state.todos.size());
+            *col = D2D1::ColorF(0x30d158);
+            return true;
+        }
+        return false;
+    }
+
     IdleStripMetrics MeasureIdleStrip(const SharedState& state, const Settings& settings,
                                       double now) {
         // Idempotent and cheap when nothing changed, but necessary here: textScale
@@ -10169,8 +10291,13 @@ class Renderer {
 
         metrics.privacyReserve = PrivacyDotsReserve(state, settings);  // Bunbun: one slot per lit dot
         metrics.hasPrivacy = metrics.privacyReserve > 0.0f;
+        float ringFrac = 0.0f;
+        D2D1_COLOR_F ringCol{};
+        // With no clock ("just the face") the ring stands beside the face on its own.
+        if (StatusRing(state, settings, now, &ringFrac, &ringCol))
+            metrics.ringWidth = (metrics.clockWidth > 0.0f ? kStatusRingGap : 0.0f) + kStatusRingSize;  // Bunbun
 
-        float total = IdleStripLayout::kPadX * 2.0f + metrics.clockWidth;
+        float total = IdleStripLayout::kPadX * 2.0f + metrics.clockWidth + metrics.ringWidth;
         if (metrics.hasWeather) {
             total += metrics.clockWidth > 0.0f  // Bunbun: no divider without a clock
                 ? IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth + metrics.weatherWidth
@@ -11350,7 +11477,9 @@ class Renderer {
         // hero code still runs (it fills the caches the grid uses) but draws into
         // an empty clip.
         const bool upNext = state.meeting.valid;
-        if (upNext) target_->PushAxisAlignedClip(D2D1::RectF(0, 0, 0, 0), D2D1_ANTIALIAS_MODE_ALIASED);
+        // Bunbun: the week view (wide pages) takes the whole width, so the card stands aside.
+        const bool weekFull = (rect.right - rect.left) >= 440.0f * scale && g_calView == 1;
+        if (upNext || weekFull) target_->PushAxisAlignedClip(D2D1::RectF(0, 0, 0, 0), D2D1_ANTIALIAS_MODE_ALIASED);
         DrawCard(hero, 12.0f * scale);
 
         // The accent is the album-art / system accent like everywhere else. This
@@ -11454,23 +11583,114 @@ class Renderer {
                                mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
 
-        if (upNext) {
+        if (upNext || weekFull) {
             target_->PopAxisAlignedClip();
-            DrawCalendarUpNext(state, hero, scale);
+            if (!weekFull) DrawCalendarUpNext(state, hero, scale);
         }
 
-        // ── Month grid ───────────────────────────────────────────────────────
-        // Bunbun: on a wide page (the Studio layout), a roomier grid and an agenda
-        // column on the right instead of empty space.
+        // ── Month grid and week (Bunbun: both views, moved with ‹ ›) ─────────
+        // On a wide page (the Studio layout), a roomier grid and an agenda column on
+        // the right, and a Week view; a narrow one keeps the month. A row on top
+        // names the month or week shown, with ‹ › and (wide) Month | Week.
         const bool wideCalendar = (rect.right - rect.left) >= 440.0f * scale;
-        const float gridStart = rect.left + (wideCalendar ? 128.0f : 134.0f) * scale;
-        const float gridTop = rect.top + 16.0f * scale;
+        const bool weekView = wideCalendar && g_calView == 1;
+        // The week view has the whole width: the date card stands aside (see the hero).
+        const float gridStart = weekView ? rect.left + 22.0f * scale : rect.left + (wideCalendar ? 128.0f : 134.0f) * scale;
+        const float navTop = rect.top + 12.0f * scale, navH = 20.0f * scale;
+        const float gridTop = navTop + navH + 4.0f * scale;
         const float colW = (wideCalendar ? 30.0f : 28.0f) * scale;
         const float headerH = 18.0f * scale;
+        const float areaRight = rect.right - 4.0f * scale;
         const int firstDay = calendarCachedFirstDay_;
+        IDWriteTextFormat* gridFmt = calGridFormat_ ? calGridFormat_.Get() : boldTextFormat_.Get();
 
-        const int startDayIdx = (GetDayOfWeek(local.wYear, local.wMonth, 1) - firstDay + 7) % 7;
-        const int monthDays = GetDaysInMonth(local.wYear, local.wMonth);
+        // Days since 1970 in local time, so events and to-dos land on the right day.
+        auto dayOf = [](double epoch) -> int64_t {
+            const time_t t = static_cast<time_t>(epoch);
+            tm lt{};
+            localtime_s(&lt, &t);
+            return bb::ics::DaysFromCivil(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
+        };
+        const int64_t today = bb::ics::DaysFromCivil(local.wYear, local.wMonth, local.wDay);
+        const int64_t todayWeek = today - (GetDayOfWeek(local.wYear, local.wMonth, local.wDay) - firstDay + 7) % 7;
+        // Busy days: meetings from the calendar link, and to-dos due that day.
+        std::map<int64_t, std::pair<int, int>> busy;
+        if (state.calendar)
+            for (const CalendarItem& e : *state.calendar) ++busy[dayOf(e.startsAt)].first;
+        for (const TodoItem& t : state.todos)
+            if (!t.done && t.due > 0.0) ++busy[dayOf(t.due)].second;
+        ComPtr<ID2D1SolidColorBrush> green;
+        target_->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.82f, 0.35f, 0.95f * settingsOpacity_), &green);
+
+        // The month shown: today's moved by g_calMonthOffset.
+        int showY = local.wYear, showM = local.wMonth + (weekView ? 0 : g_calMonthOffset);
+        while (showM < 1) { showM += 12; --showY; }
+        while (showM > 12) { showM -= 12; ++showY; }
+        const int64_t weekStart = todayWeek + 7LL * g_calWeekOffset;
+
+        // ── The row on top: ‹ title ›, then Month | Week ──
+        const float navRight = wideCalendar ? areaRight : gridStart + 7.0f * colW;
+        auto navButton = [&](D2D1_RECT_F b, const wchar_t* label, StudioAction action, int arg, bool on) {
+            const float hover = SHover(action, arg);
+            if (on || hover > 0.01f)
+                SFillRound(b, (b.bottom - b.top) * 0.5f, D2D1::ColorF(1, 1, 1, on ? 0.16f : 0.10f * hover));
+            textBrush_->SetOpacity(on ? 1.0f : 0.8f);
+            DrawAgentText(label, b, smallTextFormat_.Get(), textBrush_.Get(), true);
+            SHit(b, action, arg);
+        };
+        float chipsLeft = navRight;
+        if (wideCalendar) {
+            const float cw = 48.0f * scale;
+            chipsLeft = navRight - cw * 2.0f;
+            navButton(D2D1::RectF(chipsLeft, navTop, chipsLeft + cw, navTop + navH), L"Month", StudioAction::CalView, 0, !weekView);
+            navButton(D2D1::RectF(chipsLeft + cw, navTop, navRight, navTop + navH), L"Week", StudioAction::CalView, 1, weekView);
+        }
+        std::wstring title;
+        {
+            wchar_t buf[64] = {};
+            if (!weekView) {
+                SYSTEMTIME st{};
+                st.wYear = static_cast<WORD>(showY);
+                st.wMonth = static_cast<WORD>(showM);
+                st.wDay = 1;
+                GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, L"MMMM yyyy", buf, ARRAYSIZE(buf), nullptr);
+                title = buf;
+            } else {
+                auto label = [&](int64_t days, const wchar_t* fmt) {
+                    int y = 0, m = 0, d = 0;
+                    bb::ics::CivilFromDays(days, &y, &m, &d);
+                    SYSTEMTIME st{};
+                    st.wYear = static_cast<WORD>(y);
+                    st.wMonth = static_cast<WORD>(m);
+                    st.wDay = static_cast<WORD>(d);
+                    wchar_t b[32] = {};
+                    GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, fmt, b, ARRAYSIZE(b), nullptr);
+                    return std::wstring(b);
+                };
+                title = label(weekStart, L"d MMM") + L" \x2013 " + label(weekStart + 6, L"d MMM");
+            }
+        }
+        const float arrowW = 22.0f * scale;
+        // The title spans the grid (the week view: the whole width before the chips).
+        const float titleRight = (weekView ? chipsLeft - 8.0f * scale : gridStart + 7.0f * colW) - arrowW;
+        navButton(D2D1::RectF(gridStart, navTop, gridStart + arrowW, navTop + navH), L"\x2039", StudioAction::CalPrev, 0, false);
+        navButton(D2D1::RectF(titleRight, navTop, titleRight + arrowW, navTop + navH), L"\x203A", StudioAction::CalNext, 0, false);
+        const bool moved = weekView ? g_calWeekOffset != 0 : g_calMonthOffset != 0;
+        const D2D1_RECT_F titleRect = D2D1::RectF(gridStart + arrowW, navTop, titleRight, navTop + navH);
+        textBrush_->SetOpacity(0.95f);
+        DrawAgentText(title, titleRect, boldTextFormat_.Get(), textBrush_.Get(), true);
+        if (moved) SHit(titleRect, StudioAction::CalToday);  // a click on the title goes back to today
+
+        if (weekView) {
+            DrawCalendarWeek(state, D2D1::RectF(gridStart, gridTop, areaRight, rect.bottom - 10.0f * scale), weekStart, today,
+                             firstDay, scale, accent.Get(), green.Get(), dayOf);
+            textBrush_->SetOpacity(0.96f);
+            mutedBrush_->SetOpacity(0.75f);
+            return;
+        }
+
+        const int startDayIdx = (GetDayOfWeek(showY, showM, 1) - firstDay + 7) % 7;
+        const int monthDays = GetDaysInMonth(showY, showM);
         const int rowCount = (startDayIdx + monthDays + 6) / 7;  // 5 or 6
 
         // Row height is derived from the space actually available rather than
@@ -11478,10 +11698,8 @@ class Renderer {
         // island, so the last row was silently clipped by the island mask --
         // visible every month that starts late in the week.
         const float datesTop = gridTop + headerH + 7.0f * scale;
-        const float gridBottom = rect.bottom - 14.0f * scale;
+        const float gridBottom = rect.bottom - 10.0f * scale;
         const float rowH = (gridBottom - datesTop) / static_cast<float>(rowCount > 0 ? rowCount : 1);
-
-        IDWriteTextFormat* gridFmt = calGridFormat_ ? calGridFormat_.Get() : boldTextFormat_.Get();
 
         // Weekday initials are uniformly quiet. They used to paint S and S in the
         // accent, which put three competing accent marks in the grid (both
@@ -11508,19 +11726,22 @@ class Renderer {
         // Today's marker is sized from the cell it has to live in, so it stays a
         // circle around the figure instead of a fixed 12px disc that swallowed
         // the digits once the rows got shorter.
-        const float markerR = std::min(colW, rowH) * 0.5f - 1.5f * scale;
+        const float markerR = std::min(colW, rowH) * 0.5f - 2.5f * scale;
 
         int row = 0;
         int col = startDayIdx;
         for (int d = 1; d <= monthDays; ++d) {
             const D2D1_RECT_F cell = D2D1::RectF(gridStart + col * colW, datesTop + row * rowH,
                                                  gridStart + (col + 1) * colW, datesTop + (row + 1) * rowH);
+            // The figure sits a little high, leaving room for the busy dots under it.
+            const D2D1_RECT_F figure = D2D1::RectF(cell.left, cell.top - 2.0f * scale, cell.right, cell.bottom - 2.0f * scale);
             const std::wstring dayText = std::to_wstring(d);
             const int weekday = (firstDay + col) % 7;
+            const int64_t days = bb::ics::DaysFromCivil(showY, showM, d);
 
-            if (d == local.wDay) {
+            if (days == today) {
                 target_->FillEllipse(
-                    D2D1::Ellipse(D2D1::Point2F(cell.left + colW * 0.5f, cell.top + rowH * 0.5f),
+                    D2D1::Ellipse(D2D1::Point2F(cell.left + colW * 0.5f, cell.top + rowH * 0.5f - 2.0f * scale),
                                   markerR, markerR),
                     accent.Get());
                 // Today's figure is drawn against the accent fill, so it needs the
@@ -11528,18 +11749,32 @@ class Renderer {
                 // other days use.
                 textBrush_->SetOpacity(1.0f);
                 target_->DrawTextW(dayText.c_str(), static_cast<UINT32>(dayText.size()), gridFmt,
-                                   cell, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+                                   figure, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             } else if (weekday == 0 || weekday == 6) {
                 // Weekends recede instead of taking the accent, leaving today as
                 // the only accented thing in the grid.
                 mutedBrush_->SetOpacity(0.62f);
                 target_->DrawTextW(dayText.c_str(), static_cast<UINT32>(dayText.size()), gridFmt,
-                                   cell, mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+                                   figure, mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             } else {
                 textBrush_->SetOpacity(0.88f);
                 target_->DrawTextW(dayText.c_str(), static_cast<UINT32>(dayText.size()), gridFmt,
-                                   cell, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+                                   figure, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
+            // Bunbun: busy days: a dot per meeting (accent) and per to-do due (green), up to 3.
+            const auto it = busy.find(days);
+            if (it != busy.end()) {
+                const int meetings = std::min(it->second.first, 3), todos = std::min(it->second.second, 3 - meetings);
+                const int n = meetings + todos;
+                const float r = 1.7f * scale, gap = 4.6f * scale;
+                const float y = cell.bottom - 3.0f * scale;
+                float x = (cell.left + cell.right) * 0.5f - (n - 1) * gap * 0.5f;
+                for (int k = 0; k < n; ++k, x += gap)
+                    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), r, r), k < meetings ? accent.Get() : green.Get());
+            }
+            // A day opens its week (wide pages, which have the week view).
+            if (wideCalendar)
+                SHit(cell, StudioAction::CalOpenWeek, static_cast<int>((days - todayWeek >= 0 ? days - todayWeek : days - todayWeek - 6) / 7));
 
             if (++col > 6) { col = 0; ++row; }
         }
@@ -11548,8 +11783,74 @@ class Renderer {
         mutedBrush_->SetOpacity(0.75f);
         if (wideCalendar) {  // Bunbun
             const float agendaLeft = gridStart + 7.0f * colW + 14.0f * scale;
-            DrawCalendarAgenda(state, D2D1::RectF(agendaLeft, rect.top + 16.0f * scale, rect.right - 4.0f * scale,
-                                                  rect.bottom - 14.0f * scale), now);
+            DrawCalendarAgenda(state, D2D1::RectF(agendaLeft, gridTop, areaRight, rect.bottom - 14.0f * scale), now);
+        }
+    }
+
+    // Bunbun: the Calendar page's week: seven columns from `weekStart` (days since
+    // 1970), each with its day, then that day's events (time and title) and the
+    // to-dos due, as many as fit, and "+N more".
+    template <typename DayOf>
+    void DrawCalendarWeek(const SharedState& state, D2D1_RECT_F area, int64_t weekStart, int64_t today, int firstDay,
+                          float scale, ID2D1Brush* accent, ID2D1Brush* green, const DayOf& dayOf) {
+        const float colW = (area.right - area.left) / 7.0f;
+        const float headH = 34.0f * scale, rowH = 30.0f * scale;  // two lines: the time, then the title
+        const int rowsFit = std::max(1, static_cast<int>((area.bottom - area.top - headH - 2.0f * scale) / (rowH + 2.0f * scale)));
+        for (int i = 0; i < 7; ++i) {
+            const int64_t days = weekStart + i;
+            int y = 0, m = 0, d = 0;
+            bb::ics::CivilFromDays(days, &y, &m, &d);
+            const float x0 = area.left + i * colW, x1 = x0 + colW - 3.0f * scale;
+            const bool isToday = days == today;
+            if (isToday) SFillRound(D2D1::RectF(x0, area.top, x1, area.bottom), 10.0f * scale, D2D1::ColorF(1, 1, 1, 0.05f));
+            mutedBrush_->SetOpacity(0.6f);
+            DrawAgentText(calendarCachedInitials_[(firstDay + i) % 7], D2D1::RectF(x0, area.top + 2.0f * scale, x1, area.top + 15.0f * scale),
+                          smallTextFormat_.Get(), mutedBrush_.Get(), true);
+            const D2D1_POINT_2F c = D2D1::Point2F((x0 + x1) * 0.5f, area.top + 25.0f * scale);
+            if (isToday) target_->FillEllipse(D2D1::Ellipse(c, 10.0f * scale, 10.0f * scale), accent);
+            textBrush_->SetOpacity(isToday ? 1.0f : 0.9f);
+            DrawAgentText(std::to_wstring(d), D2D1::RectF(x0, c.y - 9.0f * scale, x1, c.y + 9.0f * scale), smallTextFormat_.Get(),
+                          textBrush_.Get(), true);
+
+            // The day's items: events first (by start), then the to-dos due.
+            struct Row { std::wstring when, text; bool todo; };
+            std::vector<Row> rows;
+            auto clock = [](double epoch) {
+                const time_t t = static_cast<time_t>(epoch);
+                tm lt{};
+                localtime_s(&lt, &t);
+                wchar_t hm[8];
+                swprintf_s(hm, L"%02d:%02d", lt.tm_hour, lt.tm_min);
+                return std::wstring(hm);
+            };
+            static const std::vector<CalendarItem> kNone;
+            for (const CalendarItem& e : state.calendar ? *state.calendar : kNone)
+                if (dayOf(e.startsAt) == days)
+                    rows.push_back({e.endsAt - e.startsAt >= 23 * 3600.0 ? std::wstring(L"All day") : clock(e.startsAt), e.title, false});
+            for (const TodoItem& t : state.todos)
+                if (!t.done && t.due > 0.0 && dayOf(t.due) == days) rows.push_back({clock(t.due), t.text, true});
+            float ry = area.top + headH;
+            const int shown = static_cast<int>(rows.size()) > rowsFit ? rowsFit - 1 : static_cast<int>(rows.size());
+            for (int k = 0; k < shown; ++k) {
+                const D2D1_RECT_F chip = D2D1::RectF(x0 + 2.0f * scale, ry, x1 - 2.0f * scale, ry + rowH);
+                target_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(chip.left, chip.top + 3.0f * scale, chip.left + 2.5f * scale,
+                                                                            chip.bottom - 3.0f * scale),
+                                                                1.2f * scale, 1.2f * scale),
+                                              rows[static_cast<size_t>(k)].todo ? green : accent);
+                const Row& row = rows[static_cast<size_t>(k)];
+                mutedBrush_->SetOpacity(0.6f);
+                DrawEllipsizedText(row.when, D2D1::RectF(chip.left + 6.0f * scale, chip.top + 1.0f * scale, chip.right, chip.top + 14.0f * scale),
+                                   smallTextFormat_.Get(), mutedBrush_.Get());
+                textBrush_->SetOpacity(0.92f);
+                DrawEllipsizedText(row.text, D2D1::RectF(chip.left + 6.0f * scale, chip.top + 14.0f * scale, chip.right, chip.bottom),
+                                   smallTextFormat_.Get(), textBrush_.Get());
+                ry += rowH + 2.0f * scale;
+            }
+            if (shown < static_cast<int>(rows.size())) {
+                mutedBrush_->SetOpacity(0.6f);
+                DrawEllipsizedText(L"+" + std::to_wstring(rows.size() - shown) + L" more",
+                                   D2D1::RectF(x0 + 8.0f * scale, ry + 1.0f * scale, x1, ry + rowH), smallTextFormat_.Get(), mutedBrush_.Get());
+            }
         }
     }
 
@@ -12839,7 +13140,13 @@ class Renderer {
             textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         }
 
-        if (state.lyrics.fetching) {
+        // Bunbun: the previous song's lyrics, while the new song's are still on their way
+        // (the fetch waits ~1.5 s for the track to settle), read as "fetching" rather
+        // than being shown against the new song's position.
+        const bool otherSong = state.lyrics.hasData && !state.lyrics.matchedTitle.empty() &&
+                               (state.lyrics.matchedTitle != state.media.title ||
+                                state.lyrics.matchedArtist != state.media.artist);
+        if (state.lyrics.fetching || otherSong) {
             const float pulse = 0.55f + 0.25f * std::sin(static_cast<float>(now * 2.0 * 3.14159265 * 0.6));
             mutedBrush_->SetOpacity(pulse);
             const wchar_t* msg = Loc(L"Fetching lyrics...");
@@ -12869,9 +13176,9 @@ class Renderer {
             // The reported position lags what you hear by a bit; nudge it forward.
             // Raise this if lyrics feel late, lower it if they feel early.
             const double kLyricsLookaheadSec = LyricsLookaheadSec();  // 0.49 baseline + speaker/Bluetooth offset
-            if (state.media.playing) {
-                currentPositionSec += kLyricsLookaheadSec;
-            }
+            // Bunbun: paused too (it was only while playing), or pausing pulled the
+            // position back by the lookahead and the line could drop back one.
+            currentPositionSec += kLyricsLookaheadSec;
             const int64_t posMs = std::max<int64_t>(0, static_cast<int64_t>(currentPositionSec * 1000.0));
 
             int currentIndex = 0;
@@ -13455,7 +13762,7 @@ class Renderer {
             const float innerRight =
                 rect.right - IdleStripLayout::kPadX * scale - privacyReserve;
 
-            float blockWidth = idleMetrics.clockWidth;
+            float blockWidth = idleMetrics.clockWidth + idleMetrics.ringWidth * scale;  // Bunbun: + the status ring
             const bool idleDivider = idleMetrics.hasWeather && idleMetrics.clockWidth > 0.0f;  // Bunbun
             if (idleMetrics.hasWeather) {
                 blockWidth += (idleDivider ? (IdleStripLayout::kSlotGap * 2.0f +
@@ -13480,6 +13787,18 @@ class Renderer {
                                    timeRect, textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
             slotX += idleMetrics.clockWidth;
+            // Bunbun: the status ring, right after the clock.
+            if (idleMetrics.ringWidth > 0.0f) {
+                float ringFrac = 0.0f;
+                D2D1_COLOR_F ringCol{};
+                if (StatusRing(state, settings, now, &ringFrac, &ringCol)) {
+                    EnsureRoundStroke();
+                    const float d = kStatusRingSize * scale;
+                    const D2D1_POINT_2F c = D2D1::Point2F(slotX + (idleMetrics.clockWidth > 0.0f ? kStatusRingGap * scale : 0.0f) + d * 0.5f, (rect.top + rect.bottom) * 0.5f);
+                    bb::studio::Ring(SPen(), c, d * 0.5f - 1.2f * scale, 2.4f * scale, ringFrac, ringCol, settingsOpacity_);
+                }
+                slotX += idleMetrics.ringWidth * scale;
+            }
 
             if (idleMetrics.hasWeather && !idleDivider) {
                 wchar_t weatherOnly[32] = {};
@@ -14841,9 +15160,8 @@ class Renderer {
             if (state.media.playing && state.media.lastUpdatedTicks > 0) {
                 posSec += (GetTickCount64() - state.media.lastUpdatedTicks) / 1000.0;
             }
-            if (state.media.playing) {
-                posSec += LyricsLookaheadSec();
-            }
+            // Bunbun: paused too, as in the Lyrics tab, so pausing doesn't drop a line.
+            posSec += LyricsLookaheadSec();
             const int64_t posMs = std::max<int64_t>(0, static_cast<int64_t>(posSec * 1000.0));
 
             int lo = 0;
@@ -15122,9 +15440,8 @@ class Renderer {
             if (state.media.playing && state.media.lastUpdatedTicks > 0) {
                 posSec += (GetTickCount64() - state.media.lastUpdatedTicks) / 1000.0;
             }
-            if (state.media.playing) {
-                posSec += LyricsLookaheadSec();
-                            }
+            // Bunbun: paused too, as in the Lyrics tab, so pausing doesn't drop a line.
+            posSec += LyricsLookaheadSec();
                             const int64_t posMs = std::max<int64_t>(0, static_cast<int64_t>(posSec * 1000.0));
 
             int lo = 0;
@@ -15306,9 +15623,8 @@ class Renderer {
             if (state.media.playing && state.media.lastUpdatedTicks > 0) {
                 posSec += (GetTickCount64() - state.media.lastUpdatedTicks) / 1000.0;
             }
-            if (state.media.playing) {
-                posSec += LyricsLookaheadSec();
-                            }
+            // Bunbun: paused too, as in the Lyrics tab, so pausing doesn't drop a line.
+            posSec += LyricsLookaheadSec();
                             posMs = std::max<int64_t>(0, static_cast<int64_t>(posSec * 1000.0));
 
             // Binary search for the last line whose timestamp has passed.
@@ -18198,76 +18514,65 @@ class Renderer {
     }
 
     void DrawNotification(const SharedState& state, D2D1_RECT_F rect) {
-        if (rect.bottom - rect.top < 48.0f || rect.right - rect.left < 120.0f) return;
+        // Bunbun: Samsung-style. ActivityForKind grows the island, in its own shape, from
+        // the icon alone, to the title, to two lines (and back as it goes); what
+        // is drawn here follows the island's real size, so words only show once there's
+        // room for them and the springs carry the motion.
+        const float w = rect.right - rect.left, h = rect.bottom - rect.top;
+        if (h < 16.0f || w < 16.0f) return;
         const double now = NowSeconds();
-        const float ttl = 4.0f;
+        // Bunbun: its real lifetime (the update notice lasts 8 s, a Bluetooth alert 5 s).
+        const NotificationSnapshot& note = state.notification;
+        const float ttl = note.shownAt > 0.0 ? std::max(0.5f, static_cast<float>(note.expiresAt - note.shownAt)) : 4.0f;
         const float remaining = Clamp(static_cast<float>(state.notification.expiresAt - now), 0.0f, ttl);
-        const float progress = remaining / ttl;
-
         const float cy = (rect.top + rect.bottom) * 0.5f;
-        // Apple DI: app icon is a large iOS-style rounded square.
-        const float iconSz = (rect.bottom - rect.top) - 16.0f;
-        D2D1_RECT_F badge = D2D1::RectF(rect.left + 14, cy - iconSz * 0.5f,
-                                        rect.left + 14 + iconSz, cy + iconSz * 0.5f);
-        const float br = iconSz * 0.35f;  // Softer iOS superellipse-like squircle.
 
-        // Icon background plate.
+        // The app's icon in a circle: centred while the island is narrow, then at the left.
+        const float iconSz = std::min(h - 12.0f, 34.0f);
+        const float iconCx = rect.left + std::min(w * 0.5f, 12.0f + iconSz * 0.5f);
+        const D2D1_RECT_F badge = D2D1::RectF(iconCx - iconSz * 0.5f, cy - iconSz * 0.5f, iconCx + iconSz * 0.5f, cy + iconSz * 0.5f);
         ComPtr<ID2D1SolidColorBrush> plateBrush;
         target_->CreateSolidColorBrush(material_.raisedStrong, &plateBrush);
-        target_->FillRoundedRectangle(D2D1::RoundedRect(badge, br, br), plateBrush.Get());
-
+        target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(iconCx, cy), iconSz * 0.5f, iconSz * 0.5f), plateBrush.Get());
         if (state.notification.icon) {
-            DrawRoundedBitmapPixels(*state.notification.icon, badge, br,
+            const float inset = iconSz * 0.16f;  // the logo inside its circle
+            const D2D1_RECT_F logo = D2D1::RectF(badge.left + inset, badge.top + inset, badge.right - inset, badge.bottom - inset);
+            DrawRoundedBitmapPixels(*state.notification.icon, logo, (logo.right - logo.left) * 0.22f,
                                     notificationIconBitmap_, notificationIconGeneration_, 1.0f);
-
-            // Draw a red dot (badge) at the top-right of the app icon
-            ComPtr<ID2D1SolidColorBrush> badgeColor;
-            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.23f, 0.18f, 1.0f), &badgeColor);
-
-            const float dotR = iconSz * 0.13f;
-            const float dotX = badge.right - dotR * 0.5f;
-            const float dotY = badge.top + dotR * 0.5f;
-
-            target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dotX, dotY), dotR, dotR), badgeColor.Get());
-
-            ComPtr<ID2D1SolidColorBrush> badgeBorder;
-            target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &badgeBorder);
-            target_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(dotX, dotY), dotR, dotR), badgeBorder.Get(), 0.9f);
-        } else {
-            const wchar_t* glyph = usingFluentIcons_ ? L"\uEA8F" : L"\uE7E7";
+        } else if (iconFormat_) {
+            const wchar_t* glyph = usingFluentIcons_ ? L"" : L"";
             textBrush_->SetOpacity(0.95f);
-            if (iconFormat_) {
-                iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                iconFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                target_->DrawTextW(glyph,
-                                   static_cast<UINT32>(wcslen(glyph)), iconFormat_.Get(), badge,
-                                   textBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                iconFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            }
-            textBrush_->SetOpacity(0.90f);
+            iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            iconFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            target_->DrawTextW(glyph, static_cast<UINT32>(wcslen(glyph)), iconFormat_.Get(), badge, textBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            iconFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         }
 
-        const float tx = badge.right + 14.0f;
-        const bool showBar = g_settings.statusCountdownProgress;
-        D2D1_RECT_F appRect = showBar
-            ? D2D1::RectF(tx, cy - 18.0f, rect.right - 14.0f, cy - 2.0f)
-            : D2D1::RectF(tx, cy - 16.0f, rect.right - 14.0f, cy - 1.0f);
-        mutedBrush_->SetOpacity(0.75f);
-        target_->DrawTextW(state.notification.app.c_str(),
-                           static_cast<UINT32>(state.notification.app.size()),
-                           smallTextFormat_.Get(), appRect, mutedBrush_.Get(),
-                           D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-        D2D1_RECT_F titleRect = showBar
-            ? D2D1::RectF(tx, cy - 2.0f, rect.right - 14.0f, cy + 15.0f)
-            : D2D1::RectF(tx, cy - 1.0f, rect.right - 14.0f, cy + 16.0f);
-        textBrush_->SetOpacity(0.95f);
-        DrawMarqueeText(state.notification.title.empty() ? L"Notification" : state.notification.title,
-                        titleRect, textFormat_.Get(), textBrush_.Get(), now, 28.0f, marqueeNotificationCache_);
-        textBrush_->SetOpacity(0.90f);
-
-        DrawCountdownProgress(tx, rect.right - 14.0f, rect.bottom - 6.0f, progress);
+        // The words, as the island makes room: the title once it's wide enough, the
+        // second line ("App · message") once it's two lines tall.
+        const float titleIn = Clamp((w - 190.0f) / 70.0f, 0.0f, 1.0f);
+        const float twoLine = Clamp((h - 56.0f) / 10.0f, 0.0f, 1.0f);
+        if (titleIn > 0.0f) {
+            const float tx = badge.right + 12.0f - 8.0f * (1.0f - titleIn);
+            const float right = rect.right - 16.0f;
+            const float titleTop = (cy - 10.0f) + (-9.0f) * twoLine;
+            textBrush_->SetOpacity(0.97f * titleIn);
+            // (Not DrawMarqueeText: boldTextFormat_ is centred, which it doesn't expect.)
+            DrawEllipsizedText(state.notification.title.empty() ? L"Notification" : state.notification.title,
+                               D2D1::RectF(tx, titleTop, right, titleTop + 19.0f), boldTextFormat_.Get(), textBrush_.Get());
+            if (twoLine > 0.0f) {
+                std::wstring second = state.notification.app;
+                if (!state.notification.body.empty())
+                    second = second.empty() ? state.notification.body : second + L" \x2022 " + state.notification.body;
+                mutedBrush_->SetOpacity(0.8f * twoLine * titleIn);
+                DrawEllipsizedText(second, D2D1::RectF(tx, cy + 2.0f, right, cy + 18.0f), smallTextFormat_.Get(),
+                                   mutedBrush_.Get());
+            }
+            textBrush_->SetOpacity(0.90f);
+            if (twoLine >= 1.0f) DrawCountdownProgress(tx, right, rect.bottom - 6.0f, remaining / ttl);
+        }
         mutedBrush_->SetOpacity(0.50f);
     }
 
@@ -19847,10 +20152,21 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
             activity.width = 340.0f;
             activity.height = 56.0f;
             break;
-        case IslandKind::Notification:
-            activity.width = 360.0f;
-            activity.height = 58.0f;
+        case IslandKind::Notification: {
+            // Bunbun: Samsung-style, in the island's own shape (Notch, Pill or Windows 11):
+            // coming in it shows the app's icon at about its closed size, widens for the
+            // title, then grows the second line; going away it steps back the same way.
+            // The springs morph between the steps, and DrawNotification shows what fits.
+            const double now = NowSeconds();
+            const NotificationSnapshot& n = state.notification;
+            const double age = now - (n.shownAt > 0.0 ? n.shownAt : n.expiresAt - 4.0);  // lifetimes vary (4-8 s)
+            const double left = n.expiresAt - now;
+            const double t = std::min(age, left + 0.05);  // the way out mirrors the way in
+            if (t < 0.16) { activity.width = 170.0f; activity.height = 44.0f; }
+            else if (t < 0.36) { activity.width = 290.0f; activity.height = 50.0f; }
+            else { activity.width = 360.0f; activity.height = 70.0f; }
             break;
+        }
         case IslandKind::Volume:
         case IslandKind::Brightness:
             activity.width = 300.0f;
@@ -21493,6 +21809,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         std::lock_guard lock(g_stateMutex);
                         g_state.media.positionTicks = targetTicks;
                         g_state.media.lastUpdatedTicks = GetTickCount64();
+                        g_seekHoldUntil.store(GetTickCount64() + 1500);  // Bunbun: see the media poll
                     }
                     g_layoutDirty = true;
                     return 0;
@@ -21596,11 +21913,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     TriggerNudge();
                     return 0;
                 }
-                // Bunbun: the reminder pill's Snooze / Done (hit-tested against where the
-                // buttons were drawn, so it also works beside music or an agent).
-                if (ReminderPillClick(xPos, yPos)) {
-                    return 0;
-                }
+                // Bunbun: the reminder pill's Snooze / Done are Studio hits now (todos_draw.inc),
+                // handled by HandleStudioClick above.
                 // Bunbun: the meeting pill joins; a finished download shows its file.
                 if (!kinds.empty() && !onSecondarySplit && kinds[0] == IslandKind::Meeting) {
                     JoinOrDismissMeeting();
@@ -22583,6 +22897,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             } else if (!newFullscreen && isFullscreen && s_fullscreenTucked) {
                 if (g_tucked.load()) SetTucked(false);
                 s_fullscreenTucked = false;
+                s_tuckPeek = false;  // Bunbun: full screen is over: the island stays out
             }
             isFullscreen = newFullscreen;
             g_isFullscreen.store(isFullscreen, std::memory_order_relaxed);
@@ -22646,7 +22961,9 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         if (primary.kind == IslandKind::Idle) {
-            if (!isFullscreen && (pinned || isHoverExpanded)) {
+            // Bunbun: in a full screen that tucks, the peeking island opens on hover too
+            // (only Hide keeps it closed); it never could, so the pill just sat there.
+            if (!(isFullscreen && !s_fullscreenTuckNow) && (pinned || isHoverExpanded)) {
                 primary.width = MediaLayout::kExpandedWidth * g_settings.sizeScale;
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
                 if (g_settings.studioLayout) {  // Bunbun: header + page + tab bar
@@ -22681,7 +22998,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             primary.height = GameOverlayLayout::For(compact).height * g_settings.sizeScale;
         }
         if (primary.kind == IslandKind::Media) {
-            if (!isFullscreen && (isHoverExpanded || pinned || recentTrackChange)) {
+            if (!(isFullscreen && !s_fullscreenTuckNow) && (isHoverExpanded || pinned || recentTrackChange)) {  // Bunbun: as above
                 primary.width = MediaLayout::kExpandedWidth * g_settings.sizeScale;
                 primary.height = MediaLayout::kExpandedHeight * g_settings.sizeScale;
                 if (g_settings.studioLayout) {  // Bunbun: header + page + tab bar
@@ -22758,11 +23075,20 @@ DWORD WINAPI RenderThreadProc(void*) {
             } else if (g_tuckPointerLeft && g_tuckHoverSince <= 0.0) {
                 g_tuckHoverSince = now;
             }
-            if (needsYou || (g_tuckHoverSince > 0.0 && now - g_tuckHoverSince > g_settings.tuckRevealMs / 1000.0)) {
+            s_tuckPeek = false;  // Bunbun: tucked; only the reveal below starts a new peek
+            // Bunbun: a notification that came in after tucking peeks out too, for as long
+            // as it shows; not in full screen, where tucking keeps the game or film clear.
+            const bool notifying = !isFullscreen && snapshot.notification.active &&
+                                   snapshot.notification.expiresAt > now &&
+                                   (snapshot.notification.shownAt > 0.0 ? snapshot.notification.shownAt : snapshot.notification.expiresAt - 4.0) > g_tuckedAt;
+            if (needsYou || notifying ||
+                (g_tuckHoverSince > 0.0 && now - g_tuckHoverSince > g_settings.tuckRevealMs / 1000.0)) {
                 SetTucked(false);
-                // Bunbun: in a full screen that tucks, this is only a peek: the island
-                // folds back to the line once the pointer leaves it (see below).
-                s_tuckPeek = isFullscreen && s_fullscreenTucked;
+                // Bunbun: brought out from the line, it's only a peek: the island folds
+                // back to the line once the pointer leaves it (see below). Tuck away from
+                // the menu or the hotkey, and full screen, alike. The menu's "Bring the
+                // island back" and the hotkey bring it back for good.
+                s_tuckPeek = true;
                 s_peekLeftAt = 0.0;
             } else {
                 primary.width = 60.0f * g_settings.sizeScale;
@@ -22771,18 +23097,17 @@ DWORD WINAPI RenderThreadProc(void*) {
                 if (g_tuckHoverSince > 0.0 || now - g_tuckedAt < 0.3) needsRender = true;
             }
         } else if (s_tuckPeek) {
-            // Bunbun: a full-screen peek. 0.8 s after the pointer leaves the island (and
-            // no agent is waiting for an answer), it folds back to the line.
+            // Bunbun: a peek. 0.4 s after the pointer leaves the island (and no agent is
+            // waiting for an answer, nor a notification showing), it folds back to the line.
             const bool waiting = snapshot.agent.phase == bb::AgentPhase::Approval ||
-                                 snapshot.agent.phase == bb::AgentPhase::Question;
-            if (!isFullscreen || !s_fullscreenTuckNow) {
-                s_tuckPeek = false;
-            } else if (hover || waiting || g_lookupUi.open) {
+                                 snapshot.agent.phase == bb::AgentPhase::Question ||
+                                 (snapshot.notification.active && snapshot.notification.expiresAt > now);
+            if (hover || waiting || g_lookupUi.open) {
                 s_peekLeftAt = 0.0;
             } else if (s_peekLeftAt <= 0.0) {
                 s_peekLeftAt = now;
                 needsRender = true;
-            } else if (now - s_peekLeftAt > 0.8) {
+            } else if (now - s_peekLeftAt > 0.4) {
                 SetTucked(true);
                 s_tuckPeek = false;
                 needsRender = true;
@@ -22877,6 +23202,14 @@ DWORD WINAPI RenderThreadProc(void*) {
         } else if (targetHeight < heightSpring.value) {
             heightStiffness = 200.0f * styleStiffnessMult;
             heightDamping = 28.0f * styleDampingMult;
+        }
+
+        // Bunbun: tucking to the line and back: a stiffer, critically damped spring
+        // (about 0.3 s, no overshoot). The usual ones took 0.65-0.9 s, most of it a
+        // slow crawl over the last few pixels, which read as lag.
+        if (now - g_tuckedAt < 0.6) {
+            widthStiffness = heightStiffness = 700.0f * styleStiffnessMult;
+            widthDamping = heightDamping = 2.0f * std::sqrt(widthStiffness);  // critical, whatever the style
         }
 
         widthSpring.Step(dt * speed, widthStiffness, widthDamping);
@@ -23033,9 +23366,11 @@ DWORD WINAPI RenderThreadProc(void*) {
         //
         // Device, Bluetooth and Do Not Disturb are here only when the countdown bar
         // is switched on, since that bar is the one thing on them that moves.
+        // Bunbun: the reminder pill too (it expires within a minute): its bell rings and
+        // the water drop bobs.
         const auto isTransientPill = [](IslandKind kind) {
             return kind == IslandKind::BatteryLow || kind == IslandKind::Clipboard ||
-                   kind == IslandKind::Notification;
+                   kind == IslandKind::Notification || kind == IslandKind::Reminder;
         };
         const auto hasCountdownBar = [](IslandKind kind) {
             return kind == IslandKind::Device || kind == IslandKind::Bluetooth ||
@@ -23442,6 +23777,8 @@ bool StartThreads() {
     std::thread([] { bb::assistant::WarmStartMenuIndex(); }).detach();                        // Bunbun: instant "open …"
     g_todoWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);                                // Bunbun
     g_todoThread = CreateThread(nullptr, 0, TodoThreadProc, nullptr, 0, nullptr);
+    g_waterWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);                               // Bunbun
+    g_waterThread = CreateThread(nullptr, 0, WaterThreadProc, nullptr, 0, nullptr);           // Bunbun
     SubscribeDndNotification();
 
     return true;
@@ -23461,7 +23798,7 @@ void StopThreads() {
     }
 
     HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread, g_connectivityThread,
-                       g_calendarThread, g_downloadsThread, g_privacyThread, g_todoThread};
+                       g_calendarThread, g_downloadsThread, g_privacyThread, g_todoThread, g_waterThread};
     for (HANDLE handle : handles) {
         if (handle) {
             WaitForSingleObject(handle, 3000);
@@ -23488,6 +23825,11 @@ void StopThreads() {
     if (g_todoWake) {
         CloseHandle(g_todoWake);
         g_todoWake = nullptr;
+    }
+    g_waterThread = nullptr;  // Bunbun
+    if (g_waterWake) {
+        CloseHandle(g_waterWake);
+        g_waterWake = nullptr;
     }
     if (g_connectivityWake) {
         CloseHandle(g_connectivityWake);
@@ -23558,6 +23900,7 @@ void IslandAnnounceUpdate(const wchar_t* version, const wchar_t* url) {
         g_state.notification.body = L"An update is available \x00B7 click to open the download page";
         g_state.notification.icon = {};
         g_state.notification.expiresAt = NowSeconds() + 8.0;
+        g_state.notification.shownAt = NowSeconds();  // Bunbun: the pill's animation counts from here
     }
     g_layoutDirty = true;
     if (HWND hwnd = g_hwnd) PostMessageW(hwnd, WM_APP_NEW_EVENT, 0, 0);
@@ -23668,7 +24011,7 @@ bool IslandSnapshotPng(std::string* png, RECT* screen, RECT* monitor, RECT* work
 // thread so neither the pipe nor the render loop waits.
 namespace {
 const wchar_t* const kPageKeys[] = {L"home", L"music", L"calendar", L"weather", L"system", L"toggles", L"tray", L"todo",
-                                    L"lyrics", L"agent", L"clipboard", L"note", L"focus", L"apps", L"mirror"};
+                                    L"lyrics", L"agent", L"clipboard", L"note", L"focus", L"apps", L"mirror", L"water"};
 
 std::wstring PagePicturesDir() {
     std::wstring dir = bb::StatePath();

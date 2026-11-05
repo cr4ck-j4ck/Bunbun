@@ -61,6 +61,7 @@
 #include "look_linux.h"
 #include "lyrics_linux.h"
 #include "sources.h"
+#include "water_linux.h"
 
 namespace bb::lisland {
 
@@ -95,6 +96,9 @@ std::wstring g_musicApps, g_videoApps;  // Bunbun.MusicApps / VideoApps: overrid
 bool g_expandOnHover = true;  // Behavior.ExpandOnHover; off: a click opens and closes the island
 bool g_pinned = false;      // opened by a click (ExpandOnHover off)
 std::string g_toastTitle, g_toastText;  // a reminder or the focus timer, until g_toastUntil
+int g_toastWater = 0;  // the toast is a water reminder: 1 = drink, 2 = refill (a click logs it)
+int g_statusRing = 1;  // Bunbun.StatusRing: 0 off, 1 auto, 2 water, 3 tasks, 4 focus
+bool StatusRingNow(double* frac, double rgb[3]);  // see PaintClock
 double g_toastUntil = 0;
 double g_toastStart = 0, g_toastSeconds = 0;
 double g_toastLevel = -1;   // 0..1 draws a level bar (volume, brightness); < 0 none
@@ -168,6 +172,10 @@ void LoadSettings() {
     g_matchScreen = s::GetBool(L"Appearance.MatchScreenSize");
     g_scale = g_baseScale;  // PlaceWindow adds the screen's share
     g_offsetY = s::GetInt(L"Appearance.OffsetY");
+    {
+        const std::wstring ring = s::Get(L"Bunbun.StatusRing");
+        g_statusRing = ring == L"off" ? 0 : ring == L"water" ? 2 : ring == L"tasks" ? 3 : ring == L"focus" ? 4 : 1;
+    }
     bb::llook::LoadSettings();  // shape, theme, colours, font, sounds, privacy dots
     bb::lfeat::LoadSettings();  // placement, hiding, motion, alerts, the date, eyes, lyrics
     bb::lcal::LoadSettings();   // calendar links and the meeting alert
@@ -582,7 +590,9 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
             return;
         case Kind::Clock: {
             const std::string strip = StripText();
-            *w = (strip.empty() ? 16 : 30 + TextWidth(cr, strip, 14, true)) + (FaceShown() ? 34 : 0) + DotsRoom();
+            double ringFrac = 0, rgb[3] = {};
+            const double ring = StatusRingNow(&ringFrac, rgb) ? (strip.empty() ? 15 : 23) : 0;  // the ring, and its gap
+            *w = (strip.empty() ? 16 : 30 + TextWidth(cr, strip, 14, true)) + ring + (FaceShown() ? 34 : 0) + DotsRoom();
             *h = kCollapsedH;
             return;
         }
@@ -632,6 +642,50 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
 
 // ── Painting ────────────────────────────────────────────────────────────────
 
+// The status ring beside the clock (Bunbun.StatusRing), as on Windows: the focus
+// timer while one runs, today's water, or the to-dos ticked off. Auto: focus while
+// a timer runs, else water when its reminders are on. False for no ring.
+bool StatusRingNow(double* frac, double rgb[3]) {
+    auto set = [&](uint32_t c) {
+        rgb[0] = ((c >> 16) & 0xff) / 255.0;
+        rgb[1] = ((c >> 8) & 0xff) / 255.0;
+        rgb[2] = (c & 0xff) / 255.0;
+    };
+    if (g_statusRing == 0) return false;
+    const auto& fs = bb::lsrc::FocusState();
+    if ((g_statusRing == 1 || g_statusRing == 4) && fs.active && fs.total > 0) {
+        const double left = fs.running ? std::max(0.0, fs.endsAt - Now()) : fs.remaining;
+        *frac = std::clamp(left / fs.total, 0.0, 1.0);
+        set(0xbf5af2);
+        return true;
+    }
+    if (g_statusRing == 1 || g_statusRing == 2) {
+        // Read at most once a second: the size pass and the paint both ask, every frame.
+        static bb::lwater::Snapshot w;
+        static double s_waterAt = -10;
+        if (Now() - s_waterAt > 1.0) {
+            w = bb::lwater::Now();
+            s_waterAt = Now();
+        }
+        if ((g_statusRing == 2 || w.reminders) && w.goalMl > 0) {
+            *frac = std::clamp(static_cast<double>(w.takenMl) / w.goalMl, 0.0, 1.0);
+            set(0x5ac8fa);
+            return true;
+        }
+        return false;
+    }
+    if (g_statusRing == 3) {
+        const auto& todos = bb::lsrc::Todos();
+        if (todos.empty()) return false;
+        int done = 0;
+        for (const auto& t : todos) done += t.done ? 1 : 0;
+        *frac = static_cast<double>(done) / static_cast<double>(todos.size());
+        set(0x30d158);
+        return true;
+    }
+    return false;
+}
+
 void PaintClock(cairo_t* cr, const Rect& p) {
     double x = p.x + 14;
     if (bb::lfeat::Get().eyes) {  // Bunbun.IdleFace = eyes
@@ -641,7 +695,24 @@ void PaintClock(cairo_t* cr, const Rect& p) {
         DrawMascot(cr, x + 13, p.y + p.h / 2, 30);
         x += 34;
     }
-    Text(cr, StripText(), x, p.y + (p.h - 18) / 2, p.w - (x - p.x) - 10 - DotsRoom(), 14, true);
+    const std::string strip = StripText();
+    Text(cr, strip, x, p.y + (p.h - 18) / 2, p.w - (x - p.x) - 10 - DotsRoom(), 14, true);
+    double frac = 0, rgb[3] = {};
+    if (StatusRingNow(&frac, rgb)) {
+        const double cx = x + (strip.empty() ? 0 : TextWidth(cr, strip, 14, true) + 8) + 7.5, cy = p.y + p.h / 2, r = 6.3;
+        cairo_set_line_width(cr, 2.4);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_new_sub_path(cr);
+        cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.16);
+        cairo_stroke(cr);
+        if (frac > 0.004) {
+            cairo_new_sub_path(cr);
+            cairo_arc(cr, cx, cy, r, -M_PI / 2, -M_PI / 2 + 2 * M_PI * std::min(frac, 0.9999));
+            cairo_set_source_rgb(cr, rgb[0], rgb[1], rgb[2]);
+            cairo_stroke(cr);
+        }
+    }
 }
 
 void PaintColor(cairo_t* cr, const Rect& p) {
@@ -1234,7 +1305,6 @@ int HitAt(double x, double y) {
     return -1;
 }
 
-void OpenSettings();
 void ShowMenu(GdkEvent* event);
 
 void Do(const Hit& h) {
@@ -1275,7 +1345,12 @@ gboolean OnButtonPress(GtkWidget*, GdkEventButton* e, gpointer) {
         return TRUE;
     }
     if (kind == Kind::Color && i < 0) g_colorUntil = 0;  // a click off its rows puts it away
-    if (kind == Kind::Toast && i < 0) g_toastUntil = 0;  // a click puts it away
+    if (kind == Kind::Toast && i < 0) {  // a click puts it away; a water reminder's logs the glass
+        if (g_toastWater == 1) bb::lwater::Drink();
+        else if (g_toastWater == 2) bb::lwater::Refill();
+        g_toastWater = 0;
+        g_toastUntil = 0;
+    }
     else if (i >= 0) Do(g_hits[i]);
     // Expand on hover off: a click on the island opens it, another closes it.
     else if (!g_expandOnHover && kind != Kind::AgentCard && kind != Kind::RichCard) g_pinned = !g_pinned;
@@ -1394,7 +1469,7 @@ gboolean OnKey(GtkWidget*, GdkEventKey* e, gpointer) {
 
 // ── Menu (the tray menu's items; there's no tray on Linux yet) ──────────────
 
-void OpenSettings() {
+void OpenSettings(const char* page) {
     // bunbun-settings needs WebKitGTK. If it can't start (exit 127: a library
     // is missing), open settings.ini in the default editor instead.
     const std::string exe = bb::plat::ExeDir() + "/bunbun-settings";
@@ -1403,7 +1478,9 @@ void OpenSettings() {
         bb::plat::OpenWithDefault(bb::settings::Path());
         return;
     }
-    gchar* argv[] = {const_cast<gchar*>(exe.c_str()), nullptr};
+    // bunbun-settings takes the page to open as a plain argument.
+    gchar* argv[] = {const_cast<gchar*>(exe.c_str()), const_cast<gchar*>(page ? page : ""), nullptr};
+    if (!page) argv[1] = nullptr;
     GPid pid = 0;
     if (!g_spawn_async(nullptr, argv, nullptr, G_SPAWN_DO_NOT_REAP_CHILD, nullptr, nullptr, &pid, nullptr)) {
         bb::plat::OpenWithDefault(bb::settings::Path());
@@ -1731,6 +1808,7 @@ void InstallStableHook() {
 }
 
 void ShowToast(const std::string& title, const std::string& text, double seconds, double level) {
+    g_toastWater = 0;
     g_toastTitle = title;
     g_toastText = text;
     g_toastLevel = level;
@@ -1987,6 +2065,24 @@ int main(int argc, char** argv) {
             if (f.reminderSound && !quiet) bb::llook::PlayChime(bb::chime::Chime::Question);
         }
         if (bb::lsrc::FocusTakeFinished()) ShowToast("Focus", "Time's up \xE2\x80\x94 take a break", 10);
+        // The water reminder (Bunbun.WaterReminders), every 30 s.
+        static int s_waterTick = 0;
+        if (++s_waterTick >= 30) {
+            s_waterTick = 0;
+            const bb::lwater::Due due = bb::lwater::Check();
+            if (due != bb::lwater::Due::None) {
+                const bb::lwater::Snapshot w = bb::lwater::Now();
+                const bool refill = due == bb::lwater::Due::Refill;
+                ShowToast("Water \xC2\xB7 " + std::to_string(w.takenMl) + " of " + std::to_string(w.goalMl) + " ml",
+                          refill ? "Time to refill your bottle \xC2\xB7 click when you have"
+                                 : "Time to drink water \xC2\xB7 click to log a glass",
+                          20);
+                g_toastWater = refill ? 2 : 1;
+                const auto& f = bb::lfeat::Get();
+                const bool quiet = f.quietReminders && (bb::lfeat::FullscreenAppActive() || bb::lsrc::FocusState().running);
+                if (f.reminderSound && !quiet) bb::llook::PlayChime(bb::chime::Chime::Question);
+            }
+        }
         gtk_widget_queue_draw(g_window);
         return G_SOURCE_CONTINUE;
     }, nullptr);

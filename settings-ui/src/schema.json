@@ -779,8 +779,8 @@
  },
  "Modules.NotificationRespectDnD": {
   "default": "true",
-  "name": "Notifications respect Do Not Disturb",
-  "description": "Suppresses Dynamic Island notification alerts when Windows Do Not Disturb is active.",
+  "name": "Follow Windows' Do Not Disturb",
+  "description": "On, the island stays quiet while Windows' Do Not Disturb is on, like Windows does. Off, your apps' notifications still show on the island during Do Not Disturb (Windows itself keeps them quiet).",
   "options": []
  },
  "Modules.HardwareMonitorModule": {
@@ -1354,7 +1354,7 @@
  "Bunbun.TuckHotkey": {
   "default": "true",
   "name": "Tuck away (Ctrl+Alt+H)",
-  "description": "Ctrl+Alt+H, or Tuck away in the right-click menu, hides the island to a thin line at the top of the screen, coloured by what's going on. Point at the line for a moment to bring the island back. It comes back by itself when an agent needs you.",
+  "description": "Ctrl+Alt+H tucks the island into a thin line at the top of the screen, coloured by what's going on, and pressing it again brings the island back (so does Tuck away in the right-click menu). Point at the line for a moment and the island peeks out until you move away. It comes back by itself when an agent needs you.",
   "options": []
  },
  "Bunbun.TuckRevealMs": {
@@ -1601,6 +1601,33 @@
    }
   ]
  },
+ "Bunbun.StatusRing": {
+  "default": "auto",
+  "name": "Status ring",
+  "description": "A thin ring beside the clock on the small island, filling up as you go. Auto shows the focus timer while one runs, else today's water when water reminders are on.",
+  "options": [
+   {
+    "value": "auto",
+    "label": "Auto"
+   },
+   {
+    "value": "water",
+    "label": "Water today"
+   },
+   {
+    "value": "tasks",
+    "label": "Tasks done"
+   },
+   {
+    "value": "focus",
+    "label": "Focus timer"
+   },
+   {
+    "value": "off",
+    "label": "Off"
+   }
+  ]
+ },
  "Bunbun.HomeTile1": {
   "default": "auto",
   "name": "First Home tile",
@@ -1764,6 +1791,48 @@
   "default": "false",
   "name": "Mirror page",
   "description": "A camera preview page for a quick look before a call. The camera only turns on when you press Turn on camera, and off when you leave the page. Nothing is saved.",
+  "options": []
+ },
+ "Bunbun.WaterPage": {
+  "default": "true",
+  "name": "Water page",
+  "description": "A Water page in the scroll loop with today's progress, a + glass button, when the next reminder is due and the last week.",
+  "options": []
+ },
+ "Bunbun.WaterReminders": {
+  "default": "false",
+  "name": "Water reminders",
+  "description": "Reminds you to drink, spread across your active hours. A reminder comes when you've fallen a glass behind your goal's pace, at least 20 minutes after the last one. Drank logs a glass; Later snoozes 15 minutes.",
+  "options": []
+ },
+ "Bunbun.WaterGoalMl": {
+  "default": "2000",
+  "name": "Daily goal (ml)",
+  "description": "How much water a day.",
+  "options": []
+ },
+ "Bunbun.WaterGlassMl": {
+  "default": "250",
+  "name": "Glass size (ml)",
+  "description": "How much one glass (one tap on Drank or + glass) counts for.",
+  "options": []
+ },
+ "Bunbun.WaterBottleMl": {
+  "default": "0",
+  "name": "Bottle size (ml)",
+  "description": "If you drink from a bottle, its size; the island asks you to refill it when it's probably empty. 0 for no bottle.",
+  "options": []
+ },
+ "Bunbun.WaterStartHour": {
+  "default": "9",
+  "name": "Active from (hour)",
+  "description": "Reminders start at this hour (0 to 23).",
+  "options": []
+ },
+ "Bunbun.WaterEndHour": {
+  "default": "21",
+  "name": "Active until (hour)",
+  "description": "And stop at this hour (1 to 24). The goal is paced across these hours.",
   "options": []
  },
  "Bunbun.FocusPage": {

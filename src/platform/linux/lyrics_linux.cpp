@@ -63,6 +63,7 @@ std::wstring Wide(const std::string& s) { return bb::plat::Wide(s); }
 // fraction 1-3 digits (.5 = 500 ms). Tags that aren't times ([ar:...]) are skipped.
 std::vector<Line> ParseSynced(const std::wstring& text) {
     std::vector<Line> lines;
+    int64_t offsetMs = 0;  // the file's [offset:+/-ms]; positive = lyrics sooner
     size_t start = 0;
     while (start <= text.size()) {
         size_t end = text.find(L'\n', start);
@@ -75,6 +76,10 @@ std::vector<Line> ParseSynced(const std::wstring& text) {
             const size_t close = line.find(L']', pos);
             if (close == std::wstring::npos) break;
             const std::wstring ts = line.substr(pos + 1, close - pos - 1);
+            if (ts.size() > 7 && wcsncasecmp(ts.c_str(), L"offset:", 7) == 0) {
+                offsetMs = wcstoll(ts.c_str() + 7, nullptr, 10);
+                break;
+            }
             const size_t colon = ts.find(L':');
             if (colon == std::wstring::npos || colon == 0 || !iswdigit(ts[0])) break;
             wchar_t* after = nullptr;
@@ -100,6 +105,8 @@ std::vector<Line> ParseSynced(const std::wstring& text) {
         if (end == text.size()) break;
         start = end + 1;
     }
+    if (offsetMs != 0)
+        for (Line& l : lines) l.timeMs = std::max<int64_t>(0, l.timeMs - offsetMs);
     // Repeated lines (several timestamps) are listed out of order; play order wins.
     std::stable_sort(lines.begin(), lines.end(), [](const Line& a, const Line& b) { return a.timeMs < b.timeMs; });
     return lines;

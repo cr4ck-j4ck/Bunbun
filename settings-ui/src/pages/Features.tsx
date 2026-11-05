@@ -1,4 +1,4 @@
-import { BatteryMedium, Bell, CalendarDays, Gamepad2, LayoutGrid, Mic, Music2, Quote, Search, SlidersHorizontal } from "lucide-react";
+import { BatteryMedium, Bell, CalendarDays, Droplet, Gamepad2, LayoutGrid, Mic, Music2, Quote, Search, SlidersHorizontal } from "lucide-react";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { neverOnLinux, notOnLinux, useIsLinux } from "../platform";
 import { useStore } from "../store";
@@ -6,7 +6,7 @@ import { PageHead, Setting, Toggle } from "../ui/controls";
 
 type Group = { id: string; title: string; desc: string; icon: ReactNode; main?: string; keys: string[] };
 
-const GROUPS: Group[] = [
+export const GROUPS: Group[] = [
   { id: "media", title: "Music", desc: "Now playing, controls and cover art, and which app the Music card opens.", icon: <Music2 size={18} />, main: "Modules.Media",
     keys: ["Bunbun.MusicApp", "Bunbun.StreamingMood", "Modules.MediaAutoExpand", "Modules.CollapsedTitle", "Modules.MediaPillClock", "Bunbun.MusicSwipe", "Modules.MediaExpandBlocklist"] },
   { id: "lyrics", title: "Lyrics", desc: "Synced lyrics, karaoke style, and timing for Bluetooth headphones.", icon: <Quote size={18} />, main: "Modules.Lyrics",
@@ -16,8 +16,10 @@ const GROUPS: Group[] = [
     keys: ["Modules.Volume", "Modules.Brightness", "Modules.Battery", "Modules.BluetoothIndicator", "Modules.BluetoothShowBattery", "Bunbun.BluetoothLowWarning",
       "Modules.CapsLock", "Modules.DoNotDisturbIndicator", "Modules.Progress", "Modules.StatusCountdownProgress",
       "Bunbun.BatteryMoods", "Bunbun.ChargingReminderMinutes"] },
-  { id: "notify", title: "Notifications", desc: "Toasts from your apps, a peek at what you copy, and timers.", icon: <Bell size={18} />,
-    keys: ["Modules.Clipboard", "Modules.NotificationRespectDnD", "Modules.TimerModule"] },
+  { id: "notify", title: "Notifications", desc: "Your apps' notifications (also during Do Not Disturb, if you like), a peek at what you copy, and timers.", icon: <Bell size={18} />,
+    keys: ["Modules.NotificationRespectDnD", "Modules.Clipboard", "Modules.TimerModule"] },
+  { id: "water", title: "Water", desc: "Reminders to drink, paced across your active hours, and the bottle to refill.", icon: <Droplet size={18} />, main: "Bunbun.WaterReminders",
+    keys: ["Bunbun.WaterGoalMl", "Bunbun.WaterGlassMl", "Bunbun.WaterBottleMl", "Bunbun.WaterStartHour", "Bunbun.WaterEndHour"] },
   { id: "calendar", title: "Reminders & meetings", desc: "Reminder sounds, your calendar link with a Join button, and browser downloads.", icon: <CalendarDays size={18} />,
     keys: ["Modules.CalendarIcsUrl", "Modules.MeetingAlertMinutes", "Modules.ReminderSound", "Modules.QuietReminders", "Modules.Downloads"] },
   { id: "pages", title: "Page options", desc: "Weather city and units, system numbers, the file shelf and the focus guard.", icon: <SlidersHorizontal size={18} />,
@@ -77,6 +79,39 @@ export function Features({ go }: { go?: (page: string) => void }) {
           </div>
         </section>
       )}
+    </div>
+  );
+}
+
+// A feature area as a page of its own (Music & lyrics, Notifications & alerts…):
+// each group with its switch, what it does, and all its options, nothing folded away.
+export function FeatureGroupsPage({ title, subtitle, ids }: { title: string; subtitle: string; ids: string[] }) {
+  const s = useStore();
+  const linux = useIsLinux();
+  const groups = ids.map((id) => GROUPS.find((g) => g.id === id)).filter((g): g is Group => !!g);
+  return (
+    <div className="page">
+      <PageHead title={title} subtitle={subtitle} />
+      {groups.map((g) => {
+        if (linux && neverOnLinux(g.main ? [g.main, ...g.keys] : g.keys)) return null;  // Windows-only for good
+        const on = g.main ? s.bool(g.main) : true;
+        return (
+          <section className="section fade-in" key={g.id}>
+            <div className="feature-head">
+              <div className="ico">{g.icon}</div>
+              <div className="what">
+                <h3>{g.title}</h3>
+                <p>{g.desc}</p>
+              </div>
+              {linux && notOnLinux(g.main ? [g.main, ...g.keys] : g.keys) && <em className="badge muted linux">Not on Linux yet</em>}
+              {g.main && <Toggle on={on} onChange={(v) => s.set(g.main!, v)} label={g.title} />}
+            </div>
+            <div className="card" style={{ opacity: on ? 1 : 0.5 }}>
+              {g.keys.map((k) => <Setting key={k} k={k} />)}
+            </div>
+          </section>
+        );
+      })}
     </div>
   );
 }

@@ -55,6 +55,7 @@ export function IdleFaceSettings({ title = "Island face" }: { title?: string }) 
         </>
       )}
       <Setting k="Bunbun.IdleStripItems" />
+      <Setting k="Bunbun.StatusRing" />
     </Section>
   );
 }

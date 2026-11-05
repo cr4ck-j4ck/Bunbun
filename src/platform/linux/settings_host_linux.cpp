@@ -309,7 +309,6 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         o["shown"] = Value::Bool(false);
         return o;
     }
-    if (cmd == "listTodos") return Value::Array();
     if (cmd == "localAiStatus") {
         Value o = Value::Object();
         o["helper"] = Value::Bool(false);
@@ -328,6 +327,20 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
     if (cmd == "listTodos" || cmd == "saveTodo" || cmd == "deleteTodo" || cmd == "clearDoneTodos")
         return bb::todos::Command(cmd, args, bb::plat::Wide(bb::plat::ConfigDir() + "/todos.tsv"), err);
     if (cmd == "capturePages") return CapturePages();
+    // The Quick note (note.txt in the config folder), as on Windows.
+    if (cmd == "readNote") {
+        std::string text;
+        bb::plat::ReadFile(bb::plat::ConfigDir() + "/note.txt", &text);
+        return Value::String(text);
+    }
+    if (cmd == "writeNote") {
+        bb::plat::MakeDirs(bb::plat::ConfigDir());
+        if (!bb::plat::WriteFileAtomic(bb::plat::ConfigDir() + "/note.txt", args.getString("text"))) {
+            *err = "couldn't write note.txt";
+            return {};
+        }
+        return Value::Bool(true);
+    }
     *err = cmd + " isn't available on Linux yet";
     return {};
 }

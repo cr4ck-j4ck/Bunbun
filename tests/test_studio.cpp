@@ -27,7 +27,7 @@ static std::vector<st::Page> Pages(int context, const st::PageSwitches& s) {
 static void TestPageOrder() {
     using P = st::Page;
     st::PageSwitches s;
-    s.system = s.toggles = s.todo = s.lyrics = s.clipboard = s.note = s.focus = s.apps = false;
+    s.system = s.toggles = s.todo = s.lyrics = s.clipboard = s.note = s.focus = s.apps = s.water = false;
     // Default order: Home, then calendar, weather, agent.
     CHECK((Pages(1, s) == std::vector<P>{P::Home, P::Calendar, P::Weather, P::Agent}));
     // Studio keeps Home first in the media view too, then the player.
@@ -57,11 +57,20 @@ static void TestPageOrder() {
     // Linux today: Home, Music and Agent only.
     st::PageSwitches lin;
     lin.calendar = lin.weather = lin.system = lin.toggles = lin.tray = lin.todo = lin.lyrics = false;
-    lin.clipboard = lin.note = lin.focus = lin.mirror = lin.apps = false;
+    lin.clipboard = lin.note = lin.focus = lin.mirror = lin.apps = lin.water = false;
     CHECK((Pages(0, lin) == std::vector<P>{P::Home, P::Music, P::Agent}));
     CHECK((Pages(1, lin) == std::vector<P>{P::Home, P::Agent}));
     lin.agent = false;
     CHECK((Pages(1, lin) == std::vector<P>{P::Home}));
+
+    // The Water page: after Focus by default, its own id in both views, and named.
+    st::PageSwitches w;
+    w.system = w.toggles = w.todo = w.lyrics = w.clipboard = w.note = w.apps = w.agent = w.calendar = w.weather = false;
+    CHECK((Pages(1, w) == std::vector<P>{P::Home, P::Focus, P::Water}));
+    w.order = L"water";
+    CHECK((Pages(1, w) == std::vector<P>{P::Home, P::Water, P::Focus}));
+    CHECK(st::PageFor(0, st::kTabWater) == P::Water && st::PageFor(1, st::kTabWater) == P::Water);
+    CHECK(std::wstring(st::TabLabel(P::Water)) == L"Water");
 
     // Ids from both views map to the same extra pages.
     CHECK(st::PageFor(0, st::kTabAgent) == P::Agent && st::PageFor(1, st::kTabAgent) == P::Agent);

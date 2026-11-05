@@ -95,7 +95,7 @@
     }
 
     // Quiet reminder: a small still bell and the text. A tap opens the full pill
-    // (ReminderPillClick), so the whole pill is recorded as its hit area.
+    // (ReminderPillAction), so the whole pill is recorded as its hit area.
     void DrawQuietReminderPill(const SharedState& state, D2D1_RECT_F rect) {
         const float cy = (rect.top + rect.bottom) * 0.5f;
         if (ID2D1SolidColorBrush* bell = AcquireBrush(WithAlpha(material_.accent, settingsOpacity_))) {
@@ -112,14 +112,7 @@
             textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
             textFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         }
-        D2D1_MATRIX_3X2_F m;
-        target_->GetTransform(&m);
-        float dpiX = 96.0f, dpiY = 96.0f;
-        target_->GetDpi(&dpiX, &dpiY);
-        auto apply = [&](float x, float y) { return D2D1::Point2F((x * m._11 + y * m._21 + m._31) * dpiX / 96.0f, (x * m._12 + y * m._22 + m._32) * dpiY / 96.0f); };
-        const D2D1_POINT_2F a = apply(rect.left, rect.top), c = apply(rect.right, rect.bottom);
-        g_reminderQuietRect = D2D1::RectF(std::min(a.x, c.x), std::min(a.y, c.y), std::max(a.x, c.x), std::max(a.y, c.y));
-        g_reminderButtonsAt = NowSeconds();
+        SHit(rect, StudioAction::ReminderExpand);  // Bunbun: a Studio hit (HandleStudioClick)
     }
 
     // ── Reminder pill: a bell, the to-do, and Snooze / Done ──────────────────
@@ -133,12 +126,20 @@
         const D2D1_RECT_F badge = DrawPillBadge(rect);
         const D2D1_POINT_2F bc = D2D1::Point2F((badge.left + badge.right) * 0.5f, (badge.top + badge.bottom) * 0.5f);
         const float bs = (badge.bottom - badge.top) * 0.55f;
+        // Bunbun: a water reminder has a drop that bobs, instead of the bell.
+        const bool water = IsWaterReminderId(state.reminder.id);
+        if (water) {
+            EnsureRoundStroke();
+            const float bob = std::sin(static_cast<float>(now) * 4.0f) * bs * 0.08f;
+            SIcon(StudioPage::Water, D2D1::Point2F(bc.x, bc.y + bob), bs * 1.7f, SCol(0x5ac8fa));
+        }
         // A bell that rings for the first couple of seconds of each 4 s.
-        const float ring = std::fmod(static_cast<float>(now), 4.0f) < 1.2f ? std::sin(static_cast<float>(now) * 28.0f) * 14.0f : 0.0f;
+        const float ring = water ? 0.0f
+                                 : (std::fmod(static_cast<float>(now), 4.0f) < 1.2f ? std::sin(static_cast<float>(now) * 28.0f) * 14.0f : 0.0f);
         D2D1_MATRIX_3X2_F saved;
         target_->GetTransform(&saved);
         target_->SetTransform(D2D1::Matrix3x2F::Rotation(ring, D2D1::Point2F(bc.x, bc.y - bs * 0.45f)) * saved);
-        if (ID2D1SolidColorBrush* bell = AcquireBrush(WithAlpha(material_.accent, settingsOpacity_))) {
+        if (ID2D1SolidColorBrush* bell = water ? nullptr : AcquireBrush(WithAlpha(material_.accent, settingsOpacity_))) {
             ComPtr<ID2D1PathGeometry> g;
             if (SUCCEEDED(d2dFactory_->CreatePathGeometry(&g)) && g) {
                 ComPtr<ID2D1GeometrySink> sink;
@@ -173,25 +174,17 @@
             }
             return b.left;
         };
-        const float doneLeft = button(rect.right - kButtonRight, Loc(L"Done"), true);
-        const float snoozeLeft = button(doneLeft - kButtonGap, Loc(L"Snooze"), false);
+        // Bunbun: a water reminder says Drank (or Refilled) and Later.
+        const float doneLeft = button(rect.right - kButtonRight,
+                                      water ? (state.reminder.id == kWaterRefillId ? L"Refilled" : L"Drank") : Loc(L"Done"), true);
+        const float snoozeLeft = button(doneLeft - kButtonGap, water ? L"Later" : Loc(L"Snooze"), false);
 
-        // Record the buttons in window pixels for ReminderPillClick: through the
-        // pill's current transform (size scale), then DIPs to pixels.
-        D2D1_MATRIX_3X2_F m;
-        target_->GetTransform(&m);
-        float dpiX = 96.0f, dpiY = 96.0f;
-        target_->GetDpi(&dpiX, &dpiY);
-        auto toClient = [&](float l, float t, float r, float b) {
-            auto apply = [&](float x, float y) {  // MinGW's matrix has no TransformPoint
-                return D2D1::Point2F(x * m._11 + y * m._21 + m._31, x * m._12 + y * m._22 + m._32);
-            };
-            const D2D1_POINT_2F a = apply(l, t), c = apply(r, b);
-            return D2D1::RectF(std::min(a.x, c.x) * dpiX / 96.0f, std::min(a.y, c.y) * dpiY / 96.0f,
-                               std::max(a.x, c.x) * dpiX / 96.0f, std::max(a.y, c.y) * dpiY / 96.0f);
-        };
-        g_reminderDoneRect = toClient(doneLeft, cy - 13.0f, doneLeft + kButtonW, cy + 13.0f);
-        g_reminderSnoozeRect = toClient(snoozeLeft, cy - 13.0f, snoozeLeft + kButtonW, cy + 13.0f);
-        g_reminderButtonsAt = NowSeconds();
-        DrawPillLines(rect, badge.right + 14.0f, snoozeLeft - 10.0f, Loc(L"Reminder"), state.reminder.text);
+        // Bunbun: the buttons are Studio hits (HandleStudioClick -> ReminderPillAction):
+        // SHit maps them the way every Studio button is mapped.
+        SHit(D2D1::RectF(doneLeft, cy - 13.0f, doneLeft + kButtonW, cy + 13.0f), StudioAction::ReminderDone);
+        SHit(D2D1::RectF(snoozeLeft, cy - 13.0f, snoozeLeft + kButtonW, cy + 13.0f), StudioAction::ReminderSnooze);
+        // Bunbun: a water reminder's label carries the day so far, so its line stays short.
+        std::wstring label = Loc(L"Reminder");
+        if (water) label = L"Water \x00B7 " + std::to_wstring(state.water.takenMl) + L" of " + std::to_wstring(state.water.goalMl) + L" ml";
+        DrawPillLines(rect, badge.right + 14.0f, snoozeLeft - 10.0f, label, state.reminder.text);
     }

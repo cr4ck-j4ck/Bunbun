@@ -118,6 +118,16 @@ MeetingSnapshot NextMeeting(const std::vector<Event>& events, double now) {
     return s;
 }
 
+// Every event (repeats expanded, moved and cancelled ones handled) between two
+// times, for the Calendar page.
+std::vector<CalendarItem> Between(const std::vector<Event>& events, double from, double to) {
+    std::vector<CalendarItem> out;
+    for (const bb::ics::Meeting& m : bb::ics::MeetingsBetween(events, from, to, ToEpoch))
+        out.push_back({m.startsAt, m.endsAt, m.title});
+    std::sort(out.begin(), out.end(), [](const CalendarItem& a, const CalendarItem& b) { return a.startsAt < b.startsAt; });
+    return out;
+}
+
 // ── Fetching ────────────────────────────────────────────────────────────────
 // GET over HTTPS (webcal:// is the same thing). Returns false on any failure.
 bool Fetch(std::wstring url, std::wstring* out) {
@@ -212,12 +222,16 @@ DWORD WINAPI CalendarThreadProc(void*) {
             nextFetch = now + (failed && !anyOk ? 60.0 : 300.0);
         }
         MeetingSnapshot next = Ics::NextMeeting(events, EpochNow());
+        // Bunbun: the weeks around now, for the Calendar page's month and week views.
+        std::vector<CalendarItem> range = Ics::Between(events, EpochNow() - 42 * 86400.0, EpochNow() + 70 * 86400.0);
         next.fetchFailed = failed;
         {
             std::lock_guard lock(g_stateMutex);
             const bool changed = next.valid != g_state.meeting.valid || next.startsAt != g_state.meeting.startsAt ||
                                  next.title != g_state.meeting.title;
             g_state.meeting = std::move(next);
+            if (!g_state.calendar || range.size() != g_state.calendar->size()) g_layoutDirty = true;
+            g_state.calendar = std::make_shared<const std::vector<CalendarItem>>(std::move(range));
             if (changed) g_layoutDirty = true;
         }
         if (WaitForSingleObject(g_stopEvent, 20000) != WAIT_TIMEOUT) break;
