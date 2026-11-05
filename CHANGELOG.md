@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.7]
+
 ### Added
 - **Status ring** (Settings → Appearance, beside "Beside the face"): a thin ring next to the clock
   on the small island that fills up as you go: the focus timer while one runs, today's water, or the
