@@ -309,7 +309,9 @@
                 tint = AgentBrand(state.agent.agent);
             }
             strength = (state.agent.phase != bb::AgentPhase::None) ? 0.40f : 0.25f;
-        } else if (studio_.page_ == StudioPage::Hardware || studio_.page_ == StudioPage::Weather || studio_.page_ == StudioPage::ScreenTime || studio_.page_ == StudioPage::Clipboard) {
+        } else if (studio_.page_ == StudioPage::Clipboard) {
+            // Bunbun: not System, Weather or Screen Time: their see-through cards sit on the
+            // glow, which washed out each card's bottom corners against its crisp top.
             tint = SAccent();
             strength = 0.28f;
         }
@@ -751,9 +753,11 @@
             const D2D1_COLOR_F col = SAccent();
             SHit(r, StudioAction::OpenMusic);
             DrawStudioTile(r, col, state.media.playing, now);
-            SText(L"Music", D2D1::RectF(r.left + 14, r.top + 14, r.right - 60, r.top + 32), SFLabel, D2D1::ColorF(1, 1, 1, 0.65f));
+            const D2D1_RECT_F artAt = ArtShape(state.media, D2D1::RectF(r.right - 54, r.top + 12, r.right - 12, r.top + 54), true);
+            SText(L"Music", D2D1::RectF(r.left + 14, r.top + 14, std::max(r.left + 60, artAt.left - 6), r.top + 32), SFLabel, D2D1::ColorF(1, 1, 1, 0.65f));
             if (has) {
-                DrawAlbumArt(state.media, D2D1::RectF(r.right - 54, r.top + 12, r.right - 12, r.top + 54), now, 10.0f, false);
+                DrawAlbumArt(state.media, D2D1::RectF(r.right - 54, r.top + 12, r.right - 12, r.top + 54), now, 10.0f, false,
+                             true);  // Bunbun: a wide cover widens to the left
                 SText(state.media.title, D2D1::RectF(r.left + 14, r.bottom - 62, r.right - 46, r.bottom - 42), SFSong, white);
                 SText(state.media.artist, D2D1::RectF(r.left + 14, r.bottom - 40, r.right - 46, r.bottom - 24), SFBody, D2D1::ColorF(1, 1, 1, 0.6f));
                 const D2D1_POINT_2F bc = D2D1::Point2F(r.right - 27, r.bottom - 27);
@@ -1190,7 +1194,7 @@
                     const float sw = segW * 0.45f, sx = x + (segW - sw) * t;
                     SFillRound(D2D1::RectF(sx, by, sx + sw, by + 4), 2, brand);
                 }
-                SText(kSteps[i], D2D1::RectF(x, by + 7, x + segW, by + 22), SFSmall, done || current ? SCol(0xffffff) : SCol(0x636366));
+                SText(kSteps[i], D2D1::RectF(x + (i == 0 ? 6.0f : 0.0f), by + 7, x + segW, by + 22), SFSmall, done || current ? SCol(0xffffff) : SCol(0x636366));
             }
         } else {
             // Bunbun: the limits of the agent on this page (or the main agent between
@@ -1221,12 +1225,14 @@
                     // "Gemini 3.8 Flash · 2%", then "resets in 2h 10m" under it.
                     std::wstring label = b.label;
                     if (p >= 0) label += L" \x00B7 " + std::to_wstring(static_cast<int>(p + 0.5f)) + L"%";
-                    SText(label, D2D1::RectF(x, by + 7, x + segW, by + 21), SFSmall, p >= 0 ? SCol(0xaeaeb2) : SCol(0x636366));
+                    const float tx = x + (i == 0 ? 6.0f : 0.0f);  // clear of the page's rounded corner
+                    SText(label, D2D1::RectF(tx, by + 7, x + segW, by + 21), SFSmall, p >= 0 ? SCol(0xaeaeb2) : SCol(0x636366));
                     const std::wstring reset = bb::limits::ResetsIn(b.resetAt, unixNow);
-                    if (!reset.empty()) SText(reset, D2D1::RectF(x, by + 21, x + segW, by + 34), SFSmall, SCol(0x636366));
+                    if (!reset.empty()) SText(reset, D2D1::RectF(tx, by + 21, x + segW, by + 34), SFSmall, SCol(0x636366));
                 }
             } else if (!row.note.empty()) {
-                SText(row.note, D2D1::RectF(r.left, by, r.right, by + 20), SFSmall, SCol(0x8e8e93));
+                // Bunbun: inset; the page's rounded corner clipped the first letter.
+                SText(row.note, D2D1::RectF(r.left + 6, by, r.right, by + 20), SFSmall, SCol(0x8e8e93));
             }
         }
     }
@@ -1287,7 +1293,8 @@
         SHit(searchRect, StudioAction::ClipSearch, 0);
 
         // Section header: "Today"
-        SText(L"Today", D2D1::RectF(r.left + 6.0f, r.top + 24.0f, r.left + 80.0f, r.top + 38.0f), SFSmall, grey);
+        if (allCnt > 0)  // Bunbun: no "Today" over an empty list
+            SText(L"Today", D2D1::RectF(r.left + 6.0f, r.top + 24.0f, r.left + 80.0f, r.top + 38.0f), SFSmall, grey);
         // Bunbun: Clear. Empties the history; pinned items stay.
         if (allCnt > 0) {
             const float cw = SMeasure(L"Clear", SFSmall) + 14.0f;
@@ -1508,7 +1515,12 @@
             SText(L"Today", D2D1::RectF(r1.left + 24.0f, r1.top + 8.0f, r1.left + 80.0f, r1.top + 22.0f), SFSmall, grey);
             const float cw = (leftW - 24.0f) / 3.0f;  // Bunbun: three even columns from x + 16
             const bool tight = cw < 84.0f;             // Classic's narrower page: shorter labels
-            SText(bst::Duration(sum.todaySeconds), D2D1::RectF(r1.left + 16.0f, r1.top + 24.0f, r1.left + 16.0f + cw, r1.top + 54.0f), SFBig, white);
+            // Bunbun: a figure that doesn't fit its column steps down a size ("2h 12m" ran into the next one).
+            auto figure = [&](const std::wstring& s, float l, float rgt) {
+                const StudioFontId f = SMeasure(s, SFBig) <= rgt - l - 6.0f ? SFBig : SFSong;
+                SText(s, D2D1::RectF(l, r1.top + (f == SFBig ? 24.0f : 30.0f), rgt, r1.top + 54.0f), f, white);
+            };
+            figure(bst::Duration(sum.todaySeconds), r1.left + 16.0f, r1.left + 16.0f + cw);
             SText(tight ? L"Today" : L"Screen time", D2D1::RectF(r1.left + 16.0f, r1.top + 54.0f, r1.left + 16.0f + cw, r1.top + 68.0f), SFSmall, grey);
 
             // The middle: what's left of your daily limit (Bunbun.ScreenTimeLimit), with a
@@ -1533,11 +1545,11 @@
             }
             const float tx = limit > 0 ? mx + 24.0f : mx;
             const float c3 = r1.left + 16.0f + cw * 2.0f;
-            SText(big, D2D1::RectF(tx, r1.top + 24.0f, c3, r1.top + 54.0f), SFBig, white);
+            figure(big, tx, c3);
             SText(small, D2D1::RectF(tx, r1.top + 54.0f, c3, r1.top + 68.0f), SFSmall, grey);
             SHit(D2D1::RectF(mx - 4.0f, r1.top + 22.0f, c3, r1.top + 70.0f), StudioAction::ScreenTimeLimitEdit);
 
-            SText(std::to_wstring(sum.appsUsed), D2D1::RectF(c3, r1.top + 24.0f, r1.right - 8.0f, r1.top + 54.0f), SFBig, white);
+            figure(std::to_wstring(sum.appsUsed), c3, r1.right - 8.0f);
             SText(tight ? L"Apps" : L"Apps used", D2D1::RectF(c3, r1.top + 54.0f, r1.right - 8.0f, r1.top + 68.0f), SFSmall, grey);
         }
 
@@ -1751,25 +1763,32 @@
         apps.push_back({StudioPage::Home, -1, StudioAction::ColorPicker, L"Colour"});
         apps.push_back({StudioPage::Home, -2, StudioAction::Settings, L"Settings"});
 
-        const int cols = 6;
+        const int cols = apps.size() > 12 ? 8 : 6;  // Bunbun: room for every page (it stopped at 12)
         const float cellW = (r.right - r.left) / cols;
         const float cellH = 84.0f;
         const bool waiting = state.agent.phase == bb::AgentPhase::Approval || state.agent.phase == bb::AgentPhase::Question;
         size_t trayCount = state.fileTrayItems.size();
-        for (size_t i = 0; i < apps.size() && i < 12; ++i) {
+        for (size_t i = 0; i < apps.size() && i < static_cast<size_t>(cols) * 2; ++i) {
             const float x = r.left + (i % cols) * cellW;
             const float y = r.top + 4 + (i / cols) * cellH;
-            const D2D1_RECT_F icon = D2D1::RectF(x + cellW * 0.5f - 22, y, x + cellW * 0.5f + 22, y + 44);
+            // Bunbun: smaller tiles when the columns are narrow (Classic's page with every page listed).
+            const float half = std::min(22.0f, cellW * 0.5f - 9.0f);
+            const D2D1_RECT_F icon = D2D1::RectF(x + cellW * 0.5f - half, y + 22 - half, x + cellW * 0.5f + half, y + 22 + half);
             const App& app = apps[i];
             const int arg = app.action == StudioAction::OpenTab ? app.tab : 0;
             const float hover = SHover(app.action, app.action == StudioAction::OpenTab ? arg : INT_MIN);
             SFillRound(icon, 10, SLerpCol(SCol(0x1c1c1e), SCol(0x3a3a3c), hover));
             const D2D1_POINT_2F c = D2D1::Point2F((icon.left + icon.right) * 0.5f, (icon.top + icon.bottom) * 0.5f);
             const D2D1_COLOR_F ink = SCol(0xe8e8ee);
-            if (app.tab == -1) SEyedropper(c, 20.0f, ink);
-            else if (app.tab == -2) SGear(c, 20.0f, ink);
-            else SIcon(app.page, c, 20.0f, ink);
-            SText(app.name, D2D1::RectF(x, y + 48, x + cellW, y + 64), SFSmall, SCol(0xffffff), 1);
+            if (app.tab == -1) SEyedropper(c, std::min(20.0f, half), ink);
+            else if (app.tab == -2) SGear(c, std::min(20.0f, half), ink);
+            else SIcon(app.page, c, std::min(20.0f, half), ink);
+            std::wstring label = app.name;
+            if (SMeasure(label, SFSmall) > cellW - 4) {  // Bunbun: short names in narrow columns
+                if (app.page == StudioPage::Clipboard) label = L"Clips";
+                else if (app.page == StudioPage::ScreenTime) label = L"Screen";
+            }
+            SText(label, D2D1::RectF(x, y + 48, x + cellW, y + 64), SFSmall, SCol(0xffffff), 1);
             // Badges: an agent waiting for you, files in the tray.
             int badge = 0;
             if (app.page == StudioPage::Agent && waiting) badge = 1;
@@ -2981,7 +3000,7 @@
             target_->FillEllipse(D2D1::Ellipse(dot, 3.5f, 3.5f), b);
         }
         SText(who, D2D1::RectF(pill.left + 26, pill.top, pill.right - 8, pill.bottom), SFLabel, SCol(0xe8e8ef));
-        if (!g_chat.empty()) {
+        if (!g_chat.empty() && !g_compose.kind) {  // Bunbun: not while replying to an agent
             const float nw = SMeasure(L"New chat", SFLabel) + 22;
             const D2D1_RECT_F nb = D2D1::RectF(rect.right - 14 - nw, topY + 2, rect.right - 14, topY + 24);
             SFillRound(nb, 11, D2D1::ColorF(1, 1, 1, SLerp(0.08f, 0.14f, SHover(StudioAction::ChatNew))));
@@ -3031,7 +3050,28 @@
         const float msgL = rect.left + 20, msgR = rect.right - 18;
         const float maxChatW = msgR - msgL;
         g_chatChips.clear();
-        if (g_chat.empty()) {
+        if (g_compose.kind) {
+            // Bunbun: replying to an agent (Reply, Change the plan, Other answer). Not Ask
+            // Bun's chat: what you're answering, and where the message goes.
+            const bb::AgentView& ag = state.agent;
+            const std::wstring title = g_compose.kind == 1 ? L"What should change in the plan?"
+                                     : g_compose.kind == 3 ? L"Your own answer"
+                                     : L"Message " + (ag.replyTo.empty() ? (ag.agent.empty() ? std::wstring(L"the agent") : ag.agent) : ag.replyTo);
+            SText(title, D2D1::RectF(msgL, msgTop + 6, msgR, msgTop + 36), SFSong, SCol(0xffffff));
+            float yy = msgTop + 40;
+            if (!ag.prompt.empty() && g_compose.kind == 2) {
+                SText(L"Last task", D2D1::RectF(msgL, yy, msgR, yy + 18), SFLabel, SCol(0x8a8a96));
+                yy += 20;
+                const D2D1_RECT_F quote = D2D1::RectF(msgL - 4, yy, msgR, std::min(yy + 44, msgBottom - 26));
+                SFillRound(quote, 10, D2D1::ColorF(1, 1, 1, 0.07f));
+                SText(L"\x201C" + ag.prompt + L"\x201D", D2D1::RectF(quote.left + 10, quote.top + 4, quote.right - 10, quote.bottom - 4),
+                      SFBody, SCol(0xd8d8e0));
+                yy = quote.bottom + 8;
+            }
+            SText(g_compose.kind == 2 ? L"It goes straight to that session, which carries on with it. Enter sends, Esc cancels."
+                                      : L"Enter sends it to the agent, Esc cancels.",
+                  D2D1::RectF(msgL, std::min(yy, msgBottom - 20), msgR, msgBottom), SFBody, SCol(0x8a8a96));
+        } else if (g_chat.empty()) {
             SText(L"Hi! What can I do for you?", D2D1::RectF(msgL, msgTop + 6, msgR, msgTop + 36), SFSong, SCol(0xffffff));
             SText(L"Open apps, set timers, control music, ask about the weather, look up a word\x2026",
                   D2D1::RectF(msgL, msgTop + 36, msgR, msgTop + 56), SFBody, SCol(0x8a8a96));

@@ -36,3 +36,13 @@ bool IslandDisplayPlace(int index, RECT* screen, RECT* monitor, RECT* work);
 // %LOCALAPPDATA%\Bunbun\previews\<page>.png (in the background). Returns how many
 // pages it will capture, 0 when a capture is already running.
 int IslandCapturePages();
+// Bunbun: test hooks for the pipe (tools that drive the island without the mouse).
+// Opens the island pinned on page `tab` (its index in the tab bar; -1 closes it);
+// returns how many pages there are.
+int IslandTestOpen(int tab);
+// The click spots on the island now, as JSON: [[action, arg, left, top, right, bottom], ...]
+// in client pixels (action is the StudioAction number).
+std::string IslandTestHits();
+// A left click at client point (x, y), sent to the island window as a real click
+// would be (the pointer itself doesn't move).
+bool IslandTestClick(int x, int y);

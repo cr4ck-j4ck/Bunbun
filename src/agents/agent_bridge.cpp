@@ -423,6 +423,9 @@ AgentView BuildViewLocked(double now, uint64_t* identity) {
         auto it = g_sessions.find(p.sessionKey);
         v.phaseSince = it != g_sessions.end() ? it->second.phaseSince : now;
         if (it != g_sessions.end()) FillTurnLocked(&v, it->second);
+        // The request's own diff only: a command's card showed the session's last edit.
+        v.diffOld = p.diffOld;
+        v.diffNew = p.diffNew;
         *identity = p.id << 4 | static_cast<uint64_t>(v.phase);
         return v;
     }
@@ -877,6 +880,12 @@ std::string HandleCommand(const std::string& cmd, const Value& msg) {
         }
     } else if (cmd == "capture_pages") {
         out["count"] = Value::Number(IslandCapturePages());
+    } else if (cmd == "test_open") {  // Bunbun: test hooks (island.h)
+        out["count"] = Value::Number(IslandTestOpen(static_cast<int>(msg.getNumber("tab", -1))));
+    } else if (cmd == "test_hits") {
+        return "{\"hits\":" + IslandTestHits() + "}";
+    } else if (cmd == "test_click") {
+        out["ok"] = Value::Bool(IslandTestClick(static_cast<int>(msg.getNumber("x", 0)), static_cast<int>(msg.getNumber("y", 0))));
     } else if (cmd == "ask") {
         const std::string q = msg.getString("query");
         if (!q.empty()) {

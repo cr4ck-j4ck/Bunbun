@@ -138,6 +138,8 @@ constexpr UINT WM_APP_MOUSE_WAKE = WM_APP + 0x446;
 constexpr UINT WM_APP_APPLY_HOTKEY = WM_APP + 0x447;
 constexpr UINT WM_APP_APPLY_BACKDROP = WM_APP + 0x448;
 constexpr UINT WM_APP_SUBMIT_ASK = WM_APP + 0x4B2;
+constexpr UINT WM_APP_TEST_HITS = WM_APP + 0x4B3;  // Bunbun: IslandTestHits, answered on the render thread
+constexpr UINT WM_APP_TEST_CLOSE = WM_APP + 0x4B4;  // Bunbun: IslandTestOpen(-1) also closes Ask Bun
 constexpr int ID_HIDE_SHOW_HOTKEY = 1;
 constexpr int ID_LOOKUP_HOTKEY = 2;
 constexpr int ID_TUCK_HOTKEY = 3;  // Bunbun: Ctrl+Alt+H tucks the island away
@@ -9627,7 +9629,12 @@ QuickLookup::Result RunBun(const std::wstring& question) {
             break;
         case as::Action::TimerStart:
             if (!GetSettingsCopy().timerEnabled) { r.body = L"The timer module is turned off in settings."; break; }
-            StartFocusTimer(in.number, false);
+            // Bunbun: a plain timer (its pill says "Timer"), not a focus session for Focus Guard.
+            StartTimerSeconds(in.number * 60, false);
+            {
+                std::lock_guard lock(g_stateMutex);
+                g_state.timer.label = L"Timer";
+            }
             swprintf(buf, 256, L"Timer set for %d minute%ls. I’ll hop when it’s done.", in.number,
                      in.number == 1 ? L"" : L"s");
             r.body = buf;
@@ -10710,6 +10717,11 @@ class Renderer {
         const float left = pad, top = pad;
         const float savedSlot = g_bunSlotWidth;  // read by the drawing below
         g_bunSlotWidth = bunSlot;
+        // The real island's click spots: DrawPill clears and re-records them, and this
+        // runs after the real island drew (it broke every Studio button, the Timers modes too).
+        std::vector<StudioHit> savedHits = std::move(g_studioHits);
+        const uint64_t savedHitsFrame = g_studioHitsFrame;
+        g_studioHits.clear();
         if (bunSlot > 0.5f && width > bunSlot + 40.0f) {
             DrawIslandSurface(D2D1::RectF(left, top, left + width, top + height), rest.kind, settings);
             const bool centred = rest.kind == IslandKind::Idle && FaceCentred(state, settings, now);
@@ -10726,6 +10738,8 @@ class Renderer {
             DrawPill(state, settings, rest, D2D1::RectF(left, top, left + width, top + height), 1.0f, now);
         }
         g_bunSlotWidth = savedSlot;
+        g_studioHits = std::move(savedHits);
+        g_studioHitsFrame = savedHitsFrame;
         if (FAILED(target_->EndDraw())) return false;
         *dc = memDc_;
         *size = SIZE{w, h};
@@ -14321,7 +14335,9 @@ class Renderer {
 
         const float dashHeight = rect.bottom - rect.top;
         const float dashRadius = ContentIslandRadius(dashHeight);
-        ComPtr<ID2D1Geometry> dashMask = CreateIslandMaskGeometry(rect, dashRadius, g_settings.notchStyle);
+        // Bunbun: in Studio `rect` is the page inside the frame; the island's big radius
+        // there rounded the bottom cards' corners (and cut letters). A plain clip then.
+        ComPtr<ID2D1Geometry> dashMask = studio_.on ? nullptr : CreateIslandMaskGeometry(rect, dashRadius, g_settings.notchStyle);
         ID2D1Layer* dashLayer = AcquireLayer();
         const bool haveDashMask = dashMask && dashLayer;
         if (haveDashMask) {
@@ -14979,7 +14995,8 @@ class Renderer {
         PublishContentGeometry(rect, sideLyricsExtra);
 
         const float radius = ContentIslandRadius(height);
-        ComPtr<ID2D1Geometry> mask = CreateIslandMaskGeometry(rect, radius, settings.notchStyle);
+        // Bunbun: in Studio the page sits inside the frame; no island-sized rounding there.
+        ComPtr<ID2D1Geometry> mask = studio_.on ? GetShapeGeometry(rect, 0.0f, false) : CreateIslandMaskGeometry(rect, radius, settings.notchStyle);
         ID2D1Layer* layer = AcquireLayer();
 
         float expandedAlpha = std::clamp((height - MediaLayout::kExpandedMinHeight) / 60.0f, 0.0f, 1.0f);
@@ -15561,8 +15578,17 @@ class Renderer {
                         c = fc;
                         size = fs / 1.05f;
                     }
-                    bb::mascot::Draw(target_.Get(), c, size * 1.05f, MediaMascotMood(state.media, settings), now, 0.0,
-                                     MascotLook(c));
+                    double moodSince = 0.0;  // Bunbun: a logged glass plays here too
+                    bb::mascot::Mood base = MediaMascotMood(state.media, settings);
+                    // Bunbun: an agent at work shows here too (with the agent pill off, this
+                    // pill is all there is while music plays).
+                    if (settings.bunbunAgents && state.agent.phase != bb::AgentPhase::None) {
+                        base = AgentMood(state.agent.phase);
+                        g_layoutDirty = true;
+                    }
+                    const bb::mascot::Mood pillMood = WithWaterMood(base, now, &moodSince);
+                    if (pillMood == base && base != MediaMascotMood(state.media, settings)) moodSince = state.agent.phaseSince;
+                    bb::mascot::Draw(target_.Get(), c, size * 1.05f, pillMood, now, moodSince, MascotLook(c));
                     if (mLayer) target_->PopLayer();
                 }
 
@@ -18310,7 +18336,24 @@ class Renderer {
         return 1.0f - SmoothStep01(static_cast<float>((phase - 6.5) / 0.5));
     }
 
-    void DrawAlbumArt(const MediaSnapshot& media, D2D1_RECT_F rect, double now, float radius = 9.0f, bool drawBadge = true) {
+    // Bunbun: the cover takes its own shape (a video's 16:9 thumbnail isn't squashed
+    // into a square). `growLeft`: keep the slot's height and widen leftwards (the Home
+    // Music tile has room there); otherwise fit inside the slot, centred.
+    static D2D1_RECT_F ArtShape(const MediaSnapshot& media, D2D1_RECT_F rect, bool growLeft) {
+        if (!media.art || media.art->width <= 0 || media.art->height <= 0) return rect;
+        const float aspect = Clamp(static_cast<float>(media.art->width) / media.art->height, 0.75f, 1.78f);
+        const float w = rect.right - rect.left, h = rect.bottom - rect.top;
+        if (w <= 1.0f || h <= 1.0f || std::fabs(aspect - w / h) < 0.06f) return rect;
+        if (growLeft) return D2D1::RectF(rect.right - h * aspect, rect.top, rect.right, rect.bottom);
+        const float fw = std::min(w, h * aspect), fh = fw / aspect;
+        const float cx = (rect.left + rect.right) * 0.5f, cy = (rect.top + rect.bottom) * 0.5f;
+        return D2D1::RectF(cx - fw * 0.5f, cy - fh * 0.5f, cx + fw * 0.5f, cy + fh * 0.5f);
+    }
+
+    void DrawAlbumArt(const MediaSnapshot& media, D2D1_RECT_F rect, double now, float radius = 9.0f, bool drawBadge = true,
+                      bool growLeft = false) {
+        rect = ArtShape(media, rect, growLeft);  // Bunbun
+        radius = std::min(radius, std::min(rect.right - rect.left, rect.bottom - rect.top) * 0.18f);  // a short wide cover stays a card
         ComPtr<ID2D1Geometry> mask = GetShapeGeometry(rect, radius, false);
         ID2D1Layer* layer = AcquireLayer();
         const bool roundedClip = mask && layer;
@@ -18365,7 +18408,9 @@ class Renderer {
                 D2D1_POINT_2F c{};
                 float size = 0.0f;
                 bb::mascot::FitToBox(D2D1::RectF(mid.x - side * 0.5f, mid.y - side * 0.5f, mid.x + side * 0.5f, mid.y + side * 0.5f), &c, &size);
-                bb::mascot::Draw(target_.Get(), c, size, MediaMascotMood(media, g_settings), now, 0.0, MascotLook(c));
+                double moodSince = 0.0;  // Bunbun: a logged glass plays here too
+                const bb::mascot::Mood coverMood = WithWaterMood(MediaMascotMood(media, g_settings), now, &moodSince);
+                bb::mascot::Draw(target_.Get(), c, size, coverMood, now, moodSince, MascotLook(c));
                 if (fade) target_->PopLayer();
             }
         }
@@ -22068,6 +22113,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ApplyBackdropMaterial(hwnd);
             return 0;
 
+        case WM_APP_TEST_CLOSE:
+            if (g_lookupUi.open) CloseLookupPanel(hwnd);
+            return 0;
+        case WM_APP_TEST_HITS: {  // Bunbun: copy the click spots for the test hook
+            auto* out = reinterpret_cast<std::string*>(lParam);
+            std::string s = "[";
+            char buf[96];
+            for (const StudioHit& h : g_studioHits) {
+                snprintf(buf, sizeof buf, "%s[%d,%d,%.0f,%.0f,%.0f,%.0f]", s.size() > 1 ? "," : "", static_cast<int>(h.action),
+                         h.arg, h.rect.left, h.rect.top, h.rect.right, h.rect.bottom);
+                s += buf;
+            }
+            *out = s + "]";
+            return 0;
+        }
         case WM_APP_SUBMIT_ASK: {
             StartQuickLookup(hwnd);
             wchar_t* q = reinterpret_cast<wchar_t*>(lParam);
@@ -23428,10 +23488,21 @@ DWORD WINAPI RenderThreadProc(void*) {
         const bool mediaStop = ringHost == IslandKind::Idle && g_settings.media && snapshot.media.available;
         const int ringSize = static_cast<int>(ringActivities.size()) + ringTabs + (mediaStop ? 1 : 0);
         g_activeActivityCount.store(ringSize, std::memory_order_relaxed);
+        // Bunbun: a timer, agent or download joining or leaving the ring shifts every
+        // page's stop. Keep the page on screen (Reset on a running timer jumped to the
+        // next page). Only while a page is shown, not the activity itself.
+        {
+            const int count = static_cast<int>(ringActivities.size());
+            const int was = g_ringActivityCount.load(std::memory_order_relaxed);
+            const int idx = g_activityIndex.load(std::memory_order_relaxed);
+            if (count != was && idx >= was && idx > 0)
+                g_activityIndex.store(std::max(count, idx + (count - was)), std::memory_order_relaxed);
+        }
         g_ringActivityCount.store(static_cast<int>(ringActivities.size()), std::memory_order_relaxed);  // Bunbun
 
         static double s_lastRingHover = 0.0;
-        if (now - s_lastRingHover > 2.5) g_activityIndex.store(0, std::memory_order_relaxed);
+        // Bunbun: not while pinned open (no pointer there to keep it alive).
+        if (now - s_lastRingHover > 2.5 && !g_pinnedExpanded.load()) g_activityIndex.store(0, std::memory_order_relaxed);
         int actIdx = ((g_activityIndex.load(std::memory_order_relaxed) % ringSize) + ringSize) % ringSize;
 
         IslandKind shownKind = kinds[0];
@@ -23629,6 +23700,20 @@ DWORD WINAPI RenderThreadProc(void*) {
             }
         }
 
+        // Bunbun: while a timer or stopwatch runs its pill comes first, and opening the
+        // island only made that pill taller: no way to the pages. In Studio it opens on the
+        // Timers page instead (the ring moves on to it; the pill is back once you leave).
+        if (g_settings.studioLayout && primary.kind == IslandKind::Timer && !secondary && (isHoverExpanded || pinned)) {
+            // In the page list of the view it opens in (music adds pages to it).
+            const std::vector<int> ids = DashboardTabIds(ringHost == IslandKind::Media ? 0 : 1, g_settings);
+            const auto it = std::find(ids.begin(), ids.end(), kTabFocus);
+            if (it != ids.end()) {
+                const int tab = static_cast<int>(it - ids.begin());
+                g_idleTab = tab;
+                g_activityIndex.store(static_cast<int>(ringActivities.size()) + tab, std::memory_order_relaxed);
+                needsRender = true;
+            }
+        }
         {
             // Bunbun: a blip when the dashboard opens or folds (Bunbun.SoundOpenClose).
             static bool s_wasOpen = false;
@@ -24875,6 +24960,43 @@ bool SavePagePicture(const std::wstring& dir, StudioPage page) {
 }
 
 }  // namespace
+
+int IslandTestOpen(int tab) {
+    if (tab < 0) {
+        g_pinnedExpanded = false;
+        g_clickExpanded = false;
+        if (g_hwnd) PostMessageW(g_hwnd, WM_APP_TEST_CLOSE, 0, 0);
+    } else {
+        g_pinnedExpanded = true;
+        g_idleTab = tab;
+        // As the tab bar does: the ring's stop for that page too (else the ring puts the old page back).
+        g_activityIndex.store(g_ringActivityCount.load(std::memory_order_relaxed) + tab, std::memory_order_relaxed);
+    }
+    g_layoutDirty = true;
+    if (g_hwnd) PostMessageW(g_hwnd, WM_APP_NEW_EVENT, 0, 0);
+    const Settings s = GetSettingsCopy();
+    return static_cast<int>(DashboardTabIds(g_dashboardContext.load(std::memory_order_relaxed), s).size());
+}
+
+std::string IslandTestHits() {
+    std::string out = "[]";
+    if (HWND hwnd = g_hwnd) {
+        DWORD_PTR r = 0;
+        SendMessageTimeoutW(hwnd, WM_APP_TEST_HITS, 0, reinterpret_cast<LPARAM>(&out), SMTO_ABORTIFHUNG, 2000, &r);
+    }
+    return out;
+}
+
+bool IslandTestClick(int x, int y) {
+    HWND hwnd = g_hwnd;
+    if (!hwnd) return false;
+    const LPARAM at = MAKELPARAM(x, y);
+    SendMessageW(hwnd, WM_MOUSEMOVE, 0, at);
+    SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, at);
+    SendMessageW(hwnd, WM_LBUTTONUP, 0, at);
+    g_layoutDirty = true;
+    return true;
+}
 
 int IslandCapturePages() {
     if (g_capturingPages.exchange(true)) return 0;

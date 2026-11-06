@@ -33,9 +33,13 @@
             if (smallTextFormat_) {
                 const wchar_t* hint = Loc(L"Nothing to do. Press Ctrl+Alt+B and try “add buy milk” or “remind me at 3pm to call Sam”.");
                 mutedBrush_->SetOpacity(0.7f);
+                // Bunbun: wrapped; on one line it ran off the page's right edge.
+                const DWRITE_WORD_WRAPPING wrap = smallTextFormat_->GetWordWrapping();
+                smallTextFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
                 target_->DrawTextW(hint, static_cast<UINT32>(wcslen(hint)), smallTextFormat_.Get(),
                                    D2D1::RectF(rect.left + padX, rect.top + (kListTop + 6.0f) * scale, rect.right - padX, rect.top + (kListTop + 60.0f) * scale),
                                    mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                smallTextFormat_->SetWordWrapping(wrap);
             }
             mutedBrush_->SetOpacity(0.75f);
             return;

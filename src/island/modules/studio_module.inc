@@ -1047,7 +1047,8 @@ void FocusGuardLoop() {
         double left = 0.0;
         {
             std::lock_guard lock(g_stateMutex);
-            running = g_state.timer.active && g_state.timer.running && !g_state.timer.isBreak;
+            // Bunbun: focus only; a plain countdown ("Timer") isn't a focus session.
+            running = g_state.timer.active && g_state.timer.running && !g_state.timer.isBreak && g_state.timer.label != L"Timer";
             left = g_state.timer.endsAt - NowSeconds();
         }
         if (!running) continue;

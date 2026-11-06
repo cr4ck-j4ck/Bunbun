@@ -137,6 +137,14 @@ void WaterDrink() {
     Water::ClearPill();
 }
 
+// The music pill's mascot: its own mood, unless a water moment is playing.
+bool WaterMood(double now, bb::mascot::Mood* mood, double* since);
+bb::mascot::Mood WithWaterMood(bb::mascot::Mood base, double now, double* since) {
+    *since = 0.0;
+    if (WaterMood(now, &base, since)) g_layoutDirty = true;  // keep frames coming while it plays
+    return base;
+}
+
 // The mascot's water moment, if one is playing: drinking, then the goal's cheer.
 bool WaterMood(double now, bb::mascot::Mood* mood, double* since) {
     const double drank = g_waterDrankAt.load(std::memory_order_relaxed);

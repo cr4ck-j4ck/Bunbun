@@ -5,6 +5,30 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Buttons inside the open island stopped working** with islands on all displays in Separate mode
+  (the Timers page's Focus / Timer / Stopwatch / Water, and other Studio buttons). Windows.
+- **Opening the island while a timer runs** goes to the Timers page. Before, it only made the
+  timer's pill taller, with no way to the pages while a timer or stopwatch ran.
+- **Reset on a running timer** no longer jumps the open island to the next page.
+- **Focus Guard** ("Still focusing · … can wait") only comes with focus sessions, not a plain
+  countdown; Ask Bun's "timer 5 min" pill now says Timer instead of Focus Timer.
+- **An agent's command approval** no longer shows the diff of the session's previous edit.
+- **The music pill's mascot shows what your agent is doing** too (with the agent pill off).
+- **All Apps in Classic** fits every page: smaller tiles and short names in narrow columns.
+- **Cover art keeps its shape.** A video's wide thumbnail isn't squashed into a square any more:
+  on Home's Music tile it widens to the left, on the Music page it's a wide card.
+- **The cards on System, Weather and Screen Time** have the same rounded corners top and bottom
+  (the page was clipped with the island's own, much bigger, corner radius; it also cut the first
+  letter of the Agent page's bottom line). No bottom glow behind those cards any more.
+- **All Apps lists every page** (it stopped at twelve; Mirror and Screen Time were missing).
+- **Screen Time's figures** no longer run into each other ("2h 12m2h 12m"); a long one steps down a size.
+- **The To-do page's hint** wraps instead of running off the right edge; Clipboard shows no
+  "Today" over an empty list.
+- **Bun drinks along on the music pill too** (it only did on the clock pill and the open island).
+- **Reply to an agent no longer looks like Ask Bun.** The box says who you're messaging and shows
+  the task you're answering; Ask Bun's ideas, chat history and New chat stay out of it. Windows.
+
 ## [0.3.8]
 
 ### Added
