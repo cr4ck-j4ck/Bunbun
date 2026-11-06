@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.9]
+
 ### Fixed
 - **Buttons inside the open island stopped working** with islands on all displays in Separate mode
   (the Timers page's Focus / Timer / Stopwatch / Water, and other Studio buttons). Windows.
