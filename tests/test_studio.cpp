@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/common/timers.h"
 #include "../src/island/studio_pages.h"
 
 namespace st = bb::studio;
@@ -46,6 +47,31 @@ static void TestPageOrder() {
     // Home can't be moved: it isn't a key.
     s.order = L"home,weather";
     CHECK(Pages(1, s).front() == P::Home);
+
+    // Studio merges hardware and connectivity into a single System page:
+    st::PageSwitches m;
+    m.studio = true;
+    m.system = true;
+    m.toggles = true;
+    m.calendar = m.weather = m.agent = m.tray = m.todo = m.lyrics = false;
+    m.clipboard = m.note = m.focus = m.mirror = m.apps = m.water = false;
+    CHECK((Pages(1, m) == std::vector<P>{P::Home, P::Hardware}));
+    m.system = false;
+    m.toggles = true;
+    CHECK((Pages(1, m) == std::vector<P>{P::Home, P::Hardware}));
+    m.system = true;
+    m.toggles = false;
+    CHECK((Pages(1, m) == std::vector<P>{P::Home, P::Hardware}));
+    m.system = false;
+    m.toggles = false;
+    CHECK((Pages(1, m) == std::vector<P>{P::Home}));
+    st::PageSwitches cl;
+    cl.studio = false;
+    cl.system = true;
+    cl.toggles = true;
+    cl.calendar = cl.weather = cl.agent = cl.tray = cl.todo = cl.lyrics = false;
+    cl.clipboard = cl.note = cl.focus = cl.mirror = cl.apps = cl.water = false;
+    CHECK((Pages(1, cl) == std::vector<P>{P::Home, P::Hardware, P::Connectivity}));
 
     // Lyrics only in the media view; pinned first, it goes right after Home.
     s.order.clear();
@@ -92,7 +118,7 @@ static void TestNamesAndColours() {
     CHECK(st::AgentBrand(L"Claude Code") == 0xd97757);
     CHECK(st::AgentBrand(L"Antigravity") == 0x3186ff);
     CHECK(st::AgentBrand(L"VS Code") == 0x0098ff && st::AgentBrand(L"Copilot") == 0x0098ff);
-    CHECK(st::AgentBrand(L"Cursor") == 0xd6d6d6);
+    CHECK(st::AgentBrand(L"Cursor") == 0x5bb2ff);
     CHECK(st::AgentBrand(L"Codex") == 0x10a37f);
     CHECK(st::AgentStatus(bb::AgentPhase::Finished) == 0x30d158);
     CHECK(st::UsageColour(10) == 0x22e05a && st::UsageColour(60) == 0xff9a1f && st::UsageColour(90) == 0xff3b3b);
@@ -157,11 +183,66 @@ static void TestAgentCards() {
           reply.getString("deny") == "Use \xC3\xA9t\xC3\xA9 \xF0\x9F\x98\x80");
 }
 
+static void TestTimers() {
+    namespace tm = bb::timers;
+    using P = tm::Phase;
+    tm::PomodoroConfig c;  // 25 / 5 / 15, 4 cycles
+    tm::Pomodoro p;
+    CHECK(tm::PhaseLabel(p, c) == L"Focus 1 of 4");
+    // focus -> short break -> focus 2 ... focus 4 -> long break -> focus 1
+    std::vector<P> seen;
+    for (int i = 0; i < 9; ++i) {
+        tm::Advance(&p, c, 20261106, true);
+        seen.push_back(p.phase);
+    }
+    CHECK((seen == std::vector<P>{P::ShortBreak, P::Focus, P::ShortBreak, P::Focus, P::ShortBreak, P::Focus, P::LongBreak,
+                                  P::Focus, P::ShortBreak}));
+    CHECK(p.cycle == 1 && p.sessionsToday == 5);
+    // A skipped focus doesn't count; a new day starts at zero.
+    tm::Pomodoro q;
+    tm::Advance(&q, c, 20261106, false);
+    CHECK(q.sessionsToday == 0 && q.phase == P::ShortBreak);
+    tm::Advance(&q, c, 20261107, true);  // the break ends the next day
+    CHECK(q.sessionsToday == 0 && q.day == 20261107 && q.cycle == 2);
+    CHECK(tm::DoneMessage(P::Focus, P::LongBreak) == L"Cycle done \x00B7 Take a long break");
+    tm::PomodoroConfig one = tm::Sanitize({50, 10, 30, 1, true});
+    tm::Pomodoro r;
+    CHECK(tm::NextPhase(r, one) == P::LongBreak);  // one cycle: every focus earns the long break
+
+    // The dial: a turn is an hour, snapped to minutes; 12 o'clock is a full turn.
+    CHECK(tm::SecondsFromAngle(3.14159265358979) == 30 * 60);
+    CHECK(tm::SecondsFromAngle(0.0) == 60 * 60);
+    CHECK(tm::SecondsFromAngle(-1.5707963267949) == 45 * 60);
+    CHECK(tm::DialFraction(15 * 60) == 0.25 && tm::DialFraction(3600) == 1.0 && tm::DialFraction(0) == 0.0);
+    CHECK(tm::StepCountdown(25 * 60 + 30, 1, false) == 26 * 60);
+    CHECK(tm::StepCountdown(60, -3, false) == 60 && tm::StepCountdown(60, -2, true) == 50);
+
+    // Presets: minutes or m:ss, no duplicates, at most six.
+    const auto pr = tm::ParsePresets(L" 5, 10,1:30 , 10, x, 0, 25, 45, 60, 90");
+    CHECK((pr == std::vector<int>{300, 600, 90, 1500, 2700, 3600}));
+    CHECK(tm::SerializePresets({300, 90}) == L"5, 1:30");
+    CHECK(tm::PresetLabel(90 * 60) == L"1 h 30" && tm::PresetLabel(25 * 60) == L"25 min" && tm::PresetLabel(90) == L"1:30");
+    CHECK((tm::AddPreset(pr, 600) == std::vector<int>{600, 300, 90, 1500, 2700, 3600}));
+    CHECK(tm::AddPreset(pr, 120).size() == 6 && tm::AddPreset(pr, 120).front() == 120);
+
+    // Stopwatch: laps, marks and text.
+    std::vector<tm::Lap> laps;
+    CHECK(tm::MarkLaps(laps).fastest == -1);
+    tm::AddLap(&laps, 10.0);
+    tm::AddLap(&laps, 18.5);
+    tm::AddLap(&laps, 30.0);
+    const tm::LapMarks m = tm::MarkLaps(laps);
+    CHECK(m.fastest == 1 && m.slowest == 2);
+    CHECK(tm::StopwatchText(247.256) == L"4:07.25" && tm::StopwatchText(3723.4) == L"1:02:03.40");
+    CHECK(tm::LapsText(laps).rfind(L"Lap\tSplit\tTotal\n1\t0:10.00\t0:10.00\n2\t0:08.50\t0:18.50", 0) == 0);
+}
+
 int main() {
     TestPageOrder();
     TestNamesAndColours();
     TestHome();
     TestAgentCards();
+    TestTimers();
     if (g_failed) {
         std::printf("%d studio check(s) failed\n", g_failed);
         return 1;

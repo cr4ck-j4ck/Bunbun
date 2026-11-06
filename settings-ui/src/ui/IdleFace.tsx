@@ -55,6 +55,7 @@ export function IdleFaceSettings({ title = "Island face" }: { title?: string }) 
         </>
       )}
       <Setting k="Bunbun.IdleStripItems" />
+      {s.get("Bunbun.IdleStripItems").startsWith("name") && <Setting k="Bunbun.IdleName" />}
       <Setting k="Bunbun.StatusRing" />
     </Section>
   );

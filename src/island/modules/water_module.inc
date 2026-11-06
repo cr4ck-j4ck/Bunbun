@@ -117,9 +117,41 @@ void Change(F&& f) {
 
 }  // namespace Water
 
+// Bunbun: the mascot drinks along when a glass is logged, and celebrates the glass
+// that reaches the day's goal (DrawBunSlot reads these, see WaterMood).
+std::atomic<double> g_waterDrankAt{-100.0};
+std::atomic<double> g_waterGoalAt{-100.0};
+constexpr double kDrinkSeconds = 2.6, kGoalCheerSeconds = 3.0;
+
 void WaterDrink() {
-    Water::Change([](const bb::water::Settings& s, bb::water::Day& d, int) { bb::water::Drink(s, d, s.glassMl); });
+    bool reached = false;
+    Water::Change([&reached](const bb::water::Settings& s, bb::water::Day& d, int) {
+        const int before = d.takenMl;
+        bb::water::Drink(s, d, s.glassMl);
+        reached = s.goalMl > 0 && before < s.goalMl && d.takenMl >= s.goalMl;
+    });
+    const double now = NowSeconds();
+    g_waterDrankAt.store(now, std::memory_order_relaxed);
+    if (reached) g_waterGoalAt.store(now + kDrinkSeconds, std::memory_order_relaxed);  // after the last sip
+    g_layoutDirty = true;
     Water::ClearPill();
+}
+
+// The mascot's water moment, if one is playing: drinking, then the goal's cheer.
+bool WaterMood(double now, bb::mascot::Mood* mood, double* since) {
+    const double drank = g_waterDrankAt.load(std::memory_order_relaxed);
+    const double goal = g_waterGoalAt.load(std::memory_order_relaxed);
+    if (now - drank >= 0.0 && now - drank < kDrinkSeconds) {
+        *mood = bb::mascot::Mood::Drinking;
+        *since = drank;
+        return true;
+    }
+    if (now - goal >= 0.0 && now - goal < kGoalCheerSeconds) {
+        *mood = bb::mascot::Mood::Happy;
+        *since = goal;
+        return true;
+    }
+    return false;
 }
 void WaterUndo() {
     Water::Change([](const bb::water::Settings& s, bb::water::Day& d, int) { bb::water::Undo(s, d); });

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -89,11 +90,60 @@ inline bool Printable(std::string_view s) {
     return true;
 }
 
+// Models that share one quota (the same fraction left and the same reset time):
+// Antigravity pools them, e.g. the three Gemini Flash variants, or Claude and
+// GPT-OSS together. `name` lists the models without their "(High)" style suffix.
+struct Pool {
+    std::string name;
+    float remaining = 1.0f;
+    long long resetAt = 0;
+};
+
 struct Quota {
     float remaining = 1.0f;  // lowest fraction left across models
     std::string model;       // the model with that lowest fraction
     long long resetAt = 0;   // its reset time, Unix seconds
+    std::vector<Pool> pools; // every pool, the most used first
 };
+
+// The cache is only rewritten while Antigravity runs: once a pool's reset time has
+// passed, its quota has refilled even though the cached number hasn't moved.
+inline float RemainingNow(float remaining, long long resetAt, long long now) {
+    return resetAt > 0 && resetAt <= now ? 1.0f : remaining;
+}
+
+// "Gemini 3.8 Flash (High)" -> "Gemini 3.8 Flash".
+inline std::string BaseModelName(std::string n) {
+    const size_t p = n.rfind(" (");
+    if (p != std::string::npos && !n.empty() && n.back() == ')') n.resize(p);
+    return n;
+}
+
+// Groups (name, remaining, reset) per model into pools.
+inline std::vector<Pool> MakePools(const std::vector<Pool>& models) {
+    std::vector<Pool> pools;
+    std::vector<std::vector<std::string>> names;
+    for (const Pool& m : models) {
+        size_t i = 0;
+        for (; i < pools.size(); ++i)
+            if (pools[i].resetAt == m.resetAt && std::abs(pools[i].remaining - m.remaining) < 1e-4f) break;
+        if (i == pools.size()) {
+            pools.push_back({"", m.remaining, m.resetAt});
+            names.emplace_back();
+        }
+        const std::string base = BaseModelName(m.name);
+        if (std::find(names[i].begin(), names[i].end(), base) == names[i].end()) names[i].push_back(base);
+    }
+    for (size_t i = 0; i < pools.size(); ++i) {
+        // Two names in full; more as "A, B +2".
+        std::string n;
+        for (size_t k = 0; k < names[i].size() && k < 2; ++k) n += (k ? ", " : "") + names[i][k];
+        if (names[i].size() > 2) n += " +" + std::to_string(names[i].size() - 2);
+        pools[i].name = n;
+    }
+    std::stable_sort(pools.begin(), pools.end(), [](const Pool& a, const Pool& b) { return a.remaining < b.remaining; });
+    return pools;
+}
 
 // Decodes the stored value. False when the layout isn't the expected one.
 inline bool Decode(const std::string& value, Quota* out) {
@@ -128,6 +178,7 @@ inline bool Decode(const std::string& value, Quota* out) {
     if (!Parse(status, &root)) return false;
     bool valid = false;
     Quota q;
+    std::vector<Pool> models;
     for (const Field& f33 : root) {
         if (f33.num != 33 || f33.wire != 2) continue;
         std::vector<Field> group;
@@ -156,6 +207,7 @@ inline bool Decode(const std::string& value, Quota* out) {
                 }
             }
             if (remaining < 0.0f || remaining > 1.0001f) continue;
+            models.push_back({name, remaining, reset});
             if (!valid || remaining < q.remaining) {
                 valid = true;
                 q.remaining = remaining;
@@ -164,8 +216,10 @@ inline bool Decode(const std::string& value, Quota* out) {
             }
         }
     }
-    if (valid) *out = q;
-    return valid;
+    if (!valid) return false;
+    q.pools = MakePools(models);
+    *out = q;
+    return true;
 }
 
 }  // namespace bb::agquota

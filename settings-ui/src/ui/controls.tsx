@@ -105,7 +105,8 @@ export function Row({ label, description, children, settingKeys }: { label: Reac
     <div className="row">
       <div className="label">
         <b>{label}{linuxMissing && <em className="badge muted linux">Not on Linux yet</em>}</b>
-        {description && <span>{description}</span>}
+        {/* Two lines at most (styles.css); the whole text shows on hover. */}
+        {description && <span title={typeof description === "string" ? description : undefined}>{description}</span>}
       </div>
       <div className="control">
         {settingKeys && (

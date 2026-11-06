@@ -387,7 +387,7 @@ std::string Base64Decode(const std::string& in) {
 }
 
 // Asks the running island for a snapshot. Empty when the island isn't running.
-bool RequestIslandSnapshot(Value* reply, const char* command = "snapshot") {
+bool RequestIslandSnapshot(Value* reply, const char* command = "snapshot", int display = 0) {
     const std::wstring name = bb::pipe::Name();
     HANDLE h = INVALID_HANDLE_VALUE;
     for (int attempt = 0; attempt < 20 && h == INVALID_HANDLE_VALUE; ++attempt) {
@@ -401,7 +401,9 @@ bool RequestIslandSnapshot(Value* reply, const char* command = "snapshot") {
     if (h == INVALID_HANDLE_VALUE) return false;
     if (!bb::pipe::ServerIsSameUser(h)) { CloseHandle(h); return false; }
     std::string line;
-    const bool ok = bb::pipe::WriteAll(h, std::string("{\"bunbun_command\":\"") + command + "\"}\n") &&
+    // Bunbun: "display": n previews that display's island (a mirror on another screen).
+    const std::string extra = display > 0 ? ",\"display\":" + std::to_string(display) : "";
+    const bool ok = bb::pipe::WriteAll(h, std::string("{\"bunbun_command\":\"") + command + "\"" + extra + "}\n") &&
                     bb::pipe::ReadLine(h, &line);
     CloseHandle(h);
     return ok && bb::json::Parse(line, reply) && reply->isObject();
@@ -493,7 +495,7 @@ Value PagePreviews(double since) {
 Value CapturePreview(const Value& args) {
     Value out = Value::Object();
     Value snap;
-    if (!RequestIslandSnapshot(&snap)) {
+    if (!RequestIslandSnapshot(&snap, "snapshot", static_cast<int>(args.getNumber("display", 0)))) {
         out["running"] = Value::Bool(false);
         return out;
     }

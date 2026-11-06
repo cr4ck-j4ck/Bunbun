@@ -30,6 +30,8 @@ bool IslandAskHotkeyActive();
 // rect / work area of its display. False when nothing is shown. Any thread.
 #include <string>
 bool IslandSnapshotPng(std::string* png, RECT* screen, RECT* monitor, RECT* work);
+// Moves a snapshot's rects to display `index` (1-based) when that display shows a mirror.
+bool IslandDisplayPlace(int index, RECT* screen, RECT* monitor, RECT* work);
 // Bunbun: steps the open island through its pages and saves a snapshot of each to
 // %LOCALAPPDATA%\Bunbun\previews\<page>.png (in the background). Returns how many
 // pages it will capture, 0 when a capture is already running.

@@ -1,7 +1,7 @@
 import { Check } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useStore } from "../store";
-import { LinuxBadge, PageHead, Section, Setting } from "../ui/controls";
+import { LinuxBadge, Section, Setting } from "../ui/controls";
 
 // The island's own multipliers per style (island_core.cpp, render loop).
 const STYLES = [
@@ -87,13 +87,14 @@ function Demo({ km, dm, speed }: { km: number; dm: number; speed: number }) {
   );
 }
 
-export function Animations() {
+// How the island moves and when it appears. Shown on the Position & motion page,
+// under the screen and position settings (Displays.tsx).
+export function MotionSections() {
   const s = useStore();
   const style = s.get("Animations.AnimationStyle");
   const speed = SPEEDS[String(s.get("Animations.AnimationSpeed"))] ?? 1;
   return (
-    <div className="page">
-      <PageHead title="Animations" subtitle="How the island moves: the spring behind every resize, its speed, and how smooth everything runs." />
+    <>
       <section className="section">
         <h3>Motion style<LinuxBadge keys={["Animations.AnimationStyle"]} /></h3>
         <p className="section-note">Each preview runs the island's real spring at your animation speed. The line underneath
@@ -130,6 +131,6 @@ export function Animations() {
         <Setting k="Behavior.UnhideOnHover" />
         <Setting k="Behavior.AlwaysOnTop" />
       </Section>
-    </div>
+    </>
   );
 }

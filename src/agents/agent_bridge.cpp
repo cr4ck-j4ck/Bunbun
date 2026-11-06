@@ -329,7 +329,7 @@ std::deque<AgentView::HistoryItem> g_history;
 int g_jobsToday = 0;
 int g_jobsDay = -1;  // day of year g_jobsToday counts
 float g_usage5h = -1, g_usage7d = -1, g_contextPct = -1;
-long long g_usage5hResets = 0;
+long long g_usage5hResets = 0, g_usage7dResets = 0;
 double g_usageAt = 0;
 
 int DayOfYear() {
@@ -353,6 +353,7 @@ void FillGlobalsLocked(AgentView* v) {
     v->usage7d = g_usage7d;
     v->contextPct = g_contextPct;
     v->usage5hResets = g_usage5hResets;
+    v->usage7dResets = g_usage7dResets;
     v->usageAt = g_usageAt;
     // The most recent session still listening for a reply, whatever is on screen.
     for (auto it = g_replyWaiters.rbegin(); it != g_replyWaiters.rend(); ++it) {
@@ -580,6 +581,10 @@ std::string HandleEvent(const Value& msg) {
             if (five) {
                 const Value* r = five->find("resets_at");
                 if (r && r->isNumber()) g_usage5hResets = static_cast<long long>(r->num);
+            }
+            if (week) {  // Bunbun: the weekly limit's reset too, for the Agent page
+                const Value* r = week->find("resets_at");
+                if (r && r->isNumber()) g_usage7dResets = static_cast<long long>(r->num);
             }
             if (const float p = Percent(msg.find("context_window"), "used_percentage"); p >= 0) g_contextPct = p;
             g_usageAt = now;
@@ -861,6 +866,9 @@ std::string HandleCommand(const std::string& cmd, const Value& msg) {
         std::string png;
         RECT screen{}, monitor{}, work{};
         out["shown"] = Value::Bool(IslandSnapshotPng(&png, &screen, &monitor, &work));
+        // Bunbun: "display": n previews that display's island (a mirror), when it has one.
+        if (!png.empty() && msg.getNumber("display", 0) > 0)
+            out["display"] = Value::Bool(IslandDisplayPlace(static_cast<int>(msg.getNumber("display", 0)), &screen, &monitor, &work));
         if (!png.empty()) {
             out["png"] = Value::String(Base64(png));
             out["island"] = RectJson(screen);

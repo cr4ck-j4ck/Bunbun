@@ -38,6 +38,14 @@ enum class Action {
     ColorPick, ColorCopy,
     // The Water page (water_linux.cpp)
     WaterAdd, WaterUndo, WaterRefill,
+    // The Studio header's close button; Weather's unit and city; the System page's radios
+    Close, WeatherUnit, WeatherCity, RadioToggle, RadioSettings,
+    // The Timers page (timers_linux.cpp)
+    TimerMode, PomoToggle, PomoSkip, PomoReset, PomoAuto, PomoLength, CountToggle, CountAdd, CountReset,
+    CountPreset, CountSave, TimerRing, SwToggle, SwLap, SwReset, SwCopy,
+    VolumeMute, VolumeSet,  // the System page's volume card
+    ScreenTimeLimit,        // the Screen Time page's limit: steps through 2 to 12 hours
+    ClipFilter, ClipSelect, ClipDelete,  // the Clipboard page's two panels
 };
 struct Hit {
     Rect r;
@@ -91,6 +99,10 @@ void StudioShowShelf();
 bool StudioOnMirror();  // the Mirror page is the one showing
 // The frame: header, the current page, tab bar. `mix` fades it in (0..1).
 void PaintStudio(cairo_t* cr, const Rect& island, double mix);
+void StudioAccentRgb(double rgb[3]);
+void CloseIsland();
+// The wheel over the Timers dial sets its time; true when it did (else the wheel turns pages).
+bool StudioScrollTimer(double delta, bool fine);  // the header's close button: fold, and stay folded until the pointer leaves  // the island's accent (album art or custom), for the edge light
 // The wheel or a touchpad over the open frame: the next or previous page.
 void StudioScroll(double delta);
 // Plan and several-question cards (drawn instead of the plain approval card).

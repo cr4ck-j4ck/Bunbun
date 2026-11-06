@@ -31,7 +31,7 @@ constexpr float kPageH = 184.0f;
 constexpr float kIslandH = kPageH + kHeaderH + kFooterH;
 
 // ── Pages and tab ids ────────────────────────────────────────────────────────
-enum class Page { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror, Water };
+enum class Page { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror, Water, ScreenTime };
 
 // Extra pages share their ids in both views; the built-in ids differ per view
 // (context 0 = the media view, 1 = the idle view; see PageFor).
@@ -43,6 +43,7 @@ constexpr int kTabApps = 24;
 constexpr int kTabMirror = 25;
 constexpr int kTabHome = 26;  // Home in the media view (Studio), so it stays while music plays
 constexpr int kTabWater = 27;
+constexpr int kTabScreenTime = 28;
 
 // Which pages are switched on (and exist on this system). Calendar has no switch
 // on Windows; Linux turns off what it hasn't ported.
@@ -51,6 +52,7 @@ struct PageSwitches {
     bool lyricsPinnedFirst = false;  // the media view opens on Lyrics
     bool calendar = true, weather = true, system = true, toggles = true, tray = false, todo = true, lyrics = true;
     bool agent = true, clipboard = true, note = true, focus = true, mirror = false, apps = true, water = true;
+    bool screentime = false;
     std::wstring order;              // Bunbun.PageOrder: page keys, comma-separated
 };
 
@@ -67,14 +69,15 @@ constexpr OrderedPage kOrderedPages[] = {
     {L"tray", 4, 4},      {L"todo", 7, 7},              {L"lyrics", 5, -1},          {L"agent", kTabAgent, kTabAgent},
     {L"clipboard", kTabClipboard, kTabClipboard},       {L"note", kTabNote, kTabNote},
     {L"focus", kTabFocus, kTabFocus},                   {L"water", kTabWater, kTabWater},
-    {L"mirror", kTabMirror, kTabMirror},                {L"apps", kTabApps, kTabApps},
+    {L"mirror", kTabMirror, kTabMirror},                {L"screentime", kTabScreenTime, kTabScreenTime},
+    {L"apps", kTabApps, kTabApps},
 };
 
 inline bool PageOn(std::wstring_view k, const PageSwitches& s) {
     if (k == L"calendar") return s.calendar;
     if (k == L"weather") return s.weather;
-    if (k == L"system") return s.system;
-    if (k == L"toggles") return s.toggles;
+    if (k == L"system") return s.studio ? (s.system || s.toggles) : s.system;
+    if (k == L"toggles") return s.studio ? false : s.toggles;
     if (k == L"tray") return s.tray;
     if (k == L"todo") return s.todo;
     if (k == L"lyrics") return s.lyrics;
@@ -84,6 +87,7 @@ inline bool PageOn(std::wstring_view k, const PageSwitches& s) {
     if (k == L"focus") return s.focus;
     if (k == L"mirror") return s.mirror;
     if (k == L"water") return s.water;
+    if (k == L"screentime") return s.screentime;
     return s.apps;
 }
 
@@ -103,6 +107,7 @@ inline std::vector<int> TabIds(int context, const PageSwitches& s) {
         std::wstring key = order.substr(at, comma - at);
         key.erase(0, key.find_first_not_of(L" \t"));
         key.erase(key.find_last_not_of(L" \t") + 1);
+        if (s.studio && EqualsNoCase(key, L"toggles")) key = L"system";
         for (size_t i = 0; i < kCount; ++i)
             if (rank[i] >= 1000 && !key.empty() && EqualsNoCase(key, kOrderedPages[i].key)) rank[i] = pos++;
         at = comma + 1;
@@ -135,6 +140,7 @@ inline Page PageFor(int context, int id) {
     if (id == kTabApps) return Page::Apps;
     if (id == kTabMirror) return Page::Mirror;
     if (id == kTabWater) return Page::Water;
+    if (id == kTabScreenTime) return Page::ScreenTime;
     if (context == 0) {
         switch (id) {
             case 0: return Page::Music;
@@ -173,10 +179,11 @@ inline void PageName(Page page, const std::wstring& agentName, std::wstring* fir
         case Page::Lyrics: *first = L"Live "; *second = L"Lyrics"; break;
         case Page::Clipboard: *first = L"Clip"; *second = L"board"; break;
         case Page::Note: *first = L"Quick "; *second = L"Note"; break;
-        case Page::Focus: *first = L"Focus "; *second = L"Timer"; break;
+        case Page::Focus: *first = L"Your "; *second = L"Timers"; break;
         case Page::Apps: *first = L"All "; *second = L"Apps"; break;
         case Page::Mirror: *first = L"Mir"; *second = L"ror"; break;
         case Page::Water: *first = L"Stay "; *second = L"Hydrated"; break;
+        case Page::ScreenTime: *first = L"Screen "; *second = L"Time"; break;
         case Page::Agent: {
             const std::wstring name = agentName.empty() ? L"Coding Agents" : agentName;
             const size_t space = name.find(L' ');
@@ -201,10 +208,11 @@ inline const wchar_t* TabLabel(Page page) {
         case Page::Agent: return L"Agent";
         case Page::Clipboard: return L"Clipboard";
         case Page::Note: return L"Note";
-        case Page::Focus: return L"Focus";
+        case Page::Focus: return L"Timers";
         case Page::Apps: return L"Apps";
         case Page::Mirror: return L"Mirror";
         case Page::Water: return L"Water";
+        case Page::ScreenTime: return L"Screen Time";
     }
     return L"";
 }
@@ -216,7 +224,7 @@ inline uint32_t AgentBrand(const std::wstring& agent) {
     if (agent.find(L"Codex") != std::wstring::npos) return 0x10a37f;  // OpenAI green
     if (agent.find(L"Antigravity") != std::wstring::npos || agent.find(L"Gemini") != std::wstring::npos)
         return 0x3186ff;                                               // Antigravity blue
-    if (agent.find(L"Cursor") != std::wstring::npos) return 0xd6d6d6;  // Cursor's monochrome
+    if (agent.find(L"Cursor") != std::wstring::npos) return 0x5bb2ff;  // Cursor cyan-blue
     if (agent.find(L"Copilot") != std::wstring::npos || agent.find(L"VS Code") != std::wstring::npos)
         return 0x0098ff;                                               // VS Code blue
     return 0xd97757;                                                   // Claude

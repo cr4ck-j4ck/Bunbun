@@ -182,10 +182,28 @@ struct OpenMeteoReport {
     float temp = 0, feels = 0;
     int humidity = 0, wwo = 0;
     std::wstring desc, wind, windDir;
-    float hi[2] = {}, lo[2] = {};
-    int rain[2] = {}, dayWwo[2] = {};
-    std::wstring dayDesc[2];
+    float uvIndex = 0.0f;
+    std::wstring uvDesc;
+    std::wstring sunrise, sunset;
+    float hi[5] = {}, lo[5] = {};
+    int rain[5] = {}, dayWwo[5] = {};
+    std::wstring dayDesc[5];
+    std::wstring dayName[5];
+    size_t dailyCount = 0;
+    WeatherHourlyPoint hourly[6];
+    size_t hourlyCount = 0;
 };
+
+inline std::wstring UvIndexDescription(float uv) {
+    int val = static_cast<int>(std::round(uv));
+    std::wstring s = std::to_wstring(val) + L" ";
+    if (uv < 3.0f) s += L"Low";
+    else if (uv < 6.0f) s += L"Moderate";
+    else if (uv < 8.0f) s += L"High";
+    else if (uv < 11.0f) s += L"Very High";
+    else s += L"Extreme";
+    return s;
+}
 
 // WMO code (Open-Meteo) → WWO code (wttr.in, the icons) and words.
 int WmoToWwo(int wmo, bool day, std::wstring* desc) {
@@ -291,11 +309,12 @@ bool FetchOpenMeteo(const std::wstring& place, bool fahrenheit, OpenMeteoReport*
         Wh_Log(L"Weather: couldn't locate \"%s\"", place.c_str());
         return false;
     }
-    wchar_t path[512];
-    swprintf(path, 512,
-             L"/v1/forecast?latitude=%.4f&longitude=%.4f&timezone=auto&forecast_days=2"
-             L"&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m"
-             L"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code%ls",
+    wchar_t path[1024];
+    swprintf(path, 1024,
+             L"/v1/forecast?latitude=%.4f&longitude=%.4f&timezone=auto&forecast_days=5"
+             L"&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m,uv_index"
+             L"&hourly=temperature_2m,weather_code,is_day"
+             L"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code,sunrise,sunset,uv_index_max%ls",
              lat, lon, fahrenheit ? L"&temperature_unit=fahrenheit&wind_speed_unit=mph" : L"");
     const std::string res = HttpGet(L"api.open-meteo.com", path, true);
     bb::json::Value v;
@@ -309,15 +328,85 @@ bool FetchOpenMeteo(const std::wstring& place, bool fahrenheit, OpenMeteoReport*
     out->wwo = WmoToWwo(static_cast<int>(cur->getNumber("weather_code")), cur->getNumber("is_day", 1) != 0, &out->desc);
     out->wind = std::to_wstring(std::lround(cur->getNumber("wind_speed_10m")));
     out->windDir = CompassPoint(cur->getNumber("wind_direction_10m"));
+    out->uvIndex = static_cast<float>(cur->getNumber("uv_index", 0.0));
+    out->uvDesc = UvIndexDescription(out->uvIndex);
+
     auto day = [&](const char* key, size_t i) -> double {
         const bb::json::Value* a = daily ? daily->find(key) : nullptr;
         return a && a->isArray() && a->arr.size() > i && a->arr[i].isNumber() ? a->arr[i].num : 0.0;
     };
-    for (size_t i = 0; i < 2; ++i) {
+
+    auto formatTimePart = [](const std::string& iso) -> std::wstring {
+        size_t tPos = iso.find('T');
+        if (tPos == std::string::npos || tPos + 5 >= iso.size()) return {};
+        std::string hhmm = iso.substr(tPos + 1, 5);
+        int h = 0, m = 0;
+        if (sscanf(hhmm.c_str(), "%d:%d", &h, &m) == 2) {
+            wchar_t buf[16];
+            int dispH = h % 12;
+            if (dispH == 0) dispH = 12;
+            swprintf(buf, 16, L"%d:%02d", dispH, m);
+            return buf;
+        }
+        return bb::todos::FromUtf8(hhmm);
+    };
+
+    if (daily) {
+        const bb::json::Value* sunrises = daily->find("sunrise");
+        if (sunrises && sunrises->isArray() && !sunrises->arr.empty() && sunrises->arr[0].isString()) {
+            out->sunrise = formatTimePart(sunrises->arr[0].str);
+        }
+        const bb::json::Value* sunsets = daily->find("sunset");
+        if (sunsets && sunsets->isArray() && !sunsets->arr.empty() && sunsets->arr[0].isString()) {
+            out->sunset = formatTimePart(sunsets->arr[0].str);
+        }
+    }
+
+    SYSTEMTIME localTime{};
+    GetLocalTime(&localTime);
+    static const wchar_t* kDayNames[] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
+    for (size_t i = 0; i < 5; ++i) {
         out->hi[i] = static_cast<float>(day("temperature_2m_max", i));
         out->lo[i] = static_cast<float>(day("temperature_2m_min", i));
         out->rain[i] = static_cast<int>(day("precipitation_probability_max", i));
         out->dayWwo[i] = WmoToWwo(static_cast<int>(day("weather_code", i)), true, &out->dayDesc[i]);
+        if (i == 0) out->dayName[i] = L"Today";
+        else out->dayName[i] = kDayNames[(localTime.wDayOfWeek + i) % 7];
+        out->dailyCount = i + 1;
+    }
+
+    // Hourly 6-hour forecast
+    const bb::json::Value* hourly = v.find("hourly");
+    if (hourly) {
+        const bb::json::Value* hTemps = hourly->find("temperature_2m");
+        const bb::json::Value* hCodes = hourly->find("weather_code");
+        const bb::json::Value* hDays = hourly->find("is_day");
+        const size_t start = static_cast<size_t>(std::clamp<int>(localTime.wHour, 0, 23));
+        for (size_t i = 0; i < 6; ++i) {
+            const size_t idx = start + i;
+            WeatherHourlyPoint hp;
+            if (i == 0) {
+                hp.timeLabel = L"Now";
+            } else {
+                int h = (localTime.wHour + static_cast<int>(i)) % 24;
+                wchar_t tbuf[16];
+                int dispH = h % 12;
+                if (dispH == 0) dispH = 12;
+                swprintf(tbuf, 16, L"%d %s", dispH, h < 12 ? L"AM" : L"PM");
+                hp.timeLabel = tbuf;
+            }
+            hp.temp = (hTemps && idx < hTemps->arr.size() && hTemps->arr[idx].isNumber())
+                          ? static_cast<float>(hTemps->arr[idx].num) : out->temp;
+            int code = (hCodes && idx < hCodes->arr.size() && hCodes->arr[idx].isNumber())
+                           ? static_cast<int>(hCodes->arr[idx].num) : 0;
+            bool isD = (hDays && idx < hDays->arr.size() && hDays->arr[idx].isNumber())
+                           ? (hDays->arr[idx].num != 0) : true;
+            std::wstring dummy;
+            hp.weatherCode = WmoToWwo(code, isD, &dummy);
+            hp.isDay = isD;
+            out->hourly[i] = hp;
+            out->hourlyCount = i + 1;
+        }
     }
     return true;
 }
@@ -407,6 +496,24 @@ DWORD WINAPI WeatherThreadProc(void*) {
             swprintf(feels, 16, L"%.0f", r.feels);
             g_state.weather.feelsLike = feels;
             g_state.weather.lastUpdated = NowSeconds();
+            // Bunbun Studio Weather extensions:
+            g_state.weather.todayHigh = r.hi[0];
+            g_state.weather.todayLow = r.lo[0];
+            g_state.weather.uvIndex = r.uvIndex;
+            g_state.weather.uvDesc = r.uvDesc;
+            g_state.weather.sunrise = r.sunrise;
+            g_state.weather.sunset = r.sunset;
+            g_state.weather.hourly.clear();
+            for (size_t i = 0; i < r.hourlyCount; ++i) g_state.weather.hourly.push_back(r.hourly[i]);
+            g_state.weather.daily.clear();
+            for (size_t i = 0; i < r.dailyCount; ++i) {
+                WeatherDailyPoint dp;
+                dp.dayName = r.dayName[i];
+                dp.minTemp = r.lo[i];
+                dp.maxTemp = r.hi[i];
+                dp.weatherCode = r.dayWwo[i];
+                g_state.weather.daily.push_back(dp);
+            }
         }
 
         // Retry soon after a failure instead of leaving the dashboard empty for

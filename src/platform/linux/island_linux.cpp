@@ -54,6 +54,10 @@
 #include "platform.h"
 #include "settings.h"
 #include "calendar_linux.h"
+#include "edgelight_linux.h"
+#include "timers_linux.h"
+#include "screentime_linux.h"
+#include "../../common/edgelight.h"
 #include "features_linux.h"
 #include "picker_linux.h"
 #include "shelf_linux.h"
@@ -73,7 +77,7 @@ namespace mascot = bb::mascot;
 
 // The window; the pill sits inside it. Room for the Studio frame (520 x 256) and
 // the plan card (480 x 320), plus the nudge and the shadow.
-constexpr double kCanvasW = 540, kCanvasH = 340;
+constexpr double kCanvasW = 560, kCanvasH = 340;  // room beside the open island for the notch's ears
 constexpr double kTopGap = 6;                       // between the screen edge and the pill
 constexpr double kCollapsedH = 36;
 constexpr double kOpenDelay = 0.15;                 // the pointer rests this long before Studio opens
@@ -95,6 +99,7 @@ bool g_liveMood = true;       // Bunbun.LiveMood: the Live mood while the screen
 std::wstring g_musicApps, g_videoApps;  // Bunbun.MusicApps / VideoApps: overrides for IsVideoTrack
 bool g_expandOnHover = true;  // Behavior.ExpandOnHover; off: a click opens and closes the island
 bool g_pinned = false;      // opened by a click (ExpandOnHover off)
+bool g_hoverHold = false;   // closed with the header's button: no hover-open until the pointer leaves
 std::string g_toastTitle, g_toastText;  // a reminder or the focus timer, until g_toastUntil
 int g_toastWater = 0;  // the toast is a water reminder: 1 = drink, 2 = refill (a click logs it)
 int g_statusRing = 1;  // Bunbun.StatusRing: 0 off, 1 auto, 2 water, 3 tasks, 4 focus
@@ -147,19 +152,45 @@ double Now() { return g_get_monotonic_time() / 1e6; }
 void ScheduleFrame(bool fast);
 int g_fastMs = 16;  // the fast frame interval (bb::lfeat::FrameMs)
 
-// Appearance.Displays = all: a view-only copy of the island on every other
-// monitor, painted from the main island's last frame (as on Windows, mirrors
-// don't take clicks). Each sits per Appearance.MirrorPosition, or its own entry in
-// Appearance.DisplayPositions ("2=bottom-center;3=top-left").
+// Appearance.Displays = all: a copy of the island on every other monitor, painted
+// from the main island's last frame. Each sits per Appearance.MirrorPosition, or its
+// own entry in Appearance.DisplayPositions ("2=bottom-center;3=top-left").
+// Appearance.DisplayLink, as on Windows: Linked mirrors take the pointer and hand
+// it to the island (so pointing at any opens them all); Separate, the island
+// follows the pointer's display and the mirrors show it at rest.
 struct Mirror {
     GtkWidget* window = nullptr;
     int monitor = 0;     // 0-based
     int align = 1;       // 0 left, 1 centre, 2 right
     bool bottom = false;
+    double px = 0, py = 0;           // where its pill is drawn, canvas units
+    cairo_rectangle_int_t input{};   // its input region now (pixels)
+    int shape = -1;                  // Separate: its display's shape (bb::llook::Shape), -1 the island's
+    double size = 1.0;               // Separate: its display's size, relative to Size scale
 };
+// "2=pill;3=notch" lists by display number (Appearance.DisplayShapes / DisplaySizes).
+std::wstring PerDisplay(const std::wstring& list, int index1) {
+    const std::wstring key = std::to_wstring(index1) + L"=";
+    const size_t at = list.find(key);
+    if (at == std::wstring::npos || (at && list[at - 1] != L';' && list[at - 1] != L' ')) return {};
+    const size_t end = list.find(L';', at);
+    return list.substr(at + key.size(), end == std::wstring::npos ? std::wstring::npos : end - at - key.size());
+}
+int DisplayShapeOf(int index1) {  // -1: the island's own
+    const std::wstring v = PerDisplay(bb::settings::Get(L"Appearance.DisplayShapes"), index1);
+    return v == L"notch" ? static_cast<int>(bb::llook::Shape::Notch) : v == L"w11" ? static_cast<int>(bb::llook::Shape::W11)
+         : v == L"pill" ? static_cast<int>(bb::llook::Shape::Pill) : -1;
+}
+double DisplaySizeOf(int index1) {
+    const double v = wcstod(PerDisplay(bb::settings::Get(L"Appearance.DisplaySizes"), index1).c_str(), nullptr);
+    return v >= 0.5 && v <= 2.5 ? v : 1.0;
+}
+double ScreenShare(GdkMonitor* mon);  // below
+cairo_pattern_t* g_restFrame = nullptr;  // Separate: the island's last frame at rest
 std::vector<Mirror> g_mirrors;
 cairo_pattern_t* g_frame = nullptr;  // the main island's last frame (canvas units)
 struct { double x = 0, y = 0, w = 0, h = 0; } g_framePill;  // where the pill was in it
+decltype(g_framePill) g_restPill;  // Separate: where the pill was in g_restFrame
 void RebuildMirrors();
 
 // ── Settings ────────────────────────────────────────────────────────────────
@@ -178,6 +209,9 @@ void LoadSettings() {
     }
     bb::llook::LoadSettings();  // shape, theme, colours, font, sounds, privacy dots
     bb::lfeat::LoadSettings();  // placement, hiding, motion, alerts, the date, eyes, lyrics
+    bb::ledge::LoadSettings();  // the edge light
+    bb::ltimers::LoadSettings();  // Pomodoro lengths, presets, Water in Timers
+    bb::lscreen::LoadSettings();  // Screen Time and its limit
     bb::lcal::LoadSettings();   // calendar links and the meeting alert
     bb::llook::SetEdge(bb::lfeat::Get().bottom, bb::lfeat::Get().merged);
     g_mascotOn = s::GetBool(L"Bunbun.Mascot") && s::GetBool(L"Bunbun.MascotOnIsland");
@@ -478,14 +512,18 @@ Kind CurrentKind() {
     if (k == Kind::Clock && g_track.active && g_mediaOn) k = Kind::Media;
     // Studio: the frame opens while the pointer rests on the island, and stays
     // open while you type a reply into it.
-    const bool open = g_pinned || (g_expandOnHover && g_hover && Now() - g_hoverSince >= kOpenDelay);
+    const bool open = g_pinned || (g_expandOnHover && g_hover && !g_hoverHold && Now() - g_hoverSince >= kOpenDelay);
     if (StudioLayout() && (Composing() || open || (k == Kind::Media && AutoExpanding()))) return Kind::Studio;
     return k;
 }
 
 mascot::Mood MoodFor(Kind k) {
+    // A glass of water logged: drinking it, then the goal's cheer (as on Windows).
+    if (Now() - bb::lwater::DrankAt() < 2.6) return mascot::Mood::Drinking;
+    if (Now() >= bb::lwater::GoalAt() && Now() - bb::lwater::GoalAt() < 3.0) return mascot::Mood::Happy;
     const bool agentShown = g_agentsOn && g_agent.phase != AgentPhase::None;
-    if (k == Kind::Agent || k == Kind::AgentCard || k == Kind::RichCard || (k == Kind::Studio && agentShown)) {
+    // An agent at work shows on the mascot even with the agent pill off.
+    if (k == Kind::Agent || k == Kind::AgentCard || k == Kind::RichCard || agentShown) {
         switch (g_agent.phase) {
             case AgentPhase::Thinking: return mascot::Mood::Thinking;
             case AgentPhase::Working: return mascot::Mood::Working;
@@ -555,8 +593,9 @@ std::string StripText() {
     const int strip = bb::lfeat::Get().strip;
     std::string text;
     if (strip == 0 || strip == 1) text = ClockText();
+    if (strip == 4 || strip == 5) text = bb::lfeat::Get().name;  // your own text
     const auto& w = bb::lsrc::CurrentWeather();
-    if ((strip == 0 || strip == 2) && w.has) {
+    if ((strip == 0 || strip == 2 || strip == 5) && w.has) {
         const std::string temp = std::to_string(static_cast<int>(std::lround(w.temp))) + "\xC2\xB0";
         text += text.empty() ? temp : " \xC2\xB7 " + temp;
     }
@@ -593,6 +632,10 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
             double ringFrac = 0, rgb[3] = {};
             const double ring = StatusRingNow(&ringFrac, rgb) ? (strip.empty() ? 15 : 23) : 0;  // the ring, and its gap
             *w = (strip.empty() ? 16 : 30 + TextWidth(cr, strip, 14, true)) + ring + (FaceShown() ? 34 : 0) + DotsRoom();
+            if (ring > 0 && FaceShown()) {  // the face in the middle: both sides as wide as the wider one
+                const double side = std::max(strip.empty() ? 0.0 : TextWidth(cr, strip, 14, true) + 8, 15.0) + 14;
+                *w = side * 2 + 34 + DotsRoom();
+            }
             *h = kCollapsedH;
             return;
         }
@@ -644,7 +687,7 @@ void TargetSize(cairo_t* cr, Kind k, double* w, double* h) {
 
 // The status ring beside the clock (Bunbun.StatusRing), as on Windows: the focus
 // timer while one runs, today's water, or the to-dos ticked off. Auto: focus while
-// a timer runs, else water when its reminders are on. False for no ring.
+// a timer runs, else water when it's tracked (Water in Timers or reminders). False for no ring.
 bool StatusRingNow(double* frac, double rgb[3]) {
     auto set = [&](uint32_t c) {
         rgb[0] = ((c >> 16) & 0xff) / 255.0;
@@ -663,11 +706,13 @@ bool StatusRingNow(double* frac, double rgb[3]) {
         // Read at most once a second: the size pass and the paint both ask, every frame.
         static bb::lwater::Snapshot w;
         static double s_waterAt = -10;
+        static bool s_tracked = false;  // Water in Timers (Bunbun.WaterPage)
         if (Now() - s_waterAt > 1.0) {
             w = bb::lwater::Now();
+            s_tracked = bb::settings::GetBool(L"Bunbun.WaterPage");
             s_waterAt = Now();
         }
-        if ((g_statusRing == 2 || w.reminders) && w.goalMl > 0) {
+        if ((g_statusRing == 2 || w.reminders || s_tracked) && w.goalMl > 0) {
             *frac = std::clamp(static_cast<double>(w.takenMl) / w.goalMl, 0.0, 1.0);
             set(0x5ac8fa);
             return true;
@@ -687,7 +732,12 @@ bool StatusRingNow(double* frac, double rgb[3]) {
 }
 
 void PaintClock(cairo_t* cr, const Rect& p) {
-    double x = p.x + 14;
+    double frac = 0, rgb[3] = {};
+    const bool ringOn = StatusRingNow(&frac, rgb);
+    // With a status ring the face sits in the middle: the text on its left, the ring on its right.
+    const bool centred = ringOn && FaceShown();
+    const double faceX = centred ? p.x + (p.w - DotsRoom()) / 2 - 17 : p.x + 14;
+    double x = faceX;
     if (bb::lfeat::Get().eyes) {  // Bunbun.IdleFace = eyes
         bb::lfeat::DrawEyes(cr, x + 13, p.y + p.h / 2, 26, g_mood, g_agent.phase, Now(), g_moodSince, g_hover ? g_mouseX : -1, g_mouseY);
         x += 34;
@@ -696,10 +746,16 @@ void PaintClock(cairo_t* cr, const Rect& p) {
         x += 34;
     }
     const std::string strip = StripText();
-    Text(cr, strip, x, p.y + (p.h - 18) / 2, p.w - (x - p.x) - 10 - DotsRoom(), 14, true);
-    double frac = 0, rgb[3] = {};
-    if (StatusRingNow(&frac, rgb)) {
-        const double cx = x + (strip.empty() ? 0 : TextWidth(cr, strip, 14, true) + 8) + 7.5, cy = p.y + p.h / 2, r = 6.3;
+    if (centred) {
+        const double tw = strip.empty() ? 0 : TextWidth(cr, strip, 14, true);
+        Text(cr, strip, p.x + std::max(4.0, (faceX - p.x - tw) / 2), p.y + (p.h - 18) / 2, faceX - p.x - 4, 14, true);
+    } else {
+        Text(cr, strip, x, p.y + (p.h - 18) / 2, p.w - (x - p.x) - 10 - DotsRoom(), 14, true);
+    }
+    if (ringOn) {
+        const double cx = centred ? (faceX + 34 + p.x + p.w - DotsRoom()) / 2
+                                  : x + (strip.empty() ? 0 : TextWidth(cr, strip, 14, true) + 8) + 7.5,
+                     cy = p.y + p.h / 2, r = 6.3;
         cairo_set_line_width(cr, 2.4);
         cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
         cairo_new_sub_path(cr);
@@ -1033,6 +1089,11 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
         if (g_frame) cairo_pattern_destroy(g_frame);
         g_frame = frame;
         g_framePill = {pill.x, pill.y, pill.w, pill.h};
+        if (bb::lfeat::SeparateDisplays() && pill.h <= 60 && pill.w > 1) {  // at rest: keep it for the mirrors
+            if (g_restFrame) cairo_pattern_destroy(g_restFrame);
+            g_restFrame = cairo_pattern_reference(frame);
+            g_restPill = {pill.x, pill.y, pill.w, pill.h};
+        }
         for (const Mirror& m : g_mirrors) gtk_widget_queue_draw(m.window);
     };
 
@@ -1162,6 +1223,38 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
     }
     cairo_restore(cr);
 
+    // The edge light: what happened this frame, against the chosen triggers
+    // (Bunbun.EdgeLightOn), then the light itself over the outline.
+    {
+        namespace el = bb::edgelight;
+        static bool prevHover = false, prevOpen = false;
+        static Kind prevKind = Kind::Clock;
+        static std::string prevTitle;
+        static double prevToastUntil = 0;
+        unsigned events = 0;
+        const bool openNow = kind == Kind::Studio;
+        if (g_hover && !prevHover) events |= el::kOnHover;
+        if (openNow && !prevOpen) events |= el::kOnOpen;
+        if (!openNow && prevOpen) events |= el::kOnClose;
+        const bool agentKind = kind == Kind::Agent || kind == Kind::AgentCard || kind == Kind::RichCard;
+        const bool agentPrev = prevKind == Kind::Agent || prevKind == Kind::AgentCard || prevKind == Kind::RichCard;
+        if (agentKind && !agentPrev) events |= el::kOnAgent;
+        if (kind == Kind::Meeting && prevKind != Kind::Meeting) events |= el::kOnNotification;
+        if (g_toastUntil > prevToastUntil + 0.5 && g_toastUntil > now) events |= g_toastLevel >= 0 ? el::kOnSystem : el::kOnNotification;
+        if (g_track.active && !g_track.title.empty() && g_track.title != prevTitle && !prevTitle.empty()) events |= el::kOnTrack;
+        prevHover = g_hover;
+        prevOpen = openNow;
+        prevKind = kind;
+        prevToastUntil = g_toastUntil;
+        if (g_track.active && !g_track.title.empty()) prevTitle = g_track.title;
+        bb::ledge::Note(events, now);
+        if (kind != Kind::Tuck && bb::ledge::Lit(now)) {
+            double accent[3];
+            StudioAccentRgb(accent);
+            bb::ledge::Draw(cr, p.x, p.y, p.w, p.h, radius, accent, now);
+        }
+    }
+
     Rect scaled{p.x * g_scale, p.y * g_scale, p.w * g_scale, p.h * g_scale};
     UpdateInputRegion(scaled, radius * g_scale);
     finishFrame(p);
@@ -1169,7 +1262,7 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
     // Fast frames while something moves; the mascot's idle motion is fine at ~8 fps.
     const bool fast = resizing || since < 0.45 || kind == Kind::Media || kind == Kind::AgentCard || kind == Kind::Studio ||
                       kind == Kind::RichCard || kind == Kind::Toast ||
-                      mascot::NeedsFastFrames(g_mood, now, g_moodSince) || g_hover ||
+                      mascot::NeedsFastFrames(g_mood, now, g_moodSince) || g_hover || bb::ledge::Lit(now) ||
                       (kind == Kind::Clock && bb::lfeat::Get().eyes);
     g_fastMs = bb::lfeat::FrameMs(resizing || g_hover || kind == Kind::Studio || kind == Kind::AgentCard || kind == Kind::RichCard);
     ScheduleFrame(fast);
@@ -1350,6 +1443,7 @@ gboolean OnButtonPress(GtkWidget*, GdkEventButton* e, gpointer) {
         else if (g_toastWater == 2) bb::lwater::Refill();
         g_toastWater = 0;
         g_toastUntil = 0;
+        g_hoverHold = true;  // back to the small island (the mascot drinks) rather than opening under the pointer
     }
     else if (i >= 0) Do(g_hits[i]);
     // Expand on hover off: a click on the island opens it, another closes it.
@@ -1428,6 +1522,7 @@ gboolean OnCrossing(GtkWidget*, GdkEventCrossing* e, gpointer) {
         g_timeout_add(static_cast<guint>(kOpenDelay * 1000) + 10, [](gpointer) -> gboolean { Redraw(); return G_SOURCE_REMOVE; }, nullptr);
     }
     g_hover = entering;
+    if (!g_hover) g_hoverHold = false;
     if (!g_hover) {
         g_hoverHit = -1;
         g_mouseX = g_mouseY = -1;
@@ -1446,7 +1541,8 @@ gboolean OnScroll(GtkWidget*, GdkEventScroll* e, gpointer) {
         case GDK_SCROLL_SMOOTH: delta = std::fabs(e->delta_x) > std::fabs(e->delta_y) ? e->delta_x : e->delta_y; break;
     }
     const Kind k = CurrentKind();
-    if (k == Kind::Studio || k == Kind::RichCard) StudioScroll(delta);
+    const bool fine = (e->state & GDK_SHIFT_MASK) != 0;
+    if ((k == Kind::Studio || k == Kind::RichCard) && !(k == Kind::Studio && StudioScrollTimer(delta, fine))) StudioScroll(delta);
     if (k == Kind::AgentCard && g_diffScrollMax > 0 && g_agent.requestId == g_diffScrollFor)
         g_diffScroll = std::clamp(g_diffScroll + delta * 3 * kDiffRowH, 0.0, g_diffScrollMax);
     // Bunbun.MusicSwipe: sideways on the small music pill skips a song.
@@ -1468,6 +1564,12 @@ gboolean OnKey(GtkWidget*, GdkEventKey* e, gpointer) {
 }
 
 // ── Menu (the tray menu's items; there's no tray on Linux yet) ──────────────
+
+void CloseIsland() {
+    g_pinned = false;
+    g_hoverHold = true;
+    Redraw();
+}
 
 void OpenSettings(const char* page) {
     // bunbun-settings needs WebKitGTK. If it can't start (exit 127: a library
@@ -1600,11 +1702,23 @@ void PlaceWindow() {
         gdk_monitor_get_workarea(mon, &area);
         gdk_monitor_get_geometry(mon, &geo);
     }
+    // Separate displays: this display's own shape and size (its place is set by FollowPointerDisplay).
+    double displaySize = 1.0;
+    if (bb::lfeat::SeparateDisplays()) {
+        int index = 0;
+        for (int i = 0; i < gdk_display_get_n_monitors(display); ++i)
+            if (gdk_display_get_monitor(display, i) == mon) index = i;
+        const int shape = DisplayShapeOf(index + 1);
+        bb::llook::SetShape(shape >= 0 ? static_cast<bb::llook::Shape>(shape) : bb::llook::BaseShape());
+        displaySize = DisplaySizeOf(index + 1);
+    } else {
+        bb::llook::SetShape(bb::llook::BaseShape());
+    }
     // Appearance.MatchScreenSize: the same share of every screen, 1080 high being 1x.
     // GDK's sizes are already in the desktop's scaled units, so a 4K screen at 200%
     // counts as 1080 (GTK doubles everything there itself) and at 100% as 2160. Never
     // below 1x: that would undo the desktop's own scaling (as on Windows with Auto DPI).
-    g_scale = g_baseScale * (g_matchScreen ? std::clamp(geo.height / 1080.0, 1.0, 3.0) : 1.0);
+    g_scale = g_baseScale * ScreenShare(mon) * displaySize;
     const int w = static_cast<int>(std::ceil(kCanvasW * g_scale)), h = static_cast<int>(std::ceil(CanvasH() * g_scale));
     gtk_widget_set_size_request(g_window, w, h);
     gtk_window_resize(GTK_WINDOW(g_window), w, h);
@@ -1633,27 +1747,130 @@ void PlaceWindow() {
 
 // ── Mirrors on other displays ───────────────────────────────────────────────
 
+// Appearance.MatchScreenSize: the same share of every screen, 1080 high being 1x.
+double ScreenShare(GdkMonitor* mon) {
+    if (!g_matchScreen || !mon) return 1.0;
+    GdkRectangle geo{};
+    gdk_monitor_get_geometry(mon, &geo);
+    return std::clamp(geo.height / 1080.0, 1.0, 3.0);
+}
+
 gboolean OnMirrorDraw(GtkWidget* w, cairo_t* cr, gpointer data) {
-    const Mirror& m = g_mirrors[static_cast<size_t>(GPOINTER_TO_INT(data))];
+    Mirror& m = g_mirrors[static_cast<size_t>(GPOINTER_TO_INT(data))];
     cairo_save(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
     cairo_paint(cr);
     cairo_restore(cr);
-    if (!g_frame || g_framePill.w <= 0) return TRUE;
+    // Separate: while the island is open on its display, the others show it at rest.
+    const bool rest = bb::lfeat::SeparateDisplays() && g_framePill.h > 60 && g_restFrame;
+    cairo_pattern_t* frame = rest ? g_restFrame : g_frame;
+    const auto& fp = rest ? g_restPill : g_framePill;
+    if (!frame || fp.w <= 0) return TRUE;
     // The main frame's pill (and its shadow), moved to where this mirror's pill sits.
     const double margin = 12;
-    const double px = m.align == 0 ? 0 : m.align == 2 ? kCanvasW - g_framePill.w : (kCanvasW - g_framePill.w) / 2;
+    // Separate: this display's own shape and size, when they differ from the island's.
+    GdkDisplay* gdisplay = gtk_widget_get_display(w);
+    const double k = m.size * ScreenShare(gdk_display_get_monitor(gdisplay, m.monitor)) * g_baseScale / std::max(0.01, g_scale);
+    const bb::llook::Shape mainShape = bb::llook::Get().shape;
+    const bool own = bb::lfeat::SeparateDisplays() && ((m.shape >= 0 && m.shape != static_cast<int>(mainShape)) || std::fabs(k - 1) > 0.01);
+    const bb::llook::Shape shape = m.shape >= 0 ? static_cast<bb::llook::Shape>(m.shape) : mainShape;
+    const double tw = fp.w * (own ? k : 1), th = fp.h * (own ? k : 1);
+    const double px = m.align == 0 ? 0 : m.align == 2 ? kCanvasW - tw : (kCanvasW - tw) / 2;
     const double canvasH = gtk_widget_get_allocated_height(w) / g_scale;
-    const double py = m.bottom ? canvasH - bb::llook::TopGap(kTopGap) - g_framePill.h : g_framePill.y;
+    const bool flush = own ? (shape == bb::llook::Shape::Notch) : bb::llook::TopGap(1.0) == 0.0;
+    const double py = m.bottom ? canvasH - (flush ? 0 : kTopGap) - th : (own ? (flush ? 0 : kTopGap) : fp.y);
+    m.px = px;
+    m.py = py;
+    if (own) {  // its surface in the island's colour, then the island's content scaled into it
+        const auto& look = bb::llook::Get();
+        cairo_save(cr);
+        cairo_scale(cr, g_scale, g_scale);
+        bb::llook::SurfacePathAs(cr, px, py, tw, th, bb::llook::RadiusAs(th, shape), shape, true);
+        cairo_set_source_rgba(cr, look.fill[0], look.fill[1], look.fill[2], look.opacity);
+        cairo_fill(cr);
+        bb::llook::SurfacePathAs(cr, px, py, tw, th, bb::llook::RadiusAs(th, shape), shape, false);
+        cairo_clip(cr);
+        cairo_translate(cr, px, py);
+        cairo_scale(cr, k, k);
+        cairo_translate(cr, -fp.x, -fp.y);
+        cairo_scale(cr, 1.0 / g_scale, 1.0 / g_scale);
+        cairo_set_source(cr, frame);
+        cairo_paint(cr);
+        cairo_restore(cr);
+        return TRUE;
+    }
+    // Linked: the pill takes the pointer (handed to the island); the rest lets it through.
+    if (!bb::lfeat::SeparateDisplays()) {
+        const cairo_rectangle_int_t in{static_cast<int>(std::floor(px * g_scale)), static_cast<int>(std::floor(py * g_scale)),
+                                       static_cast<int>(std::ceil(fp.w * g_scale)), static_cast<int>(std::ceil(fp.h * g_scale))};
+        if (in.x != m.input.x || in.y != m.input.y || in.width != m.input.width || in.height != m.input.height) {
+            m.input = in;
+            cairo_region_t* region = cairo_region_create_rectangle(&in);
+            gtk_widget_input_shape_combine_region(m.window, region);
+            cairo_region_destroy(region);
+        }
+    }
     cairo_scale(cr, g_scale, g_scale);
-    cairo_rectangle(cr, px - margin, py - margin, g_framePill.w + 2 * margin, g_framePill.h + 2 * margin);
+    cairo_rectangle(cr, px - margin, py - margin, fp.w + 2 * margin, fp.h + 2 * margin);
     cairo_clip(cr);
-    cairo_translate(cr, px - g_framePill.x, py - g_framePill.y);
+    cairo_translate(cr, px - fp.x, py - fp.y);
     cairo_scale(cr, 1.0 / g_scale, 1.0 / g_scale);
-    cairo_set_source(cr, g_frame);
+    cairo_set_source(cr, frame);
     cairo_paint(cr);
     return TRUE;
+}
+
+// A Linked mirror's pointer events, handed to the island at the matching point.
+Mirror* MirrorOf(GtkWidget* w) {
+    for (Mirror& m : g_mirrors)
+        if (m.window == w) return &m;
+    return nullptr;
+}
+template <typename Ev>
+Ev ToIsland(const Mirror& m, const Ev* e) {
+    Ev copy = *e;
+    copy.x = (e->x / g_scale - m.px + g_framePill.x) * g_scale;
+    copy.y = (e->y / g_scale - m.py + g_framePill.y) * g_scale;
+    return copy;
+}
+gboolean OnMirrorPress(GtkWidget* w, GdkEventButton* e, gpointer) {
+    if (Mirror* m = MirrorOf(w)) { GdkEventButton c = ToIsland(*m, e); return OnButtonPress(g_window, &c, nullptr); }
+    return FALSE;
+}
+gboolean OnMirrorRelease(GtkWidget* w, GdkEventButton* e, gpointer) {
+    if (Mirror* m = MirrorOf(w)) { GdkEventButton c = ToIsland(*m, e); return OnButtonRelease(g_window, &c, nullptr); }
+    return FALSE;
+}
+gboolean OnMirrorMotion(GtkWidget* w, GdkEventMotion* e, gpointer) {
+    if (Mirror* m = MirrorOf(w)) { GdkEventMotion c = ToIsland(*m, e); return OnMotion(g_window, &c, nullptr); }
+    return FALSE;
+}
+gboolean OnMirrorScroll(GtkWidget* w, GdkEventScroll* e, gpointer) {
+    if (Mirror* m = MirrorOf(w)) { GdkEventScroll c = ToIsland(*m, e); return OnScroll(g_window, &c, nullptr); }
+    return FALSE;
+}
+gboolean OnMirrorCrossing(GtkWidget*, GdkEventCrossing* e, gpointer) { return OnCrossing(g_window, e, nullptr); }
+
+// The placement for display `index` (0-based): its own entry in
+// Appearance.DisplayPositions, else MirrorPosition, else Appearance.Position.
+void DisplayPlacement(int index, bool isMain, int* align, bool* bottom) {
+    namespace s = bb::settings;
+    const auto parse = [&](const std::wstring& pos) {
+        if (pos.empty() || pos == L"same") return;
+        *bottom = pos.rfind(L"bottom", 0) == 0;
+        *align = pos.find(L"left") != std::wstring::npos ? 0 : pos.find(L"right") != std::wstring::npos ? 2 : 1;
+    };
+    const std::wstring base = s::Get(L"Appearance.Position");
+    *bottom = base.rfind(L"bottom", 0) == 0;
+    *align = base.find(L"left") != std::wstring::npos ? 0 : base.find(L"right") != std::wstring::npos ? 2 : 1;
+    if (isMain) return;
+    parse(s::Get(L"Appearance.MirrorPosition"));
+    const std::wstring per = s::Get(L"Appearance.DisplayPositions"), key = std::to_wstring(index + 1) + L"=";
+    if (const size_t at = per.find(key); at != std::wstring::npos && (at == 0 || per[at - 1] == L';' || per[at - 1] == L' ')) {
+        const size_t end = per.find(L';', at);
+        parse(per.substr(at + key.size(), end == std::wstring::npos ? std::wstring::npos : end - at - key.size()));
+    }
 }
 
 void PlaceMirror(Mirror& m) {
@@ -1703,6 +1920,11 @@ void RebuildMirrors() {
         m.monitor = i;
         m.align = bb::lfeat::Get().align;
         m.bottom = bb::lfeat::Get().bottom;
+        if (bb::lfeat::SeparateDisplays()) {  // its own entry, else the island's set shape
+            m.shape = DisplayShapeOf(i + 1);
+            if (m.shape < 0) m.shape = static_cast<int>(bb::llook::BaseShape());
+            m.size = DisplaySizeOf(i + 1);
+        }
         parse(same, &m);
         // "2=bottom-center;3=top-left": display numbers start at 1.
         const std::wstring key = std::to_wstring(i + 1) + L"=";
@@ -1732,12 +1954,48 @@ void RebuildMirrors() {
         PlaceMirror(g_mirrors.back());
         gtk_widget_show_all(m.window);
         PlaceMirror(g_mirrors.back());
-        // View-only: an empty input region lets clicks through to what's below.
+        // Until it's drawn (and always in Separate mode), clicks go through to what's below.
         cairo_region_t* none = cairo_region_create();
         gtk_widget_input_shape_combine_region(m.window, none);
         cairo_region_destroy(none);
+        if (!bb::lfeat::SeparateDisplays()) {  // Linked: the mirror's pointer goes to the island
+            gtk_widget_add_events(m.window, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK |
+                                                GDK_SMOOTH_SCROLL_MASK | GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
+            g_signal_connect(m.window, "button-press-event", G_CALLBACK(OnMirrorPress), nullptr);
+            g_signal_connect(m.window, "button-release-event", G_CALLBACK(OnMirrorRelease), nullptr);
+            g_signal_connect(m.window, "motion-notify-event", G_CALLBACK(OnMirrorMotion), nullptr);
+            g_signal_connect(m.window, "scroll-event", G_CALLBACK(OnMirrorScroll), nullptr);
+            g_signal_connect(m.window, "enter-notify-event", G_CALLBACK(OnMirrorCrossing), nullptr);
+            g_signal_connect(m.window, "leave-notify-event", G_CALLBACK(OnMirrorCrossing), nullptr);
+        }
     }
     Redraw();
+}
+
+// Separate: the island follows the pointer to another display, taking that
+// display's place; the mirrors are rebuilt around it.
+void FollowPointerDisplay() {
+    if (!bb::lfeat::SeparateDisplays() || !g_window) return;
+    GdkDisplay* display = gtk_widget_get_display(g_window);
+    GdkMonitor* now = bb::lfeat::TargetMonitor(display);
+    static GdkMonitor* last = nullptr;
+    if (now == last) return;
+    last = now;
+    int index = 0;
+    for (int i = 0; i < gdk_display_get_n_monitors(display); ++i)
+        if (gdk_display_get_monitor(display, i) == now) index = i;
+    // The configured main display (Appearance.TargetMonitor, primary by default) keeps Appearance.Position.
+    const std::wstring target = bb::settings::Get(L"Appearance.TargetMonitor");
+    GdkMonitor* primary = gdk_display_get_primary_monitor(display);
+    const int n = static_cast<int>(wcstol(target.c_str(), nullptr, 10));
+    const bool isMain = n >= 1 ? n - 1 == index : (primary ? primary == now : index == 0);
+    int align = 1;
+    bool bottom = false;
+    DisplayPlacement(index, isMain, &align, &bottom);
+    bb::lfeat::SetPlacement(align, bottom);
+    bb::llook::SetEdge(bottom, bb::lfeat::Get().merged);
+    PlaceWindow();
+    RebuildMirrors();
 }
 
 // X11: a window mapped while the window manager or compositor is still
@@ -2064,7 +2322,12 @@ int main(int argc, char** argv) {
             const bool quiet = f.quietReminders && (bb::lfeat::FullscreenAppActive() || bb::lsrc::FocusState().running);
             if (f.reminderSound && !quiet) bb::llook::PlayChime(bb::chime::Chime::Question);
         }
-        if (bb::lsrc::FocusTakeFinished()) ShowToast("Focus", "Time's up \xE2\x80\x94 take a break", 10);
+        // A Pomodoro phase or a countdown ran out: say what's next (timers_linux.cpp).
+        if (const int k = bb::lsrc::FocusTakeFinishedKind(); k >= 0)
+            ShowToast(k == bb::ltimers::kKindPomodoro ? "Pomodoro" : k == bb::ltimers::kKindTimer ? "Timer" : "Focus",
+                      bb::ltimers::OnFinished(k), 10);
+        bb::ltimers::Tick();  // the next Pomodoro phase, when it starts by itself
+        bb::lscreen::Tick();  // Screen Time: the app in front gets this second
         // The water reminder (Bunbun.WaterReminders), every 30 s.
         static int s_waterTick = 0;
         if (++s_waterTick >= 30) {
@@ -2090,6 +2353,8 @@ int main(int argc, char** argv) {
                      nullptr);
     // Monitors coming and going: re-place the island and its mirrors.
     RebuildMirrors();
+    // Separate displays: the island goes to the display the pointer is on.
+    g_timeout_add(250, [](gpointer) -> gboolean { FollowPointerDisplay(); return G_SOURCE_CONTINUE; }, nullptr);
     for (const char* sig : {"monitor-added", "monitor-removed"})
         g_signal_connect(display, sig, G_CALLBACK(+[](GdkDisplay*, GdkMonitor*, gpointer) {
             PlaceWindow();
@@ -2104,6 +2369,7 @@ int main(int argc, char** argv) {
 
     gtk_main();
 
+    bb::lscreen::Save();  // today's Screen Time
     bb::agents::Stop();
     bb::mpris::Stop();
     if (monitor) g_object_unref(monitor);

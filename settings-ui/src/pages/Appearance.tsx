@@ -1,3 +1,4 @@
+import { EdgeLightSettings } from "../ui/EdgeLight";
 import { IdleFaceSettings } from "../ui/IdleFace";
 import { Check } from "lucide-react";
 import { useStore } from "../store";
@@ -57,6 +58,8 @@ export function Appearance() {
           ))}
         </div>
       </section>
+
+      <EdgeLightSettings />
 
       <section className="section">
         <h3>Theme</h3>

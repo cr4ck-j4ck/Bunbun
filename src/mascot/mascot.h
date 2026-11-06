@@ -33,6 +33,7 @@ enum class Mood {
     Streaming, // Streaming Shows: watching a video, munching popcorn from a bucket
     Dnd,       // Do Not Disturb: headphones on, eyes closed, a crescent-moon badge
     Live,      // Live: streaming, sharing or recording the screen; a pulsing REC badge
+    Drinking,  // a glass of water up to the mouth, the level going down: you logged a glass
 };
 
 enum class Character { Bunny, Cat, Dog, Fox, Panda, Robot, Spiderman, Luffy, Dazai, Custom };

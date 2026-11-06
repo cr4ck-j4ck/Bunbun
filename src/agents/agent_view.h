@@ -73,6 +73,7 @@ struct AgentView {
     // Claude Code's statusLine: rate limits and context use, -1 = unknown.
     float usage5h = -1, usage7d = -1, contextPct = -1;
     long long usage5hResets = 0;       // unix seconds, 0 = unknown
+    long long usage7dResets = 0;       // the weekly limit's, unix seconds, 0 = unknown
     double usageAt = 0;                // NowSeconds() of the last statusLine update
 };
 

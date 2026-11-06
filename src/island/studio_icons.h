@@ -183,6 +183,12 @@ inline void Icon(const Pen& pen, Page page, D2D1_POINT_2F c, float size, D2D1_CO
             Poly(pen, {P(6.2f, 14.5f), P(12, 3.5f), P(17.8f, 14.5f)}, c, s, col, w);
             Arc(pen, at(12, 14.5f), 5.8f * s, 0.0f, 3.14159265f, col, w);
             break;
+        case Page::ScreenTime:
+            // 3 vertical bars (like the 00o dock icon in Vayli)
+            Line(pen, at(7.0f, 16.5f), at(7.0f, 9.5f), col, w * 1.35f);
+            Line(pen, at(12.0f, 17.5f), at(12.0f, 6.5f), col, w * 1.35f);
+            Line(pen, at(17.0f, 16.5f), at(17.0f, 11.5f), col, w * 1.35f);
+            break;
         case Page::Note:
             Poly(pen, {P(6, 3.5f), P(14, 3.5f), P(19, 8.5f), P(19, 20.5f), P(6, 20.5f)}, c, s, col, w, true);
             Poly(pen, {P(9, 12), P(16, 12)}, c, s, col, w);
@@ -202,6 +208,29 @@ inline void Gear(const Pen& pen, D2D1_POINT_2F c, float size, D2D1_COLOR_F col) 
         Line(pen, D2D1::Point2F(c.x + 6.5f * s * std::cos(a), c.y + 6.5f * s * std::sin(a)),
              D2D1::Point2F(c.x + 9.0f * s * std::cos(a), c.y + 9.0f * s * std::sin(a)), col, 2.6f * s * 1.5f);
     }
+}
+
+// A push pin: a flat cap, the body widening into a shoulder, and the needle. Filled
+// while pinned.
+inline void Pushpin(const Pen& pen, D2D1_POINT_2F c, float size, D2D1_COLOR_F col, bool filled) {
+    const float s = size / 24.0f;
+    auto P = [](float x, float y) { return D2D1::Point2F(x, y); };
+    const auto body = {P(8, 3), P(16, 3), P(15, 5), P(15, 10), P(18.5f, 14), P(18.5f, 16), P(5.5f, 16), P(5.5f, 14), P(9, 10), P(9, 5)};
+    if (filled) Poly(pen, body, c, s, col, 0, true, true);
+    Poly(pen, body, c, s, col, 1.8f * s * 1.2f, true);
+    Poly(pen, {P(12, 16), P(12, 21.5f)}, c, s, col, 1.8f * s * 1.2f);
+}
+
+// A bin: lid with a handle, a tapered can and two ribs.
+inline void Bin(const Pen& pen, D2D1_POINT_2F c, float size, D2D1_COLOR_F col) {
+    const float s = size / 24.0f;
+    const float w = 1.8f * s * 1.2f;
+    auto P = [](float x, float y) { return D2D1::Point2F(x, y); };
+    Poly(pen, {P(4, 6.5f), P(20, 6.5f)}, c, s, col, w);
+    Poly(pen, {P(9, 6.5f), P(9.5f, 3.5f), P(14.5f, 3.5f), P(15, 6.5f)}, c, s, col, w);
+    Poly(pen, {P(6, 6.5f), P(7, 20.5f), P(17, 20.5f), P(18, 6.5f)}, c, s, col, w);
+    Poly(pen, {P(10, 10.5f), P(10, 16.5f)}, c, s, col, w);
+    Poly(pen, {P(14, 10.5f), P(14, 16.5f)}, c, s, col, w);
 }
 
 // A pipette: a slanted barrel with a bulb at the top and a drop at the tip.

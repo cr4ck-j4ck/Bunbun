@@ -29,6 +29,7 @@ using bb::studio::kTabApps;
 using bb::studio::kTabMirror;
 using bb::studio::kTabWater;
 using bb::studio::kTabHome;
+using bb::studio::kTabScreenTime;
 
 // ── Which agents the island shows ────────────────────────────────────────────
 // Agents in the order of Settings::showAgent (Bunbun.Show*).
@@ -104,7 +105,8 @@ int MainAgentKind(const Settings& s) {
 }
 
 int StudioExtraTabCount(const Settings& s) {
-    return (s.agentTab && AgentsShown(s) ? 1 : 0) + (s.clipboardHistory ? 1 : 0) + (s.quickNote ? 1 : 0) + (s.focusPage ? 1 : 0) + (s.appsPage ? 1 : 0) + (s.mirrorPage ? 1 : 0) + (s.waterPage ? 1 : 0);
+    return (s.agentTab && AgentsShown(s) ? 1 : 0) + (s.clipboardHistory ? 1 : 0) + (s.quickNote ? 1 : 0) + (s.focusPage ? 1 : 0) + (s.appsPage ? 1 : 0) + (s.mirrorPage ? 1 : 0) +
+           (s.screenTime ? 1 : 0);  // Bunbun: Water is a Timers mode, never a tab of its own
 }
 
 // The dashboard's tabs, in scroll order. context 0 = the media view (first tab is
@@ -117,8 +119,13 @@ bb::studio::PageSwitches PageSwitchesFor(const Settings& s) {
     p.studio = s.studioLayout;
     p.lyricsPinnedFirst = s.lyricsPinnedFirst;
     p.weather = s.weather;
-    p.system = s.hardwareMonitorModule;
-    p.toggles = s.connectivityModule;
+    if (s.studioLayout) {
+        p.system = s.hardwareMonitorModule || s.connectivityModule;
+        p.toggles = false;
+    } else {
+        p.system = s.hardwareMonitorModule;
+        p.toggles = s.connectivityModule;
+    }
     p.tray = s.fileTrayModule;
     p.todo = s.todoModule;
     p.lyrics = s.lyrics && g_lyricsTabAvailable.load(std::memory_order_relaxed);
@@ -127,8 +134,9 @@ bb::studio::PageSwitches PageSwitchesFor(const Settings& s) {
     p.note = s.quickNote;
     p.focus = s.focusPage;
     p.mirror = s.mirrorPage;
-    p.water = s.waterPage;
+    p.water = false;  // Bunbun: Water lives inside the Timers page (its Water mode), not as a page
     p.apps = s.appsPage;
+    p.screentime = s.screenTime;
     p.order = s.pageOrder;
     return p;
 }
@@ -175,27 +183,103 @@ int CurrentDashboardTabId() {
     return ids[static_cast<size_t>(i)];
 }
 
-// ── Clipboard history ────────────────────────────────────────────────────────
+// ── Rich Clipboard history (Vayli style) ────────────────────────────────────
 
-constexpr size_t kClipHistoryMax = 8;
-std::deque<std::wstring> g_clipHistory;    // newest first, guarded by g_stateMutex
-std::atomic<bool> g_clipSelfSet{false};    // the next clipboard update is our own copy
+enum class ClipKind { Text, Image, Link };
 
-void RememberClipboardText(const std::wstring& raw) {
+struct ClipItem {
+    ClipKind kind = ClipKind::Text;
+    std::wstring title;
+    std::wstring text;
+    BitmapPixels image;
+    int width = 0;
+    int height = 0;
+    size_t byteSize = 0;
+    std::wstring appName;
+    PixelsRef appIcon;
+    double copiedAt = 0.0;
+    bool pinned = false;
+};
+
+constexpr size_t kRichClipMax = 40;
+std::deque<ClipItem> g_richClipItems;
+std::deque<std::wstring> g_clipHistory;    // for legacy callers
+std::atomic<bool> g_clipSelfSet{false};    // our own copy
+int g_clipFilter = 0;                      // 0 = All, 1 = Text, 2 = Images, 3 = Links
+int g_clipSelected = 0;                    // selected index in filtered list
+
+void RememberClipboardText(const std::wstring& raw, const std::wstring& appName, PixelsRef appIcon) {
     if (g_clipSelfSet.exchange(false)) return;
     std::wstring text = raw;
     while (!text.empty() && iswspace(text.back())) text.pop_back();
     if (text.empty()) return;
     if (text.size() > 4000) text.resize(4000);
+
+    ClipItem item;
+    item.text = text;
+    item.byteSize = text.size() * sizeof(wchar_t);
+    item.appName = appName;
+    item.appIcon = appIcon;
+    item.copiedAt = NowSeconds();
+
+    if (text.rfind(L"http://", 0) == 0 || text.rfind(L"https://", 0) == 0 || text.rfind(L"www.", 0) == 0) {
+        item.kind = ClipKind::Link;
+        item.title = text.substr(0, std::min<size_t>(text.size(), 36));
+    } else {
+        item.kind = ClipKind::Text;
+        size_t nl = text.find_first_of(L"\r\n");
+        item.title = text.substr(0, std::min<size_t>(nl == std::wstring::npos ? text.size() : nl, 36));
+    }
+
     std::lock_guard lock(g_stateMutex);
+    g_richClipItems.erase(std::remove_if(g_richClipItems.begin(), g_richClipItems.end(),
+        [&](const ClipItem& c) { return c.kind == item.kind && c.text == item.text; }), g_richClipItems.end());
+    g_richClipItems.push_front(std::move(item));
+    while (g_richClipItems.size() > kRichClipMax) g_richClipItems.pop_back();
+
     g_clipHistory.erase(std::remove(g_clipHistory.begin(), g_clipHistory.end(), text), g_clipHistory.end());
-    g_clipHistory.push_front(std::move(text));
-    while (g_clipHistory.size() > kClipHistoryMax) g_clipHistory.pop_back();
+    g_clipHistory.push_front(text);
+    while (g_clipHistory.size() > 8) g_clipHistory.pop_back();
+    g_layoutDirty = true;
+}
+
+void RememberClipboardImage(BitmapPixels&& image, const std::wstring& appName, PixelsRef appIcon) {
+    if (g_clipSelfSet.exchange(false)) return;
+    if (image.bgra.empty() || !image.width || !image.height) return;
+
+    ClipItem item;
+    item.kind = ClipKind::Image;
+    item.title = L"Image";
+    item.width = static_cast<int>(image.width);
+    item.height = static_cast<int>(image.height);
+    item.byteSize = image.bgra.size();
+    item.image = std::move(image);
+    item.appName = appName;
+    item.appIcon = appIcon;
+    item.copiedAt = NowSeconds();
+
+    std::lock_guard lock(g_stateMutex);
+    g_richClipItems.push_front(std::move(item));
+    while (g_richClipItems.size() > kRichClipMax) g_richClipItems.pop_back();
+    g_layoutDirty = true;
 }
 
 std::vector<std::wstring> ClipHistorySnapshot() {
     std::lock_guard lock(g_stateMutex);
     return {g_clipHistory.begin(), g_clipHistory.end()};
+}
+
+std::vector<size_t> FilteredClipIndices() {
+    std::lock_guard lock(g_stateMutex);
+    std::vector<size_t> res;
+    for (size_t i = 0; i < g_richClipItems.size(); ++i) {
+        const auto& it = g_richClipItems[i];
+        if (g_clipFilter == 1 && it.kind != ClipKind::Text) continue;
+        if (g_clipFilter == 2 && it.kind != ClipKind::Image) continue;
+        if (g_clipFilter == 3 && it.kind != ClipKind::Link) continue;
+        res.push_back(i);
+    }
+    return res;
 }
 
 bool StudioCopyText(HWND hwnd, const std::wstring& text) {
@@ -217,12 +301,138 @@ bool StudioCopyText(HWND hwnd, const std::wstring& text) {
     }
     CloseClipboard();
     if (ok) {
-        // Move it to the top, like copying it again would.
         std::lock_guard lock(g_stateMutex);
         g_clipHistory.erase(std::remove(g_clipHistory.begin(), g_clipHistory.end(), text), g_clipHistory.end());
         g_clipHistory.push_front(text);
     }
     return ok;
+}
+
+bool StudioCopyImagePixels(HWND hwnd, const BitmapPixels& pixels) {
+    if (pixels.bgra.empty() || !pixels.width || !pixels.height) return false;
+    if (!OpenClipboard(hwnd)) return false;
+    EmptyClipboard();
+    const size_t headerSize = sizeof(BITMAPINFOHEADER);
+    const size_t imageSize = static_cast<size_t>(pixels.width) * pixels.height * 4;
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, headerSize + imageSize);
+    bool ok = false;
+    if (hMem) {
+        uint8_t* p = static_cast<uint8_t*>(GlobalLock(hMem));
+        if (p) {
+            BITMAPINFOHEADER* bih = reinterpret_cast<BITMAPINFOHEADER*>(p);
+            bih->biSize = sizeof(BITMAPINFOHEADER);
+            bih->biWidth = static_cast<LONG>(pixels.width);
+            bih->biHeight = static_cast<LONG>(pixels.height);
+            bih->biPlanes = 1;
+            bih->biBitCount = 32;
+            bih->biCompression = BI_RGB;
+            bih->biSizeImage = static_cast<DWORD>(imageSize);
+            uint8_t* dst = p + headerSize;
+            const size_t stride = pixels.width * 4;
+            for (size_t y = 0; y < pixels.height; ++y) {
+                const uint8_t* srcRow = pixels.bgra.data() + (pixels.height - 1 - y) * stride;
+                memcpy(dst + y * stride, srcRow, stride);
+            }
+            GlobalUnlock(hMem);
+            g_clipSelfSet = true;
+            ok = SetClipboardData(CF_DIB, hMem) != nullptr;
+            if (!ok) { GlobalFree(hMem); g_clipSelfSet = false; }
+        } else {
+            GlobalFree(hMem);
+        }
+    }
+    CloseClipboard();
+    return ok;
+}
+
+void StudioCopyRichClip(HWND hwnd, int filteredIdx) {
+    const std::vector<size_t> indices = FilteredClipIndices();
+    if (filteredIdx < 0 || filteredIdx >= static_cast<int>(indices.size())) return;
+    std::lock_guard lock(g_stateMutex);
+    const size_t realIdx = indices[static_cast<size_t>(filteredIdx)];
+    if (realIdx >= g_richClipItems.size()) return;
+    const ClipItem& item = g_richClipItems[realIdx];
+    if (item.kind == ClipKind::Image) {
+        StudioCopyImagePixels(hwnd, item.image);
+    } else {
+        StudioCopyText(hwnd, item.text);
+    }
+}
+
+void StudioPinRichClip(int filteredIdx) {
+    const std::vector<size_t> indices = FilteredClipIndices();
+    if (filteredIdx < 0 || filteredIdx >= static_cast<int>(indices.size())) return;
+    std::lock_guard lock(g_stateMutex);
+    const size_t realIdx = indices[static_cast<size_t>(filteredIdx)];
+    if (realIdx >= g_richClipItems.size()) return;
+    g_richClipItems[realIdx].pinned = !g_richClipItems[realIdx].pinned;
+    g_layoutDirty = true;
+}
+
+void StudioDeleteRichClip(int filteredIdx) {
+    const std::vector<size_t> indices = FilteredClipIndices();
+    if (filteredIdx < 0 || filteredIdx >= static_cast<int>(indices.size())) return;
+    std::lock_guard lock(g_stateMutex);
+    const size_t realIdx = indices[static_cast<size_t>(filteredIdx)];
+    if (realIdx >= g_richClipItems.size()) return;
+    g_richClipItems.erase(g_richClipItems.begin() + realIdx);
+    if (g_clipSelected >= static_cast<int>(indices.size()) - 1) {
+        g_clipSelected = std::max(0, static_cast<int>(indices.size()) - 2);
+    }
+    g_layoutDirty = true;
+}
+
+// Bunbun: the Clipboard page's Clear. Empties the history but keeps pinned items.
+void StudioClearRichClips() {
+    std::lock_guard lock(g_stateMutex);
+    std::erase_if(g_richClipItems, [](const ClipItem& c) { return !c.pinned; });
+    g_clipSelected = 0;
+    g_layoutDirty = true;
+}
+
+void StudioSaveRichClip(int filteredIdx) {
+    const std::vector<size_t> indices = FilteredClipIndices();
+    if (filteredIdx < 0 || filteredIdx >= static_cast<int>(indices.size())) return;
+    std::lock_guard lock(g_stateMutex);
+    const size_t realIdx = indices[static_cast<size_t>(filteredIdx)];
+    if (realIdx >= g_richClipItems.size()) return;
+    const ClipItem& item = g_richClipItems[realIdx];
+
+    wchar_t picPath[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"USERPROFILE", picPath, MAX_PATH);
+    std::wstring out = std::wstring(picPath) + L"\\Pictures\\Bunbun_clip_" + std::to_wstring(static_cast<uint64_t>(item.copiedAt));
+    if (item.kind == ClipKind::Image) {
+        out += L".bmp";
+        FILE* f = _wfopen(out.c_str(), L"wb");
+        if (f) {
+            BITMAPFILEHEADER bfh = {};
+            bfh.bfType = 0x4D42;
+            bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+            bfh.bfSize = static_cast<DWORD>(bfh.bfOffBits + item.image.bgra.size());
+            BITMAPINFOHEADER bih = {};
+            bih.biSize = sizeof(BITMAPINFOHEADER);
+            bih.biWidth = static_cast<LONG>(item.image.width);
+            bih.biHeight = static_cast<LONG>(item.image.height);
+            bih.biPlanes = 1;
+            bih.biBitCount = 32;
+            bih.biCompression = BI_RGB;
+            fwrite(&bfh, 1, sizeof(bfh), f);
+            fwrite(&bih, 1, sizeof(bih), f);
+            const size_t stride = item.image.width * 4;
+            for (size_t y = 0; y < item.image.height; ++y) {
+                const uint8_t* srcRow = item.image.bgra.data() + (item.image.height - 1 - y) * stride;
+                fwrite(srcRow, 1, stride, f);
+            }
+            fclose(f);
+        }
+    } else {
+        out += L".txt";
+        FILE* f = _wfopen(out.c_str(), L"w, ccs=UTF-8");
+        if (f) {
+            fputws(item.text.c_str(), f);
+            fclose(f);
+        }
+    }
 }
 
 // ── Quick note ───────────────────────────────────────────────────────────────
@@ -356,25 +566,25 @@ struct Snapshot {
     std::wstring model;         // the model with that lowest fraction
     long long resetAt = 0;      // its reset time, Unix seconds
     double readAt = 0.0;        // NowSeconds() of the last successful read
+    std::vector<bb::agquota::Pool> pools;  // Bunbun: every pool of models, the most used first
 };
 Snapshot g_quota;               // guarded by g_stateMutex
+std::wstring g_cursorPlan;      // Bunbun: Cursor's plan ("free", "pro"), from its own state; guarded by g_stateMutex
 std::atomic<bool> g_started{false};
 
 // The decoding itself lives in common/ag_quota.h, shared with Linux.
 
-// Reads the cached status. False when Antigravity isn't installed or the layout changed.
-bool Read(Snapshot* out) {
-    wchar_t appData[MAX_PATH];
-    if (!GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH)) return false;
-    const std::wstring path = std::wstring(appData) + L"\\Antigravity IDE\\User\\globalStorage\\state.vscdb";
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
-
+// Bunbun: one value from a VS Code-style state database (state.vscdb), read-only.
+// "" when the file, the key or winsqlite3 isn't there.
+std::string ReadStateValue(const std::wstring& path, const char* key) {
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return {};
     // winsqlite3.dll ships with Windows 10 and 11; loaded on demand so the island
     // has no SQLite dependency of its own.
     static HMODULE dll = LoadLibraryExW(L"winsqlite3.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!dll) return false;
+    if (!dll) return {};
     using OpenFn = int(__stdcall*)(const char*, void**, int, const char*);
     using PrepareFn = int(__stdcall*)(void*, const char*, int, void**, const char**);
+    using BindFn = int(__stdcall*)(void*, int, const char*, int, void*);
     using StepFn = int(__stdcall*)(void*);
     using TextFn = const unsigned char*(__stdcall*)(void*, int);
     using BytesFn = int(__stdcall*)(void*, int);
@@ -382,12 +592,13 @@ bool Read(Snapshot* out) {
     using CloseFn = int(__stdcall*)(void*);
     auto open = reinterpret_cast<OpenFn>(GetProcAddress(dll, "sqlite3_open_v2"));
     auto prepare = reinterpret_cast<PrepareFn>(GetProcAddress(dll, "sqlite3_prepare_v2"));
+    auto bind = reinterpret_cast<BindFn>(GetProcAddress(dll, "sqlite3_bind_text"));
     auto step = reinterpret_cast<StepFn>(GetProcAddress(dll, "sqlite3_step"));
     auto text = reinterpret_cast<TextFn>(GetProcAddress(dll, "sqlite3_column_text"));
     auto bytes = reinterpret_cast<BytesFn>(GetProcAddress(dll, "sqlite3_column_bytes"));
     auto finalize = reinterpret_cast<FinalizeFn>(GetProcAddress(dll, "sqlite3_finalize"));
     auto close = reinterpret_cast<CloseFn>(GetProcAddress(dll, "sqlite3_close"));
-    if (!open || !prepare || !step || !text || !bytes || !finalize || !close) return false;
+    if (!open || !prepare || !bind || !step || !text || !bytes || !finalize || !close) return {};
 
     std::string utf8Path(WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr), '\0');
     WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, utf8Path.data(), static_cast<int>(utf8Path.size()), nullptr, nullptr);
@@ -395,19 +606,31 @@ bool Read(Snapshot* out) {
     constexpr int kReadOnly = 0x00000001;
     if (open(utf8Path.c_str(), &db, kReadOnly, nullptr) != 0 || !db) {
         if (db) close(db);
-        return false;
+        return {};
     }
     std::string value;
     void* stmt = nullptr;
-    if (prepare(db, "SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.userStatus'", -1, &stmt,
-                nullptr) == 0 && stmt) {
-        if (step(stmt) == 100 /* SQLITE_ROW */) {
-            const unsigned char* t = text(stmt, 0);
-            if (t) value.assign(reinterpret_cast<const char*>(t), static_cast<size_t>(bytes(stmt, 0)));
+    if (prepare(db, "SELECT value FROM ItemTable WHERE key=?", -1, &stmt, nullptr) == 0 && stmt) {
+        if (bind(stmt, 1, key, -1, nullptr) == 0 && step(stmt) == 100 /* SQLITE_ROW */) {
+            const unsigned char* tx = text(stmt, 0);
+            if (tx) value.assign(reinterpret_cast<const char*>(tx), static_cast<size_t>(bytes(stmt, 0)));
         }
         finalize(stmt);
     }
     close(db);
+    return value;
+}
+
+std::wstring AppDataPath(const wchar_t* rest) {
+    wchar_t appData[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH)) return {};
+    return std::wstring(appData) + rest;
+}
+
+// Reads the cached status. False when Antigravity isn't installed or the layout changed.
+bool Read(Snapshot* out) {
+    const std::string value = ReadStateValue(AppDataPath(L"\\Antigravity IDE\\User\\globalStorage\\state.vscdb"),
+                                             "antigravityUnifiedStateSync.userStatus");
     if (value.empty()) return false;
 
     bb::agquota::Quota q;
@@ -417,6 +640,7 @@ bool Read(Snapshot* out) {
     snap.remaining = q.remaining;
     snap.model = std::wstring(q.model.begin(), q.model.end());
     snap.resetAt = q.resetAt;
+    snap.pools = q.pools;
     snap.readAt = NowSeconds();
     *out = snap;
     return true;
@@ -429,8 +653,13 @@ void EnsureStarted() {
         for (;;) {
             Snapshot snap;
             const bool ok = Read(&snap);
+            // Bunbun: Cursor keeps only its plan locally (no usage numbers).
+            std::string plan = ReadStateValue(AppDataPath(L"\\Cursor\\User\\globalStorage\\state.vscdb"),
+                                              "cursorAuth/stripeMembershipType");
+            if (plan.size() >= 2 && plan.front() == '"' && plan.back() == '"') plan = plan.substr(1, plan.size() - 2);
             {
                 std::lock_guard lock(g_stateMutex);
+                g_cursorPlan = std::wstring(plan.begin(), plan.end());
                 if (ok) g_quota = snap;
                 else if (NowSeconds() - g_quota.readAt > 600.0) g_quota.valid = false;
             }
@@ -444,6 +673,21 @@ Snapshot Get() {
     EnsureStarted();
     std::lock_guard lock(g_stateMutex);
     return g_quota;
+}
+
+// Bunbun: the most used pool's share used now, percent (a pool past its reset counts as refilled).
+float UsedNow(const Snapshot& s) {
+    const long long now = static_cast<long long>(time(nullptr));
+    float used = 0.0f;
+    for (const auto& p : s.pools) used = std::max(used, (1.0f - bb::agquota::RemainingNow(p.remaining, p.resetAt, now)) * 100.0f);
+    if (s.pools.empty()) used = (1.0f - bb::agquota::RemainingNow(s.remaining, s.resetAt, now)) * 100.0f;
+    return used;
+}
+
+std::wstring CursorPlan() {
+    EnsureStarted();
+    std::lock_guard lock(g_stateMutex);
+    return g_cursorPlan;
 }
 
 }  // namespace AgQuota
@@ -861,12 +1105,19 @@ void EnsureFocusGuard() {
 
 enum class StudioAction {
     Tab, Volume, PlayPause, OpenMusic, FocusStart, FocusStop, AgentPage, AgentFocus,
-    ClipCopy, ClipClear, NoteToggle, NoteEdit, Settings,
+    ClipCopy, ClipClear, NoteToggle, NoteEdit, Settings, Close,
     ChatChip, ChatNew, ChatPanel, ColorPicker, ModelCycle, AgentReply,
     FocusWheel, FocusPreset, FocusAdd5, FocusPause, FocusPage, OpenTab, OpenLink, MirrorStart, MirrorStop, HomeEdit, HomeTileCycle,
     WaterAdd, WaterUndo, WaterRefill,  // Bunbun: the Water page
     ReminderDone, ReminderSnooze, ReminderExpand,  // Bunbun: the reminder pill (todos_draw.inc)
     CalPrev, CalNext, CalToday, CalView, CalOpenWeek,  // Bunbun: the Calendar page's month / week views
+    // Bunbun: the Timers page (timers_module.inc)
+    TimerMode, PomoToggle, PomoSkip, PomoReset, PomoAuto, PomoLength, CountToggle, CountAdd, CountReset, CountPreset, CountSave,
+    TimerRing, SwToggle, SwLap, SwReset, SwCopy,
+    WeatherUnitToggle, WeatherCitySearch,  // Bunbun: Studio Weather page
+    RadioToggle, RadioSettings,            // Bunbun: Wi-Fi / Bluetooth on the System page
+    ClipFilter, ClipSelect, ClipSearch, ClipPin, ClipDelete, ClipSave,  // Bunbun: Clipboard page
+    ScreenTimeRefresh, ScreenTimeLimitEdit,  // Bunbun: Screen Time page
 };
 
 // Bunbun: the Calendar page's view (render thread): 0 = month, 1 = week, and how far
@@ -1013,17 +1264,28 @@ void OpenMusicApp() {
 }
 
 float g_studioVolumeLevelPending = -1.0f;  // last level sent while dragging, to skip repeats
-bool g_studioVolumeDrag = false;          // left button went down on the volume slider
+// g_studioVolumeDrag and g_suppressVolumeNotificationUntil are declared in island_core.cpp
 D2D1_RECT_F g_studioVolumeRect{};          // that slider's rect, in content space
 
 void SetStudioVolume(const MediaContentPoint& pt) {
+    if (!g_endpointVolume) {
+        BindVolumeEndpoint();
+    }
     const float w = g_studioVolumeRect.right - g_studioVolumeRect.left;
     if (!pt.valid || w <= 1.0f || !g_endpointVolume) return;
     const float level = Clamp((pt.x - g_studioVolumeRect.left) / w, 0.0f, 1.0f);
     if (std::fabs(level - g_studioVolumeLevelPending) < 0.005f) return;
     g_studioVolumeLevelPending = level;
+    g_suppressVolumeNotificationUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
     g_endpointVolume->SetMasterVolumeLevelScalar(level, nullptr);
     g_endpointVolume->SetMute(FALSE, nullptr);
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_state.system.volumePercent = static_cast<int>(std::round(level * 100.0f));
+        g_state.system.volumeMuted = false;
+        g_state.muted = false;
+        g_state.volume.active = false;
+    }
     g_layoutDirty = true;
 }
 
@@ -1058,7 +1320,15 @@ bool HandleStudioButtonDown(HWND hwnd, int x, int y) {
     const int i = StudioHitAt(pt);
     if (i < 0) return false;
     const StudioHit& hit = g_studioHits[static_cast<size_t>(i)];
+    if (hit.action == StudioAction::TimerRing && !Timers::CountdownRunning()) {  // Bunbun: set the countdown
+        Timers::g_ringDrag = true;
+        Timers::g_ringCenter = D2D1::Point2F((hit.rect.left + hit.rect.right) * 0.5f, (hit.rect.top + hit.rect.bottom) * 0.5f);
+        SetCapture(hwnd);
+        Timers::SetCountdownFromPoint(pt);
+        return true;
+    }
     if (hit.action != StudioAction::Volume || hit.arg != 0) return false;
+    g_suppressVolumeNotificationUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
     g_studioVolumeDrag = true;
     g_studioVolumeRect = hit.rect;
     g_studioVolumeLevelPending = -1.0f;
@@ -1079,10 +1349,18 @@ void ShowDashboardTab(int tab) {
 }
 
 bool HandleStudioClick(HWND hwnd, int x, int y) {
+    if (Timers::g_ringDrag) {  // Bunbun: the end of a countdown ring drag
+        Timers::g_ringDrag = false;
+        ReleaseCapture();
+        Timers::SetCountdownFromPoint(StudioPointFromClient(x, y));
+        return true;
+    }
     if (g_studioVolumeDrag) {
+        g_suppressVolumeNotificationUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
         g_studioVolumeDrag = false;
         ReleaseCapture();
         SetStudioVolume(StudioPointFromClient(x, y));
+        g_studioVolumeLevelPending = -1.0f;
         return true;
     }
     if (g_studioHits.empty()) return false;
@@ -1095,6 +1373,7 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             ShowDashboardTab(hit.arg);
             break;
         case StudioAction::Volume:
+            g_suppressVolumeNotificationUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
             if (hit.arg == -1) {  // the speaker icon: mute / unmute
                 ToggleEndpointMute();
             } else {
@@ -1128,8 +1407,11 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             break;
         }
         case StudioAction::ClipClear: {
-            std::lock_guard lock(g_stateMutex);
-            g_clipHistory.clear();
+            {
+                std::lock_guard lock(g_stateMutex);
+                g_clipHistory.clear();
+            }
+            StudioClearRichClips();  // Bunbun: the Clipboard page's list too (pinned stay)
             break;
         }
         case StudioAction::NoteToggle:
@@ -1140,6 +1422,13 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             break;
         case StudioAction::Settings:
             OpenSettingsApp();
+            break;
+        case StudioAction::Close:
+            g_pinnedExpanded.store(false);
+            g_clickExpanded.store(false);
+            g_hoverSuppressed.store(true);
+            Wh_SetIntValue(L"PinnedExpanded", 0);
+            g_layoutDirty = true;
             break;
         case StudioAction::FocusWheel: {
             // Clicking the upper half of a column steps down, the lower half up.
@@ -1170,6 +1459,53 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             break;
         case StudioAction::MirrorStop:
             Mirror::Stop();
+            break;
+        case StudioAction::TimerMode:  // Bunbun: the Timers page
+            Timers::SetMode(static_cast<bb::timers::Mode>(std::clamp(hit.arg, 0, bb::timers::kModeCount - 1)));
+            break;
+        case StudioAction::PomoToggle:
+            Timers::PomodoroToggle(g_settings);
+            break;
+        case StudioAction::PomoSkip:
+            Timers::PomodoroSkip(g_settings);
+            break;
+        case StudioAction::PomoReset:
+            Timers::PomodoroReset();
+            break;
+        case StudioAction::PomoLength:  // Bunbun: a focus-length chip; 25 is the default, so it's written as unset
+            WriteBunbunSetting(L"PomodoroFocus", hit.arg == 25 ? L"-" : std::to_wstring(hit.arg).c_str());
+            break;
+        case StudioAction::PomoAuto:  // the default is on: off is written, on goes back to the default
+            WriteBunbunSetting(L"PomodoroAutoStart", g_settings.pomoAutoStart ? L"false" : L"-");
+            break;
+        case StudioAction::CountToggle:
+            Timers::CountdownToggle();
+            break;
+        case StudioAction::CountAdd:
+            Timers::CountdownAdd(hit.arg);
+            break;
+        case StudioAction::CountReset:
+            Timers::CountdownReset();
+            break;
+        case StudioAction::CountPreset:
+            Timers::CountdownSet(hit.arg);
+            break;
+        case StudioAction::CountSave:
+            Timers::SavePreset(g_settings);
+            break;
+        case StudioAction::TimerRing:
+            break;  // handled on button down (a drag)
+        case StudioAction::SwToggle:
+            Timers::StopwatchToggle();
+            break;
+        case StudioAction::SwLap:
+            Timers::StopwatchLap();
+            break;
+        case StudioAction::SwReset:
+            Timers::StopwatchReset();
+            break;
+        case StudioAction::SwCopy:
+            StudioCopyText(hwnd, bb::timers::LapsText(Timers::g_laps));
             break;
         case StudioAction::WaterAdd:  // Bunbun: the Water page
             WaterDrink();
@@ -1258,6 +1594,68 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
         case StudioAction::ChatPanel:
             TouchLookupPanel();  // a click inside the chat keeps it open and focused
             break;
+        case StudioAction::RadioToggle: {  // Bunbun: arg 0 Wi-Fi, 1 Bluetooth
+            int radio = -1;
+            {
+                std::lock_guard lock(g_stateMutex);
+                radio = hit.arg == 1 ? g_state.connectivity.bluetoothRadio : g_state.connectivity.wifiRadio;
+            }
+            if (radio >= 0) SetRadioAsync(hit.arg == 1, radio != 1);  // opens Windows settings if it can't
+            break;
+        }
+        case StudioAction::RadioSettings:  // Bunbun: 0 Wi-Fi, 1 Bluetooth, 2 Ethernet: pick a network or device
+            ShellExecuteW(nullptr, L"open", hit.arg == 1 ? L"ms-settings:bluetooth" : hit.arg == 2 ? L"ms-settings:network-ethernet" : L"ms-settings:network-wifi",
+                          nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        case StudioAction::WeatherUnitToggle: {
+            bool nextF = false;
+            {
+                std::lock_guard lock(g_settingsMutex);
+                g_settings.weatherFahrenheit = !g_settings.weatherFahrenheit;
+                nextF = g_settings.weatherFahrenheit;
+            }
+            WriteBunbunSetting(L"WeatherFahrenheit", nextF ? L"true" : L"-");
+            Wh_SetIntValue(L"WeatherFahrenheit", nextF ? 1 : 0);
+            if (g_settingsChangedEvent) SetEvent(g_settingsChangedEvent);
+            break;
+        }
+        case StudioAction::WeatherCitySearch:
+            StartQuickLookup(hwnd);
+            g_lookupUi.text = L"weather in ";
+            g_lookupUi.caret = static_cast<int>(g_lookupUi.text.size());
+            break;
+        case StudioAction::ClipFilter:
+            g_clipFilter = hit.arg;
+            g_clipSelected = 0;
+            break;
+        case StudioAction::ClipSelect:
+            g_clipSelected = hit.arg;
+            break;
+        case StudioAction::ClipSearch:
+            StartQuickLookup(hwnd);
+            g_lookupUi.text = L"clip ";
+            g_lookupUi.caret = static_cast<int>(g_lookupUi.text.size());
+            break;
+        case StudioAction::ClipPin:
+            StudioPinRichClip(hit.arg);
+            break;
+        case StudioAction::ClipDelete:
+            StudioDeleteRichClip(hit.arg);
+            break;
+        case StudioAction::ClipSave:
+            StudioSaveRichClip(hit.arg);
+            break;
+        case StudioAction::ScreenTimeRefresh:
+            break;  // redraws below
+        case StudioAction::ScreenTimeLimitEdit: {
+            // Bunbun: a click on the limit steps it: none, 2 h, 4 h ... 12 h, none.
+            static const int kSteps[] = {0, 2, 4, 6, 8, 10, 12};
+            int next = 0;
+            for (size_t k = 0; k + 1 < std::size(kSteps); ++k)
+                if (g_settings.screenTimeLimit == kSteps[k]) next = kSteps[k + 1];
+            WriteBunbunSetting(L"ScreenTimeLimit", next ? std::to_wstring(next).c_str() : L"-");
+            break;
+        }
     }
     g_layoutDirty = true;
     return true;
@@ -1269,6 +1667,11 @@ bool HandleStudioWheel(HWND hwnd, LPARAM lParam, int step) {
     POINT p{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // WM_MOUSEWHEEL is in screen coordinates
     ScreenToClient(hwnd, &p);
     const int i = StudioHitAt(StudioPointFromClient(p.x, p.y));
+    if (i >= 0 && g_studioHits[static_cast<size_t>(i)].action == StudioAction::TimerRing && !Timers::CountdownRunning()) {
+        const bool fine = (GetKeyState(VK_SHIFT) & 0x8000) != 0;  // Bunbun: Shift steps seconds
+        Timers::CountdownSet(bb::timers::StepCountdown(Timers::g_countSet, -step, fine));
+        return true;
+    }
     if (i < 0 || g_studioHits[static_cast<size_t>(i)].action != StudioAction::FocusWheel) return false;
     StepFocusPicker(g_studioHits[static_cast<size_t>(i)].arg, step);
     return true;
@@ -1284,7 +1687,12 @@ StudioHoverSpot g_studioHover;
 void HandleStudioMouseMove(int x, int y) {
     const MediaContentPoint pt = StudioPointFromClient(x, y);
     if (g_studioVolumeDrag) {
+        g_suppressVolumeNotificationUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
         SetStudioVolume(pt);
+        return;
+    }
+    if (Timers::g_ringDrag) {  // Bunbun: dragging the countdown ring
+        Timers::SetCountdownFromPoint(pt);
         return;
     }
     const int i = g_studioHits.empty() ? -1 : StudioHitAt(pt);

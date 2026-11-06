@@ -34,6 +34,7 @@ constexpr Palette kPalettes[] = {
     {L"plum", 0x16111C, 0xF1EAF6, 0xAC9BB9, 0x281F33},     {L"porcelain", 0xF5F6F8, 0x14161A, 0x5B6270, 0xD8DBE1},
 };
 bool g_bottom = false, g_merged = false;
+Shape g_baseShape = Shape::Pill;  // Appearance.ShapeStyle (the shape may follow the display)
 
 void Rgb(uint32_t v, double* out) {
     out[0] = ((v >> 16) & 0xFF) / 255.0;
@@ -59,6 +60,7 @@ void LoadSettings() {
     Look l;
     const std::wstring shape = s::Get(L"Appearance.ShapeStyle");
     l.shape = shape == L"notch" ? Shape::Notch : shape == L"w11" ? Shape::W11 : Shape::Pill;
+    g_baseShape = l.shape;
 
     // Theme: a preset's colours, or the hex fields for Custom.
     const std::wstring preset = s::Get(L"Themes.ThemePreset");
@@ -116,6 +118,34 @@ const Look& Get() { return g_look; }
 
 // ── Shape ───────────────────────────────────────────────────────────────────
 
+Shape BaseShape() { return g_baseShape; }
+void SetShape(Shape s) { g_look.shape = s; }
+
+double RadiusAs(double h, Shape shape) {
+    if (shape == Shape::W11) return h > 60 ? 12.0 : 8.0;
+    return std::min(h / 2, h > 150 ? 32.0 : 22.0);
+}
+
+void SurfacePathAs(cairo_t* cr, double x, double y, double w, double h, double r, Shape shape, bool ears) {
+    const Shape was = g_look.shape;
+    const bool merged = g_merged;
+    g_look.shape = shape;
+    if (!ears && shape == Shape::Notch) {  // the body alone: square on top, rounded below
+        r = std::min({r, w / 2, h / 2});
+        cairo_new_sub_path(cr);
+        cairo_move_to(cr, x, y);
+        cairo_line_to(cr, x + w, y);
+        cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+        cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+        cairo_close_path(cr);
+    } else {
+        g_merged = shape == Shape::Notch ? merged : false;
+        SurfacePath(cr, x, y, w, h, r);
+    }
+    g_look.shape = was;
+    g_merged = merged;
+}
+
 double Radius(double h) {
     if (g_look.shape == Shape::W11) return h > 60 ? 12.0 : 8.0;
     return std::min(h / 2, h > 150 ? 32.0 : 22.0);
@@ -124,35 +154,69 @@ double Radius(double h) {
 double TopGap(double normalGap) { return g_look.shape == Shape::Notch || g_merged ? 0.0 : normalGap; }
 void SetEdge(bool bottom, bool merged) { g_bottom = bottom; g_merged = merged; }
 
+double NotchEar(double w, double h) {
+    return g_look.shape == Shape::Notch ? std::max(0.0, std::min({16.0, h * 0.42, w / 8})) : 0.0;
+}
+
+// The visible outline, for the edge light: a notch (or merged island) is open on
+// the screen's side and runs from one ear's tip to the other's; other shapes are
+// closed, starting at the top centre and going clockwise.
+bool OutlinePath(cairo_t* cr, double x, double y, double w, double h, double r) {
+    r = std::min({r, w / 2, h / 2});
+    cairo_new_path(cr);
+    if (g_look.shape == Shape::Notch || g_merged) {
+        const double ear = NotchEar(w, h);
+        if (g_bottom) {
+            const double b = y + h;
+            cairo_move_to(cr, x + w + ear, b);
+            if (ear > 0) cairo_arc(cr, x + w + ear, b - ear, ear, M_PI / 2, M_PI);
+            cairo_arc_negative(cr, x + w - r, y + r, r, 0, -M_PI / 2);
+            cairo_arc_negative(cr, x + r, y + r, r, -M_PI / 2, -M_PI);
+            if (ear > 0) cairo_arc(cr, x - ear, b - ear, ear, 0, M_PI / 2);
+            else cairo_line_to(cr, x, b);
+        } else {
+            cairo_move_to(cr, x + w + ear, y);
+            if (ear > 0) cairo_arc_negative(cr, x + w + ear, y + ear, ear, -M_PI / 2, -M_PI);
+            cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+            cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+            if (ear > 0) cairo_arc_negative(cr, x - ear, y + ear, ear, 0, -M_PI / 2);
+            else cairo_line_to(cr, x, y);
+        }
+        return false;  // open
+    }
+    cairo_move_to(cr, x + w / 2, y);
+    cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+    cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+    cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+    cairo_close_path(cr);
+    return true;  // closed
+}
+
 void SurfacePath(cairo_t* cr, double x, double y, double w, double h, double r) {
     r = std::min({r, w / 2, h / 2});
     cairo_new_sub_path(cr);
     if (g_look.shape == Shape::Notch || g_merged) {
         // Square against the screen edge, rounded on the other side. The notch also
         // gets concave "ears" where it meets the edge, as on Windows
-        // (CreateNotchGeometry): it flows out of the bezel instead of starting with a
-        // hard corner. Each ear is a quadratic curve from the edge, past the body's
-        // corner (the control point), onto its side; written as a cubic for cairo.
-        const double ear = g_look.shape == Shape::Notch ? std::max(0.0, std::min({10.0, h / 3, w / 8})) : 0.0;
-        const auto quad = [&](double x0, double y0, double cx, double cy, double x2, double y2) {
-            cairo_curve_to(cr, x0 + 2.0 / 3 * (cx - x0), y0 + 2.0 / 3 * (cy - y0), x2 + 2.0 / 3 * (cx - x2), y2 + 2.0 / 3 * (cy - y2),
-                           x2, y2);
-        };
+        // (CreateNotchGeometry): a quarter circle just outside the body, from the
+        // edge onto its side, so it flows out of the bezel.
+        const double ear = NotchEar(w, h);
         if (g_bottom) {
             const double b = y + h;
             cairo_move_to(cr, x + w + ear, b);
             cairo_line_to(cr, x - ear, b);
-            if (ear > 0) quad(x - ear, b, x, b, x, b - ear);
+            if (ear > 0) cairo_arc_negative(cr, x - ear, b - ear, ear, M_PI / 2, 0);
             cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
             cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
-            if (ear > 0) quad(x + w, b - ear, x + w, b, x + w + ear, b);
+            if (ear > 0) cairo_arc_negative(cr, x + w + ear, b - ear, ear, M_PI, M_PI / 2);
         } else {
             cairo_move_to(cr, x - ear, y);
             cairo_line_to(cr, x + w + ear, y);
-            if (ear > 0) quad(x + w + ear, y, x + w, y, x + w, y + ear);
+            if (ear > 0) cairo_arc_negative(cr, x + w + ear, y + ear, ear, -M_PI / 2, -M_PI);
             cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
             cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
-            if (ear > 0) quad(x, y + ear, x, y, x - ear, y);
+            if (ear > 0) cairo_arc_negative(cr, x - ear, y + ear, ear, 0, -M_PI / 2);
         }
         cairo_close_path(cr);
         return;

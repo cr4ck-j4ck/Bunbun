@@ -6,6 +6,10 @@
     // its list, right-click for its Windows Settings page. See the input handlers
     // in connectivity_module.inc.
     void DrawConnectivityDashboard(const SharedState& state, D2D1_RECT_F rect, float scale) {
+        if (g_settings.studioLayout) {
+            DrawStudioSystemPage(state, rect, g_settings, NowSeconds());
+            return;
+        }
         using namespace ConnectivityLayout;
         const float padX = kPadX * scale;
 

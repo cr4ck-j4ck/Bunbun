@@ -318,6 +318,64 @@ void SetRadioAsync(bool bluetooth, bool on) {
     }).detach();
 }
 
+inline std::wstring CleanBluetoothName(std::wstring name) {
+    const wchar_t* suffixes[] = {
+        L" Hands-Free AG", L" Hands-Free HF", L" Hands-Free",
+        L" Avrcp Transport", L" A2DP SNK", L" Stereo"
+    };
+    for (const wchar_t* suf : suffixes) {
+        size_t len = wcslen(suf);
+        if (name.size() > len && name.compare(name.size() - len, len, suf) == 0) {
+            name.erase(name.size() - len);
+        }
+    }
+    return name;
+}
+
+// Queries connected Bluetooth device name and battery percentage (0-100) via SetupAPI
+inline void QueryBluetoothBattery(std::wstring& outName, int& outBattery) {
+    outName.clear();
+    outBattery = -1;
+    static const DEVPROPKEY kDevPropKeyBattery = {
+        {0x104ea319, 0x6ee2, 0x4701, {0xbd, 0x47, 0x8d, 0xdb, 0xf4, 0x25, 0xbb, 0xe5}}, 2};
+    static const DEVPROPKEY kDevPropKeyFriendlyName = {
+        {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+    static const DEVPROPKEY kDevPropKeyIsConnected = {
+        {0x83da6326, 0x97a6, 0x4088, {0x94, 0x53, 0xa1, 0x92, 0x3f, 0x57, 0x3b, 0x29}}, 15};
+
+    const wchar_t* enumerators[] = {L"BTHENUM", L"BTHLE"};
+    for (const wchar_t* en : enumerators) {
+        HDEVINFO hDevInfo = SetupDiGetClassDevsW(nullptr, en, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+        if (hDevInfo == INVALID_HANDLE_VALUE) continue;
+
+        SP_DEVINFO_DATA devData{};
+        devData.cbSize = sizeof(devData);
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(hDevInfo, i, &devData); ++i) {
+            DEVPROPTYPE propType = 0;
+            DEVPROP_BOOLEAN isConnected = DEVPROP_FALSE;
+            if (SetupDiGetDevicePropertyW(hDevInfo, &devData, &kDevPropKeyIsConnected, &propType,
+                                          reinterpret_cast<PBYTE>(&isConnected), sizeof(isConnected), nullptr, 0)) {
+                if (isConnected == DEVPROP_FALSE) continue;
+            }
+            BYTE batteryByte = 0;
+            if (SetupDiGetDevicePropertyW(hDevInfo, &devData, &kDevPropKeyBattery, &propType,
+                                          &batteryByte, sizeof(batteryByte), nullptr, 0)) {
+                if (batteryByte <= 100) {
+                    wchar_t nameBuf[256] = {};
+                    if (SetupDiGetDevicePropertyW(hDevInfo, &devData, &kDevPropKeyFriendlyName, &propType,
+                                                  reinterpret_cast<PBYTE>(nameBuf), sizeof(nameBuf), nullptr, 0)) {
+                        outName = CleanBluetoothName(nameBuf);
+                        outBattery = static_cast<int>(batteryByte);
+                        SetupDiDestroyDeviceInfoList(hDevInfo);
+                        return;
+                    }
+                }
+            }
+        }
+        SetupDiDestroyDeviceInfoList(hDevInfo);
+    }
+}
+
 static ConnectivitySnapshot SampleConnectivity(HANDLE& wlan) {
     ConnectivitySnapshot c;
     c.sampled = true;
@@ -403,6 +461,17 @@ static ConnectivitySnapshot SampleConnectivity(HANDLE& wlan) {
         // Radio access can be blocked by policy; the card then shows "Unavailable".
     }
 #endif
+
+    // Bunbun: connected Bluetooth device & battery level (for Studio System page)
+    QueryBluetoothBattery(c.connectedBtName, c.connectedBtBattery);
+    if (c.connectedBtName.empty()) {
+        for (const auto& dev : c.bluetoothList) {
+            if (dev.connected) {
+                c.connectedBtName = CleanBluetoothName(dev.name);
+                break;
+            }
+        }
+    }
 
     // Bunbun: battery. BatteryFlag 128 = no system battery (a desktop), 255 = unknown.
     SYSTEM_POWER_STATUS ps{};

@@ -19,6 +19,8 @@ int wmain(int argc, wchar_t** argv) {
     const bool venom = argc > 2 && wcscmp(argv[2], L"--venom") == 0;  // Spidey's row in his Venom suit
     // --celebrate: every character's Happy mood at twelve moments through the celebration.
     const bool celebrate = argc > 2 && wcscmp(argv[2], L"--celebrate") == 0;
+    // --drink: every character's Drinking mood at twelve moments through the glass.
+    const bool drink = argc > 2 && wcscmp(argv[2], L"--drink") == 0;
     // --pack <name>: a skin pack instead: every mood at four moments, then idle looking around.
     const std::wstring pack = argc > 3 && wcscmp(argv[2], L"--pack") == 0 ? argv[3] : L"";
     // --pack <name> <cell>: draw it that many pixels per cell (default 120), to check small sizes.
@@ -33,7 +35,7 @@ int wmain(int argc, wchar_t** argv) {
     const Character chars[] = {Character::Bunny, Character::Cat, Character::Dog, Character::Fox, Character::Panda, Character::Robot, Character::Spiderman,
                                Character::Luffy, Character::Dazai};
     const Mood moods[] = {Mood::Idle, Mood::Working, Mood::Thinking, Mood::Alert, Mood::Happy, Mood::Music, Mood::Sad, Mood::Sleepy,
-                          Mood::Snack, Mood::Listening, Mood::Talking, Mood::Confused, Mood::Streaming, Mood::Dnd, Mood::Live};
+                          Mood::Snack, Mood::Listening, Mood::Talking, Mood::Confused, Mood::Streaming, Mood::Dnd, Mood::Live, Mood::Drinking};
     const int cell = pack.empty() ? 120 : packCell, cols = static_cast<int>(std::size(moods));
     const int rows = pack.empty() ? static_cast<int>(std::size(chars)) : 6;
     const double moments[] = {0.05, 0.5, 1.3, 2.5};
@@ -64,9 +66,9 @@ int wmain(int argc, wchar_t** argv) {
                 continue;
             }
             st.character = chars[r];
-            if (celebrate) {
+            if (celebrate || drink) {
                 const double since = 0.05 + c * 0.2;  // 0.05 s to 2.25 s
-                DrawStyled(rt.Get(), st, D2D1::Point2F(c * cell + cell * 0.5f, r * cell + cell * 0.45f), cell * 0.8f, Mood::Happy,
+                DrawStyled(rt.Get(), st, D2D1::Point2F(c * cell + cell * 0.5f, r * cell + cell * 0.45f), cell * 0.8f, drink ? Mood::Drinking : Mood::Happy,
                            10.0 + since, 10.0, D2D1::Point2F(0, 0));
                 continue;
             }

@@ -43,6 +43,16 @@ const Look& Get();
 // rectangle, or a notch (square top, flush with the screen edge).
 double Radius(double h);  // corner radius for a surface this tall
 void SurfacePath(cairo_t* cr, double x, double y, double w, double h, double radius);
+// The notch's ear size for a w x h island (0 for other shapes).
+double NotchEar(double w, double h);
+// The visible outline as the current path (for the edge light); true when it's closed.
+bool OutlinePath(cairo_t* cr, double x, double y, double w, double h, double radius);
+// Separate displays: the shape of the display the island is on (BaseShape = Appearance.ShapeStyle).
+Shape BaseShape();
+void SetShape(Shape s);
+// The surface path and corner radius in a given shape (a mirror drawn in its display's own look).
+void SurfacePathAs(cairo_t* cr, double x, double y, double w, double h, double radius, Shape shape, bool ears);
+double RadiusAs(double h, Shape shape);
 double TopGap(double normalGap);  // 0 for the notch and Border-merged mode
 // Which screen edge the island hangs from (Appearance.Position, BorderMergedMode):
 // the notch and the merged island are square on that side.

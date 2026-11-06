@@ -49,7 +49,8 @@ export function useAppTheme(store: Store) {
     const root = document.documentElement.style;
     root.setProperty("--accent", `rgb(${rgb.join(",")})`);
     root.setProperty("--accent-2", companion(rgb));
-    root.setProperty("--accent-grad", `linear-gradient(135deg, rgb(${rgb.join(",")}) 0%, ${companion(rgb)} 100%)`);
+    // Flat accent, no two-colour gradient: calmer, like the island itself.
+    root.setProperty("--accent-grad", `rgb(${rgb.join(",")})`);
     root.setProperty("--accent-soft", `rgba(${rgb.join(",")}, 0.12)`);
     root.setProperty("--accent-line", `rgba(${rgb.join(",")}, 0.6)`);
     // Text on accent fills: dark on light accents, white on dark ones (e.g. Windows blue).

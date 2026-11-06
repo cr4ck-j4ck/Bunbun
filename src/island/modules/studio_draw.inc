@@ -234,18 +234,20 @@
     // switched on. On Auto, whichever of the two has numbers. False = no ring.
     bool PickUsage(const SharedState& state, const Settings& settings, double now, float* usedPct, const wchar_t** tag) {
         const int main = MainAgentKind(settings);
+        const long long unixNow = static_cast<long long>(time(nullptr));
         const bool claude = settings.usageLimits && settings.showAgent[AgentClaude] && state.agent.usage5h >= 0.0f &&
                             now - state.agent.usageAt < 5 * 3600.0;
         const AgQuota::Snapshot ag = settings.antigravityQuota && settings.showAgent[AgentAntigravity]
                                          ? AgQuota::Get() : AgQuota::Snapshot{};
         const bool auto_ = settings.mainAgent < 0;
         if (claude && (main == AgentClaude || (auto_ && !(main == AgentAntigravity && ag.valid)))) {
-            *usedPct = state.agent.usage5h;
+            // Bunbun: past its reset time the 5-hour window is empty again.
+            *usedPct = bb::limits::UsedNow(state.agent.usage5h, state.agent.usage5hResets, unixNow);
             *tag = L"5h";
             return true;
         }
         if (ag.valid && (main == AgentAntigravity || auto_)) {
-            *usedPct = (1.0f - ag.remaining) * 100.0f;
+            *usedPct = AgQuota::UsedNow(ag);  // the most used pool, refilled pools as empty
             *tag = L"AG";
             return true;
         }
@@ -298,9 +300,18 @@
         if (studio_.page_ == StudioPage::Music || studio_.page_ == StudioPage::Lyrics) {
             tint = StudioPageColor(studio_.page_, state);
             strength = state.media.playing ? 0.55f : 0.30f;
-        } else if (studio_.page_ == StudioPage::Agent && state.agent.phase != bb::AgentPhase::None) {
-            tint = AgentStatusColor(state.agent.phase);
-            strength = 0.35f;
+        } else if (studio_.page_ == StudioPage::Agent) {
+            if (state.agent.phase == bb::AgentPhase::Error) {
+                tint = SCol(0xff453a);
+            } else if (state.agent.phase == bb::AgentPhase::Finished) {
+                tint = SCol(0x30d158);
+            } else {
+                tint = AgentBrand(state.agent.agent);
+            }
+            strength = (state.agent.phase != bb::AgentPhase::None) ? 0.40f : 0.25f;
+        } else if (studio_.page_ == StudioPage::Hardware || studio_.page_ == StudioPage::Weather || studio_.page_ == StudioPage::ScreenTime || studio_.page_ == StudioPage::Clipboard) {
+            tint = SAccent();
+            strength = 0.28f;
         }
         if (strength > 0.0f) {
             const float radius = ContentIslandRadius(h);
@@ -333,67 +344,134 @@
         const D2D1_RECT_F isl = studio_.island;
         const float cx = (isl.left + isl.right) * 0.5f;
 
-        // Header ─ page name (two-tone), mini mascot + date + time, gear.
+        // Header ─ mascot and page name on the left; date, time and controls on the right.
         const float hy = isl.top + 17.0f;
         std::wstring first, second;
         StudioName(studio_.page_, state.agent, &first, &second);
         const D2D1_COLOR_F pageCol = StudioPageColor(studio_.page_, state);
-        if (studio_.page_ != StudioPage::Home) {
-            const float fx = isl.left + 22.0f;
-            const float w1 = SMeasure(first, SFTitle);
-            SText(first, D2D1::RectF(fx, hy - 10, fx + w1 + 2, hy + 10), SFTitle, SFade(SCol(0xffffff)));
-            SText(second, D2D1::RectF(fx + w1, hy - 10, fx + w1 + 150, hy + 10), SFTitle,
-                  SFade(studio_.page_ == StudioPage::Home ? SCol(0xffffff) : pageCol));
+
+        // Bunbun: header, left to right: mascot, page name (and Weather's controls);
+        // right to left: close, gear, eyedropper, battery, agent usage, then the
+        // date and time, which give way (date first) when the left side needs room.
+
+        // ── Header Left: mascot, then the page name ──
+        float fx = isl.left + 18.0f;
+        if (settings.bunbunMascot && studioAlpha_ > 0.3f) {
+            auto mood = state.agent.phase != bb::AgentPhase::None ? AgentMood(state.agent.phase)
+                        : state.media.playing ? MediaMascotMood(state.media, settings) : bb::mascot::Mood::Idle;
+            double moodSince = state.agent.phaseSince;
+            if (WaterMood(now, &mood, &moodSince)) g_layoutDirty = true;  // Bunbun: drinking a logged glass, the goal's cheer
+            if (settings.idleEyes) {
+                DrawIdleEyes(state, D2D1::Point2F(fx + 9.0f, hy), 14.0f, mood, now, state.agent.phaseSince);
+            } else {
+                D2D1_POINT_2F mc{};
+                float msize = 0.0f;
+                bb::mascot::FitToBox(D2D1::RectF(fx, hy - 9.0f, fx + 18.0f, hy + 9.0f), &mc, &msize);
+                bb::mascot::Draw(target_.Get(), mc, msize, mood, now, moodSince, MascotLook(mc));
+            }
+            fx += 26.0f;
         }
 
-        SYSTEMTIME t{};
-        GetLocalTime(&t);
-        static const wchar_t* kDays[] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
-        static const wchar_t* kMonths[] = {L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
-                                           L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"};
-        wchar_t date[32];
-        swprintf_s(date, L"%s %d %s", kDays[t.wDayOfWeek % 7], t.wDay, kMonths[(t.wMonth + 11) % 12]);
-        const std::wstring timeStr = FormatIslandTime(t, settings.clockFollowSystem, settings.use24HourClock, false);
-        const float dateW = SMeasure(date, SFBody), timeW = SMeasure(timeStr, SFTitle);
-        const float mascotW = settings.bunbunMascot ? 22.0f : 0.0f;
-        const float groupW = mascotW + dateW + 6.0f + timeW;
-        float gx = cx - groupW * 0.5f;
-        if (settings.bunbunMascot && studioAlpha_ > 0.3f && settings.idleEyes) {
-            const auto mood = state.agent.phase != bb::AgentPhase::None ? AgentMood(state.agent.phase)
-                              : state.media.playing ? MediaMascotMood(state.media, settings) : bb::mascot::Mood::Idle;
-            DrawIdleEyes(state, D2D1::Point2F(gx + 9, hy), 14.0f, mood, now, state.agent.phaseSince);
-        } else if (settings.bunbunMascot && studioAlpha_ > 0.3f) {
-            D2D1_POINT_2F mc{};
-            float msize = 0.0f;
-            bb::mascot::FitToBox(D2D1::RectF(gx, hy - 9, gx + 18, hy + 9), &mc, &msize);
-            bb::AgentPhase phase = state.agent.phase;
-            const auto mood = phase != bb::AgentPhase::None ? AgentMood(phase)
-                              : state.media.playing ? MediaMascotMood(state.media, settings) : bb::mascot::Mood::Idle;
-            bb::mascot::Draw(target_.Get(), mc, msize, mood, now, state.agent.phaseSince, MascotLook(mc));
+        // System, Weather and Screen Time read "Name | detail"; every other page
+        // keeps its two-tone name ("Now" white, "Playing" in the page colour).
+        bool subtitled = true;
+        if (studio_.page_ == StudioPage::Hardware) {
+            first = L"System";
+            second = L"Power \x00B7 Network \x00B7 Audio";
+        } else if (studio_.page_ == StudioPage::Weather) {
+            first = L"Weather";
+            second = state.weather.city.empty() ? L"Jaipur" : state.weather.city;
+        } else if (studio_.page_ == StudioPage::ScreenTime) {
+            first = L"Screen Time";
+            second.clear();
+        } else {
+            subtitled = false;
         }
-        gx += mascotW;
-        SText(date, D2D1::RectF(gx, hy - 9, gx + dateW + 2, hy + 9), SFBody, SFade(SCol(0x8e8e93)));
-        gx += dateW + 6.0f;
-        SText(timeStr, D2D1::RectF(gx, hy - 10, gx + timeW + 2, hy + 10), SFTitle, SFade(SCol(0xffffff)));
+        const float w1 = SMeasure(first, SFTitle);
+        SText(first, D2D1::RectF(fx, hy - 10, fx + w1 + 2, hy + 10), SFTitle, SFade(SCol(0xffffff)));
+        fx += w1;
+        if (!second.empty()) {
+            if (subtitled) {
+                const float barX = fx + 8.0f;
+                SLine(D2D1::Point2F(barX, hy - 6.5f), D2D1::Point2F(barX, hy + 6.5f), SFade(SCol(0x3a3a3c)), 1.2f);
+                const float w2 = SMeasure(second, SFBody);
+                SText(second, D2D1::RectF(barX + 9.0f, hy - 9, barX + 11.0f + w2, hy + 9), SFBody, SFade(SCol(0x8e8e93)));
+                fx = barX + 9.0f + w2;
+            } else {
+                const float w2 = SMeasure(second, SFTitle);
+                SText(second, D2D1::RectF(fx, hy - 10, fx + w2 + 2, hy + 10), SFTitle, SFade(pageCol));
+                fx += w2;
+            }
+        }
 
-        // Usage ring (Claude Code's 5-hour window) and the settings gear on the right.
-        const D2D1_POINT_2F gear = D2D1::Point2F(isl.right - 26.0f, hy);
+        // Weather's own controls follow its name: a °C / °F capsule and Change City.
+        if (studio_.page_ == StudioPage::Weather) {
+            const D2D1_RECT_F togRect = D2D1::RectF(fx + 12.0f, hy - 11.0f, fx + 68.0f, hy + 11.0f);
+            SFillRound(togRect, 11.0f, SCol(0x242426));
+            const bool f = settings.weatherFahrenheit;
+            const D2D1_RECT_F cHalf = D2D1::RectF(togRect.left + 2.0f, togRect.top, togRect.left + 27.0f, togRect.bottom);
+            const D2D1_RECT_F fHalf = D2D1::RectF(togRect.left + 29.0f, togRect.top, togRect.right - 2.0f, togRect.bottom);
+            const D2D1_RECT_F on = f ? fHalf : cHalf;
+            SFillRound(D2D1::RectF(on.left, on.top + 2.0f, on.right, on.bottom - 2.0f), 9.0f, SCol(0x3a3a3c));
+            SText(L"\x00B0" L"C", cHalf, SFSmall, SCol(f ? 0x8e8e93 : 0xffffff), 1);
+            SText(L"\x00B0" L"F", fHalf, SFSmall, SCol(f ? 0xffffff : 0x8e8e93), 1);
+            SHit(togRect, StudioAction::WeatherUnitToggle);
+
+            const D2D1_RECT_F cityBtn = D2D1::RectF(togRect.right + 6.0f, hy - 11.0f, togRect.right + 96.0f, hy + 11.0f);
+            const float cHover = SHover(StudioAction::WeatherCitySearch);
+            SFillRound(cityBtn, 11.0f, SLerpCol(SCol(0x242426), SCol(0x3a3a3c), cHover));
+            SText(L"\x2316 Change City", cityBtn, SFSmall, SCol(0xffffff), 1);
+            SHit(cityBtn, StudioAction::WeatherCitySearch);
+            fx = cityBtn.right;
+        }
+        const float leftEnd = fx + 14.0f;   // the right group stops here
+
+        // ── Header Right Controls: [date time]  [AG Quota]  [100% 🔋]  [✎]  [⚙]  [✕] ──
+        // 1. Close button (✕)
+        const D2D1_POINT_2F closePt = D2D1::Point2F(isl.right - 22.0f, hy);
+        const float closeHover = SHover(StudioAction::Close);
+        if (closeHover > 0.01f)
+            SFillRound(D2D1::RectF(closePt.x - 11, closePt.y - 11, closePt.x + 11, closePt.y + 11), 11, SFade(WithAlpha(SCol(0x3a3a3c), closeHover)));
+        const D2D1_COLOR_F closeCol = SFade(SLerpCol(SCol(0x8e8e93), SCol(0xffffff), closeHover));
+        SLine(D2D1::Point2F(closePt.x - 4.5f, closePt.y - 4.5f), D2D1::Point2F(closePt.x + 4.5f, closePt.y + 4.5f), closeCol, 1.4f);
+        SLine(D2D1::Point2F(closePt.x + 4.5f, closePt.y - 4.5f), D2D1::Point2F(closePt.x - 4.5f, closePt.y + 4.5f), closeCol, 1.4f);
+        SHit(D2D1::RectF(closePt.x - 12, closePt.y - 12, closePt.x + 12, closePt.y + 12), StudioAction::Close);
+
+        // 2. Settings gear (⚙)
+        const D2D1_POINT_2F gear = D2D1::Point2F(closePt.x - 24.0f, hy);
         const float gearHover = SHover(StudioAction::Settings);
         if (gearHover > 0.01f)
-            SFillRound(D2D1::RectF(gear.x - 13, gear.y - 13, gear.x + 13, gear.y + 13), 13, SFade(WithAlpha(SCol(0x3a3a3c), gearHover)));
-        SGear(gear, 15.0f * (1.0f + 0.1f * gearHover), SFade(SLerpCol(SCol(0x8e8e93), SCol(0xffffff), gearHover)));
-        SHit(D2D1::RectF(gear.x - 13, gear.y - 13, gear.x + 13, gear.y + 13), StudioAction::Settings);
+            SFillRound(D2D1::RectF(gear.x - 12, gear.y - 12, gear.x + 12, gear.y + 12), 12, SFade(WithAlpha(SCol(0x3a3a3c), gearHover)));
+        SGear(gear, 14.0f * (1.0f + 0.1f * gearHover), SFade(SLerpCol(SCol(0x8e8e93), SCol(0xffffff), gearHover)));
+        SHit(D2D1::RectF(gear.x - 12, gear.y - 12, gear.x + 12, gear.y + 12), StudioAction::Settings);
 
-        // Eyedropper: pick a colour anywhere on screen.
-        const D2D1_POINT_2F drop = D2D1::Point2F(gear.x - 30.0f, hy);
+        // 3. Eyedropper (✎)
+        const D2D1_POINT_2F drop = D2D1::Point2F(gear.x - 24.0f, hy);
         const float dropHover = SHover(StudioAction::ColorPicker);
         if (dropHover > 0.01f)
-            SFillRound(D2D1::RectF(drop.x - 13, drop.y - 13, drop.x + 13, drop.y + 13), 13, SFade(WithAlpha(SCol(0x3a3a3c), dropHover)));
-        SEyedropper(drop, 15.0f * (1.0f + 0.1f * dropHover), SFade(SLerpCol(SCol(0x8e8e93), SCol(0xffffff), dropHover)));
-        SHit(D2D1::RectF(drop.x - 13, drop.y - 13, drop.x + 13, drop.y + 13), StudioAction::ColorPicker);
-        // Claude Code's 5-hour limit, from its statusLine; hidden once the reading is
-        // older than the window it describes.
-        // The main agent's usage (see PickUsage); none while no agent is shown.
+            SFillRound(D2D1::RectF(drop.x - 12, drop.y - 12, drop.x + 12, drop.y + 12), 12, SFade(WithAlpha(SCol(0x3a3a3c), dropHover)));
+        SEyedropper(drop, 14.0f * (1.0f + 0.1f * dropHover), SFade(SLerpCol(SCol(0x8e8e93), SCol(0xffffff), dropHover)));
+        SHit(D2D1::RectF(drop.x - 12, drop.y - 12, drop.x + 12, drop.y + 12), StudioAction::ColorPicker);
+
+        // 4. Battery indicator in header (like Vayli: 100% 🔋)
+        const int hBatt = state.connectivity.hasBattery ? state.connectivity.batteryPercent : 100;
+        const std::wstring hBattStr = std::to_wstring(hBatt) + L"%";
+        const float hBattW = SMeasure(hBattStr, SFSmall);
+        const float bRight = drop.x - 16.0f;
+        const D2D1_RECT_F hBp = D2D1::RectF(bRight - 18.0f, hy - 4.5f, bRight - 4.0f, hy + 4.5f);
+        if (ID2D1SolidColorBrush* br = AcquireBrush(SFade(SCol(0xffffff)))) {
+            target_->DrawRoundedRectangle(D2D1::RoundedRect(hBp, 2.0f, 2.0f), br, 1.2f);
+            const D2D1_RECT_F tip = D2D1::RectF(hBp.right + 0.5f, hy - 2.0f, hBp.right + 2.0f, hy + 2.0f);
+            target_->FillRoundedRectangle(D2D1::RoundedRect(tip, 0.8f, 0.8f), br);
+            const float hFill = (hBp.right - hBp.left - 2.0f) * std::clamp(hBatt / 100.0f, 0.0f, 1.0f);
+            if (ID2D1SolidColorBrush* gbr = AcquireBrush(SFade(SCol(0x30d158)))) {
+                target_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(hBp.left + 1.0f, hBp.top + 1.0f, hBp.left + 1.0f + hFill, hBp.bottom - 1.0f), 1.0f, 1.0f), gbr);
+            }
+        }
+        SText(hBattStr, D2D1::RectF(bRight - 22.0f - hBattW, hy - 8.0f, bRight - 20.0f, hy + 8.0f), SFSmall, SFade(SCol(0xffffff)), 2);
+        float rightEdge = bRight - 26.0f - hBattW;   // where the next item to the left ends
+
+        // 5. Claude Code's 5-hour limit / Antigravity Quota (positioned left of battery)
         float used = 0.0f;
         const wchar_t* tag = L"";
         if (AgentsShown(settings) && PickUsage(state, settings, now, &used, &tag)) {
@@ -402,10 +480,32 @@
             wchar_t pct[16];
             swprintf_s(pct, L"%s %d%%", tag, static_cast<int>(used + 0.5f));
             const float pw = SMeasure(pct, SFLabel);
-            const D2D1_POINT_2F rc = D2D1::Point2F(gear.x - 56.0f - pw, hy);
+            const D2D1_POINT_2F rc = D2D1::Point2F(rightEdge - pw - 14.0f, hy);
             SRing(rc, 6.0f, 2.4f, u, uc);
             SText(pct, D2D1::RectF(rc.x + 10, hy - 8, rc.x + 12 + pw, hy + 8), SFLabel, SFade(SCol(0x8e8e93)));
             SHit(D2D1::RectF(rc.x - 9, hy - 10, rc.x + 12 + pw, hy + 10), StudioAction::AgentPage);
+            rightEdge = rc.x - 9.0f;
+        }
+
+        // 6. Date and time, right-aligned against the rest.
+        {
+            SYSTEMTIME t{};
+            GetLocalTime(&t);
+            static const wchar_t* kDays[] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
+            static const wchar_t* kMonths[] = {L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
+                                               L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"};
+            wchar_t date[32];
+            swprintf_s(date, L"%s %d %s", kDays[t.wDayOfWeek % 7], t.wDay, kMonths[(t.wMonth + 11) % 12]);
+            const std::wstring timeStr = FormatIslandTime(t, settings.clockFollowSystem, settings.use24HourClock, false);
+            const float timeW = SMeasure(timeStr, SFTitle), dateW = SMeasure(date, SFBody);
+            const float timeRight = rightEdge - 12.0f;
+            const float timeLeft = timeRight - timeW;
+            if (timeLeft >= leftEnd) {
+                SText(timeStr, D2D1::RectF(timeLeft, hy - 10, timeRight + 2, hy + 10), SFTitle, SFade(SCol(0xffffff)));
+                const float dateLeft = timeLeft - 6.0f - dateW;
+                if (dateLeft >= leftEnd)
+                    SText(date, D2D1::RectF(dateLeft, hy - 9, timeLeft - 4.0f, hy + 9), SFBody, SFade(SCol(0x8e8e93)));
+            }
         }
 
         // Tab bar ─ one icon per page; the open one widens into a tinted capsule.
@@ -445,7 +545,7 @@
             const D2D1_COLOR_F tint = StudioPageColor(pages[i], state);
             const float hoverAmt = SHover(StudioAction::Tab, i);
             if (active) {
-                const bool white = pages[i] == StudioPage::Home || pages[i] == StudioPage::Hardware;
+                const bool white = pages[i] == StudioPage::Home;
                 SFillRound(D2D1::RectF(tx, fy - 13, tx + w, fy + 13), 13, SFade(white ? SCol(0x2c2c2e) : WithAlpha(tint, 0.22f)));
                 const D2D1_COLOR_F ink = SFade(white ? SCol(0xffffff) : tint);
                 SIcon(pages[i], D2D1::Point2F(tx + 15, fy), 15.0f, ink);
@@ -462,34 +562,9 @@
             tx += w + 2.0f;
         }
 
-        // Volume ─ the speaker widens into a slider while the pointer is on it.
-        // While dragging, show the level just set; the system reading follows a beat later.
-        const int vol = g_studioVolumeDrag && g_studioVolumeLevelPending >= 0.0f
-                            ? static_cast<int>(g_studioVolumeLevelPending * 100.0f + 0.5f)
-                            : state.system.volumePercent;
-        const bool muted = state.system.volumeMuted;
-        const bool volHover = SHovered(StudioAction::Volume) || g_studioVolumeDrag;
-        studioVolW_ += ((volHover ? 76.0f : 0.0f) - studioVolW_) * 0.25f;
-        if (std::fabs(studioVolW_ - (volHover ? 76.0f : 0.0f)) > 0.3f) g_layoutDirty = true;
-        const D2D1_POINT_2F spk = D2D1::Point2F(isl.right - 25.0f - studioVolW_, fy);
-        SSpeaker(spk, 16.0f, muted ? 0 : vol == 0 ? 0 : vol < 50 ? 1 : 2, muted, SFade(SCol(volHover ? 0xffffff : 0x8e8e93)));
-        SHit(D2D1::RectF(spk.x - 12, fy - 14, isl.right - 14, fy + 14), StudioAction::Volume, -1);
-        if (studioVolW_ > 4.0f) {
-            const float x0 = spk.x + 14.0f, x1 = x0 + studioVolW_ - 8.0f;
-            if (x1 > x0 + 4) {
-                SFillRound(D2D1::RectF(x0, fy - 2, x1, fy + 2), 2, SFade(D2D1::ColorF(1, 1, 1, 0.2f)));
-                const float kx = x0 + (x1 - x0) * Clamp(vol / 100.0f, 0.0f, 1.0f);
-                SFillRound(D2D1::RectF(x0, fy - 2, kx, fy + 2), 2, SFade(SCol(0xffffff)));
-                if (ID2D1SolidColorBrush* b = AcquireBrush(SFade(SCol(0xffffff))))
-                    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(kx, fy), 5, 5), b);
-                // The slider's own rect: a click sets the level from its x.
-                SHit(D2D1::RectF(x0, fy - 10, x1, fy + 10), StudioAction::Volume, 0);
-            }
-        }
         DrawTrayDropOverlay(now);
         studioAlpha_ = 1.0f;
     }
-    float studioVolW_ = 0.0f;
 
     // A file dragged over the open island: a drop zone with a marching dashed
     // outline. Just after a drop: a card that fills up and ticks "In your tray".
@@ -837,7 +912,7 @@
     // ── Extra pages (both layouts) ──
     bool DrawStudioExtraPage(int tabId, const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
         if (tabId != kTabAgent && tabId != kTabClipboard && tabId != kTabNote && tabId != kTabFocus && tabId != kTabApps &&
-            tabId != kTabMirror && tabId != kTabHome && tabId != kTabWater)
+            tabId != kTabMirror && tabId != kTabHome && tabId != kTabWater && tabId != kTabScreenTime)
             return false;
         if (tabId == kTabHome) {
             DrawStudioHome(state, rect, settings, now);
@@ -850,10 +925,11 @@
         if (!settings.studioLayout) r = D2D1::RectF(rect.left + 18, rect.top + 14, rect.right - 24, rect.bottom - 12);
         if (tabId == kTabAgent) DrawStudioAgentPage(state, r, now);
         else if (tabId == kTabClipboard) DrawStudioClipboardPage(r);
-        else if (tabId == kTabFocus) DrawStudioFocusPage(state, r, now);
+        else if (tabId == kTabFocus) DrawStudioTimersPage(state, r, now);  // Bunbun: the Timers page
         else if (tabId == kTabApps) DrawStudioAppsPage(state, r);
         else if (tabId == kTabMirror) DrawStudioMirrorPage(r);
         else if (tabId == kTabWater) DrawStudioWaterPage(state, r, now);
+        else if (tabId == kTabScreenTime) DrawStudioScreenTimePage(state, r, settings, now);
         else DrawStudioNotePage(r, now);
         return true;
     }
@@ -1116,68 +1192,424 @@
                 }
                 SText(kSteps[i], D2D1::RectF(x, by + 7, x + segW, by + 22), SFSmall, done || current ? SCol(0xffffff) : SCol(0x636366));
             }
-        } else if ((g_settings.usageLimits && g_settings.showAgent[AgentClaude] && (a.usage5h >= 0.0f || a.contextPct >= 0.0f)) ||
-                   (g_settings.antigravityQuota && g_settings.showAgent[AgentAntigravity] && AgQuota::Get().valid)) {
-            struct Bar { const wchar_t* name; float pct; };
-            const AgQuota::Snapshot ag = g_settings.antigravityQuota && g_settings.showAgent[AgentAntigravity]
-                                             ? AgQuota::Get() : AgQuota::Snapshot{};
-            const bool claude = g_settings.usageLimits && g_settings.showAgent[AgentClaude];
-            const Bar bars[3] = {{L"5-hour limit", claude ? a.usage5h : -1.0f}, {L"Week", claude ? a.usage7d : -1.0f},
-                                 ag.valid ? Bar{L"Antigravity", (1.0f - ag.remaining) * 100.0f}
-                                          : Bar{L"Context", claude ? a.contextPct : -1.0f}};
-            const float segW = (W - 2 * 14.0f) / 3.0f;
-            for (int i = 0; i < 3; ++i) {
-                const float x = r.left + i * (segW + 14.0f);
-                const float p = bars[i].pct;
-                const D2D1_COLOR_F c = p >= 85 ? SCol(0xff3b3b) : p >= 60 ? SCol(0xff9a1f) : SCol(0x22e05a);
-                SFillRound(D2D1::RectF(x, by, x + segW, by + 4), 2, D2D1::ColorF(1, 1, 1, 0.16f));
-                if (p >= 0) SFillRound(D2D1::RectF(x, by, x + segW * Clamp(p / 100.0f, 0.0f, 1.0f), by + 4), 2, c);
-                std::wstring label = bars[i].name;
-                if (p >= 0) label += L" \x00B7 " + std::to_wstring(static_cast<int>(p + 0.5f)) + L"%";
-                if (i == 2 && ag.valid && ag.resetAt > 0) {
-                    const long long mins = (ag.resetAt - static_cast<long long>(time(nullptr))) / 60;
-                    if (mins > 0) label += L" \x00B7 resets in " + (mins >= 60 ? std::to_wstring(mins / 60) + L"h" : std::to_wstring(mins) + L"m");
-                }
-                if (i == 0 && p >= 0 && a.usage5hResets > 0) {
-                    const long long mins = (a.usage5hResets - static_cast<long long>(time(nullptr))) / 60;
-                    if (mins > 0) label += L" \x00B7 resets in " + (mins >= 60 ? std::to_wstring(mins / 60) + L"h" : std::to_wstring(mins) + L"m");
-                }
-                SText(label, D2D1::RectF(x, by + 7, x + segW, by + 22), SFSmall, p >= 0 ? SCol(0xaeaeb2) : SCol(0x636366));
+        } else {
+            // Bunbun: the limits of the agent on this page (or the main agent between
+            // tasks), from what it keeps on this PC: Claude Code's 5-hour and weekly
+            // windows and context, Antigravity's model pools, Cursor's plan.
+            const long long unixNow = static_cast<long long>(time(nullptr));
+            const int kind = a.agent.empty() ? MainAgentKind(g_settings) : static_cast<int>(AgentKindFor(a.agent));
+            bb::limits::Row row;
+            if (kind == AgentAntigravity && g_settings.antigravityQuota) {
+                const AgQuota::Snapshot ag = AgQuota::Get();
+                row = bb::limits::Antigravity(ag.valid ? ag.pools : std::vector<bb::agquota::Pool>{}, unixNow);
+            } else if (kind == AgentCursor) {
+                row = bb::limits::Cursor(AgQuota::CursorPlan());
+            } else if (kind == AgentClaude && g_settings.usageLimits) {
+                row = bb::limits::Claude(a.usage5h, a.usage5hResets, a.usage7d, a.usage7dResets, a.contextPct, unixNow);
             }
-        } else if (g_settings.usageLimits && g_settings.showAgent[AgentClaude]) {
-            SText(L"Connect Claude Code in Settings to see your usage limits here.",
-                  D2D1::RectF(r.left, by, r.right, by + 20), SFSmall, SCol(0x636366));
+            if (!row.bars.empty()) {
+                const float by = r.bottom - 38;  // a second line under each bar for its reset time
+                const int n = static_cast<int>(row.bars.size());
+                const float segW = (W - (n - 1) * 14.0f) / static_cast<float>(n);
+                for (int i = 0; i < n; ++i) {
+                    const bb::limits::Bar& b = row.bars[static_cast<size_t>(i)];
+                    const float x = r.left + i * (segW + 14.0f);
+                    const float p = b.used;
+                    const D2D1_COLOR_F c = p >= 85 ? SCol(0xff3b3b) : p >= 60 ? SCol(0xff9a1f) : SCol(0x22e05a);
+                    SFillRound(D2D1::RectF(x, by, x + segW, by + 4), 2, D2D1::ColorF(1, 1, 1, 0.16f));
+                    if (p > 0) SFillRound(D2D1::RectF(x, by, x + std::max(4.0f, segW * Clamp(p / 100.0f, 0.0f, 1.0f)), by + 4), 2, c);
+                    // "Gemini 3.8 Flash · 2%", then "resets in 2h 10m" under it.
+                    std::wstring label = b.label;
+                    if (p >= 0) label += L" \x00B7 " + std::to_wstring(static_cast<int>(p + 0.5f)) + L"%";
+                    SText(label, D2D1::RectF(x, by + 7, x + segW, by + 21), SFSmall, p >= 0 ? SCol(0xaeaeb2) : SCol(0x636366));
+                    const std::wstring reset = bb::limits::ResetsIn(b.resetAt, unixNow);
+                    if (!reset.empty()) SText(reset, D2D1::RectF(x, by + 21, x + segW, by + 34), SFSmall, SCol(0x636366));
+                }
+            } else if (!row.note.empty()) {
+                SText(row.note, D2D1::RectF(r.left, by, r.right, by + 20), SFSmall, SCol(0x8e8e93));
+            }
         }
     }
 
+    // ── Bunbun: Studio Clipboard Page Redo (Vayli 2-panel layout) ──
     void DrawStudioClipboardPage(D2D1_RECT_F r) {
-        const std::vector<std::wstring> items = ClipHistorySnapshot();
-        SText(L"Recent copies", D2D1::RectF(r.left, r.top, r.right - 60, r.top + 20), SFLabel, SCol(0x8e8e93));
-        if (!items.empty()) {
-            const D2D1_RECT_F clear = D2D1::RectF(r.right - 52, r.top + 1, r.right, r.top + 19);
-            SFillRound(clear, 9, D2D1::ColorF(1.0f, 0.27f, 0.23f, SLerp(0.18f, 0.3f, SHover(StudioAction::ClipClear))));
-            SText(L"Clear", clear, SFLabel, SCol(0xff6961), 1);
-            SHit(clear, StudioAction::ClipClear);
+        EnsureRoundStroke();
+
+        const D2D1_COLOR_F white = SCol(0xffffff), grey = SCol(0x8e8e93), cardBg = SCol(0x131315);
+        const D2D1_COLOR_F accent = SAccent();
+
+        const float leftW = 212.0f;
+        const float rightX = r.left + leftW;
+
+        // ── Left Panel: Filter Tabs ──
+        const float tabY = r.top + 2.0f;
+        int allCnt = 0, textCnt = 0, imgCnt = 0, linkCnt = 0;
+        {
+            std::lock_guard lock(g_stateMutex);
+            allCnt = static_cast<int>(g_richClipItems.size());
+            for (const auto& it : g_richClipItems) {
+                if (it.kind == ClipKind::Text) ++textCnt;
+                else if (it.kind == ClipKind::Image) ++imgCnt;
+                else if (it.kind == ClipKind::Link) ++linkCnt;
+            }
         }
-        if (items.empty()) {
-            SText(L"Copy some text and it shows up here.", D2D1::RectF(r.left, r.top + 40, r.right, r.top + 70), SFBody, SCol(0x636366), 1);
+
+        struct TabInfo { int id; std::wstring name; int count; };
+        const TabInfo tabs[4] = {
+            {0, L"All", allCnt},
+            {1, L"Text", textCnt},
+            {2, L"Images", imgCnt},
+            {3, L"Links", linkCnt}
+        };
+
+        float curX = r.left + 4.0f;
+        for (int i = 0; i < 4; ++i) {
+            const bool active = (g_clipFilter == tabs[i].id);
+            const std::wstring label = tabs[i].name + L" " + std::to_wstring(tabs[i].count);
+            const float tw = SMeasure(label, SFLabel) + 2.0f;
+            const D2D1_RECT_F tRect = D2D1::RectF(curX, tabY, curX + tw, tabY + 16.0f);
+
+            SText(label, tRect, SFLabel, active ? white : grey);
+            if (active) {
+                SFillRound(D2D1::RectF(curX, tabY + 16.0f, curX + tw, tabY + 18.0f), 1.0f, white);
+            }
+            SHit(D2D1::RectF(curX - 2.0f, tabY - 2.0f, curX + tw + 2.0f, tabY + 20.0f), StudioAction::ClipFilter, tabs[i].id);
+            curX += tw + 10.0f;
+        }
+
+        // Search icon on far right of left panel
+        const D2D1_RECT_F searchRect = D2D1::RectF(rightX - 20.0f, tabY, rightX - 4.0f, tabY + 16.0f);
+        const D2D1_POINT_2F sc = D2D1::Point2F(searchRect.left + 7.0f, searchRect.top + 7.0f);
+        if (ID2D1SolidColorBrush* sb = AcquireBrush(grey)) {
+            target_->DrawEllipse(D2D1::Ellipse(sc, 4.0f, 4.0f), sb, 1.3f);
+            target_->DrawLine(D2D1::Point2F(sc.x + 2.8f, sc.y + 2.8f), D2D1::Point2F(sc.x + 6.5f, sc.y + 6.5f), sb, 1.4f);
+        }
+        SHit(searchRect, StudioAction::ClipSearch, 0);
+
+        // Section header: "Today"
+        SText(L"Today", D2D1::RectF(r.left + 6.0f, r.top + 24.0f, r.left + 80.0f, r.top + 38.0f), SFSmall, grey);
+        // Bunbun: Clear. Empties the history; pinned items stay.
+        if (allCnt > 0) {
+            const float cw = SMeasure(L"Clear", SFSmall) + 14.0f;
+            const D2D1_RECT_F clearRect = D2D1::RectF(rightX - 8.0f - cw, r.top + 23.0f, rightX - 8.0f, r.top + 39.0f);
+            const bool hot = SHovered(StudioAction::ClipClear);
+            SFillRound(clearRect, 8.0f, SCol(0xFFFFFF, hot ? 0.14f : 0.07f));
+            SText(L"Clear", clearRect, SFSmall, hot ? white : grey, 1);
+            SHit(clearRect, StudioAction::ClipClear, 0);
+        }
+
+        // ── Left Panel: List of Items ──
+        const std::vector<size_t> indices = FilteredClipIndices();
+        const float listTop = r.top + 40.0f;
+        const float rowH = 34.0f;
+
+        for (size_t i = 0; i < indices.size() && (listTop + i * (rowH + 2.0f) + rowH <= r.bottom); ++i) {
+            const size_t realIdx = indices[i];
+            const float y = listTop + i * (rowH + 2.0f);
+            const D2D1_RECT_F row = D2D1::RectF(r.left + 4.0f, y, rightX - 6.0f, y + rowH);
+            const bool isSel = (static_cast<int>(i) == g_clipSelected);
+
+            if (isSel) {
+                SFillRound(row, 8.0f, SCol(0x28282a));
+            } else if (SHover(StudioAction::ClipSelect, static_cast<int>(i)) > 0.05f) {
+                SFillRound(row, 8.0f, SCol(0x1a1a1c));
+            }
+
+            ClipItem item;
+            {
+                std::lock_guard lock(g_stateMutex);
+                if (realIdx < g_richClipItems.size()) item = g_richClipItems[realIdx];
+            }
+
+            // Thumbnail (28x28)
+            const D2D1_RECT_F thumb = D2D1::RectF(row.left + 4.0f, row.top + 3.0f, row.left + 32.0f, row.bottom - 3.0f);
+            SFillRound(thumb, 5.0f, SCol(0x222224));
+
+            if (item.kind == ClipKind::Image && !item.image.bgra.empty()) {
+                DrawCoverFitBitmapPixels(item.image, thumb, 5.0f, clipThumbBmp_[i % 8], clipThumbGen_[i % 8], 1.0f);
+            } else {
+                const D2D1_POINT_2F tc = D2D1::Point2F((thumb.left + thumb.right) * 0.5f, (thumb.top + thumb.bottom) * 0.5f);
+                if (ID2D1SolidColorBrush* tb = AcquireBrush(grey)) {
+                    if (item.kind == ClipKind::Link) {
+                        target_->DrawLine(D2D1::Point2F(tc.x - 4, tc.y), D2D1::Point2F(tc.x + 4, tc.y), tb, 1.4f);
+                        target_->DrawEllipse(D2D1::Ellipse(tc, 5.0f, 5.0f), tb, 1.2f);
+                    } else {
+                        target_->DrawRectangle(D2D1::RectF(tc.x - 4.5f, tc.y - 6.0f, tc.x + 4.5f, tc.y + 6.0f), tb, 1.2f);
+                        target_->DrawLine(D2D1::Point2F(tc.x - 2.5f, tc.y - 2.0f), D2D1::Point2F(tc.x + 2.5f, tc.y - 2.0f), tb, 1.0f);
+                        target_->DrawLine(D2D1::Point2F(tc.x - 2.5f, tc.y + 1.5f), D2D1::Point2F(tc.x + 2.5f, tc.y + 1.5f), tb, 1.0f);
+                    }
+                }
+            }
+
+            // Mini app icon badge on thumbnail corner (Image 1 style)
+            if (item.appIcon) {
+                const D2D1_RECT_F badgeRect = D2D1::RectF(thumb.right - 8.0f, thumb.bottom - 8.0f, thumb.right + 4.0f, thumb.bottom + 4.0f);
+                DrawCoverFitBitmapPixels(*item.appIcon, badgeRect, 2.0f, clipThumbBmp_[7], clipThumbGen_[7], 0.95f);
+            }
+
+            // Title
+            SText(item.title, D2D1::RectF(row.left + 38.0f, row.top + 2.0f, row.right - 4.0f, row.top + 16.0f), SFLabel, white);
+
+            // Subtitle: "932 x 455 · Just now"
+            std::wstring sub;
+            if (item.kind == ClipKind::Image) {
+                sub = std::to_wstring(item.width) + L" × " + std::to_wstring(item.height);
+            } else {
+                sub = std::to_wstring(item.text.size()) + L" chars";
+            }
+            const double dt = NowSeconds() - item.copiedAt;
+            std::wstring timeStr = L"Just now";
+            if (dt >= 86400.0) timeStr = std::to_wstring(static_cast<int>(dt / 86400.0)) + L"d ago";
+            else if (dt >= 3600.0) timeStr = std::to_wstring(static_cast<int>(dt / 3600.0)) + L"h ago";
+            else if (dt >= 60.0) timeStr = std::to_wstring(static_cast<int>(dt / 60.0)) + L"m ago";
+            sub += L" · " + timeStr;
+
+            SText(sub, D2D1::RectF(row.left + 38.0f, row.top + 17.0f, row.right - 4.0f, row.bottom - 1.0f), SFSmall, grey);
+
+            SHit(row, StudioAction::ClipSelect, static_cast<int>(i));
+        }
+
+        // ── Vertical Divider ──
+        SLine(D2D1::Point2F(rightX, r.top + 4.0f), D2D1::Point2F(rightX, r.bottom - 4.0f), SCol(0x28282a), 1.0f);
+
+        // ── Right Panel: Detail & Actions ──
+        const float prL = rightX + 12.0f;
+        const float prR = r.right - 4.0f;
+
+        if (indices.empty() || g_clipSelected < 0 || g_clipSelected >= static_cast<int>(indices.size())) {
+            // Bunbun: only what you really copied shows here (no sample items).
+            if (allCnt == 0) {
+                SText(L"Nothing copied yet", D2D1::RectF(prL, r.top + 56.0f, prR, r.top + 76.0f), SFBody, white, 1);
+                SText(L"Text, links and images you copy show up here.", D2D1::RectF(prL, r.top + 78.0f, prR, r.top + 96.0f), SFSmall, grey, 1);
+            } else {
+                SText(L"No items match filter", D2D1::RectF(prL, r.top + 60.0f, prR, r.top + 90.0f), SFBody, grey, 1);
+            }
             return;
         }
-        const float rowH = 24.0f;
-        float y = r.top + 26;
-        for (size_t i = 0; i < items.size() && y + rowH <= r.bottom + 2; ++i) {
-            std::wstring text = items[i];
-            for (auto& c : text) if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
-            const D2D1_RECT_F row = D2D1::RectF(r.left, y, r.right, y + rowH - 2);
-            const float hoverAmt = SHover(StudioAction::ClipCopy, static_cast<int>(i));
-            const bool hover = hoverAmt > 0.5f;
-            SFillRound(row, 8, D2D1::ColorF(1, 1, 1, SLerp(0.05f, 0.13f, hoverAmt)));
-            SIcon(StudioPage::Clipboard, D2D1::Point2F(row.left + 14, (row.top + row.bottom) * 0.5f), 13, SAccent());
-            SText(text, D2D1::RectF(row.left + 28, row.top, row.right - 64, row.bottom), SFBody, SCol(0xffffff));
-            if (hover) SText(L"Copy", D2D1::RectF(row.right - 60, row.top, row.right - 10, row.bottom), SFLabel, SAccent(), 2);
-            SHit(row, StudioAction::ClipCopy, static_cast<int>(i));
-            y += rowH;
+
+        const size_t selRealIdx = indices[static_cast<size_t>(g_clipSelected)];
+        ClipItem cur;
+        {
+            std::lock_guard lock(g_stateMutex);
+            if (selRealIdx < g_richClipItems.size()) cur = g_richClipItems[selRealIdx];
         }
+
+        // Header: Kind · Relative time
+        const double dt = NowSeconds() - cur.copiedAt;
+        std::wstring relTime = L"Just now";
+        if (dt >= 86400.0) relTime = std::to_wstring(static_cast<int>(dt / 86400.0)) + L"d ago";
+        else if (dt >= 3600.0) relTime = std::to_wstring(static_cast<int>(dt / 3600.0)) + L"h ago";
+        else if (dt >= 60.0) relTime = std::to_wstring(static_cast<int>(dt / 60.0)) + L"m ago";
+
+        std::wstring headStr = std::wstring(cur.kind == ClipKind::Image ? L"Image" : cur.kind == ClipKind::Link ? L"Link" : L"Text") + L" · " + relTime;
+        SText(headStr, D2D1::RectF(prL, r.top + 2.0f, prR - 50.0f, r.top + 18.0f), SFSmall, grey);
+
+        // Pin Button
+        const D2D1_RECT_F pinRect = D2D1::RectF(prR - 44.0f, r.top, prR - 24.0f, r.top + 18.0f);
+        const D2D1_POINT_2F pc = D2D1::Point2F((pinRect.left + pinRect.right) * 0.5f, (pinRect.top + pinRect.bottom) * 0.5f);
+        if (SHovered(StudioAction::ClipPin) || cur.pinned) SFillRound(D2D1::RectF(pc.x - 10.0f, pc.y - 10.0f, pc.x + 10.0f, pc.y + 10.0f), 6.0f, SCol(0xFFFFFF, 0.08f));
+        bb::studio::Pushpin(SPen(), pc, 15.0f, cur.pinned ? accent : grey, cur.pinned);  // Bunbun: a real pin
+        SHit(pinRect, StudioAction::ClipPin, g_clipSelected);
+
+        // Trash Button
+        const D2D1_RECT_F trashRect = D2D1::RectF(prR - 20.0f, r.top, prR, r.top + 18.0f);
+        const D2D1_POINT_2F tc = D2D1::Point2F((trashRect.left + trashRect.right) * 0.5f, (trashRect.top + trashRect.bottom) * 0.5f);
+        if (SHovered(StudioAction::ClipDelete)) SFillRound(D2D1::RectF(tc.x - 10.0f, tc.y - 10.0f, tc.x + 10.0f, tc.y + 10.0f), 6.0f, SCol(0xFFFFFF, 0.08f));
+        bb::studio::Bin(SPen(), tc, 15.0f, SHovered(StudioAction::ClipDelete) ? SCol(0xFF6961) : grey);
+        SHit(trashRect, StudioAction::ClipDelete, g_clipSelected);
+
+        // Preview Box
+        const D2D1_RECT_F pBox = D2D1::RectF(prL, r.top + 22.0f, prR, r.bottom - 36.0f);
+        SFillRound(pBox, 10.0f, cardBg);
+
+        if (cur.kind == ClipKind::Image && !cur.image.bgra.empty()) {
+            const float boxW = pBox.right - pBox.left - 8.0f;
+            const float boxH = pBox.bottom - pBox.top - 8.0f;
+            if (boxW > 1.0f && boxH > 1.0f && cur.image.width > 0 && cur.image.height > 0) {
+                const float scale = std::min(boxW / cur.image.width, boxH / cur.image.height);
+                const float iw = cur.image.width * scale;
+                const float ih = cur.image.height * scale;
+                const float ix = (pBox.left + pBox.right) * 0.5f - iw * 0.5f;
+                const float iy = (pBox.top + pBox.bottom) * 0.5f - ih * 0.5f;
+                DrawRoundedBitmapPixels(cur.image, D2D1::RectF(ix, iy, ix + iw, iy + ih), 6.0f, clipPreviewBmp_, clipPreviewGen_, 1.0f);
+            }
+        } else {
+            const D2D1_RECT_F txtR = D2D1::RectF(pBox.left + 12.0f, pBox.top + 10.0f, pBox.right - 12.0f, pBox.bottom - 10.0f);
+            SText(cur.text, txtR, SFBody, white);
+        }
+
+        // Footer Metadata: "937 x 446 · 216.6 KB"
+        std::wstring footStr;
+        if (cur.kind == ClipKind::Image) {
+            wchar_t sz[32];
+            swprintf(sz, 32, L"%.1f KB", cur.byteSize / 1024.0);
+            footStr = std::to_wstring(cur.width) + L" × " + std::to_wstring(cur.height) + L" · " + sz;
+        } else {
+            footStr = std::to_wstring(cur.text.size()) + L" chars";
+        }
+        SText(footStr, D2D1::RectF(prL, r.bottom - 28.0f, prR - 85.0f, r.bottom - 4.0f), SFSmall, grey);
+
+        // Action Buttons
+        // White Pill Copy Button
+        const D2D1_RECT_F btnCopy = D2D1::RectF(prR - 64.0f, r.bottom - 30.0f, prR, r.bottom - 6.0f);
+        SFillRound(btnCopy, 12.0f, white);
+        const D2D1_POINT_2F ic = D2D1::Point2F(btnCopy.left + 14.0f, (btnCopy.top + btnCopy.bottom) * 0.5f);
+        if (ID2D1SolidColorBrush* cb = AcquireBrush(SCol(0x000000))) {
+            target_->DrawRectangle(D2D1::RectF(ic.x - 4.0f, ic.y - 4.5f, ic.x + 4.0f, ic.y + 4.5f), cb, 1.2f);
+            target_->DrawLine(D2D1::Point2F(ic.x - 2.0f, ic.y - 5.5f), D2D1::Point2F(ic.x + 2.0f, ic.y - 5.5f), cb, 1.2f);
+        }
+        SText(L"Copy", D2D1::RectF(btnCopy.left + 20.0f, btnCopy.top, btnCopy.right - 4.0f, btnCopy.bottom), SFLabel, SCol(0x000000), 1);
+        SHit(btnCopy, StudioAction::ClipCopy, g_clipSelected);
+
+        // Save Button (Floppy disk / download icon)
+        const D2D1_RECT_F btnSave = D2D1::RectF(prR - 92.0f, r.bottom - 28.0f, prR - 70.0f, r.bottom - 6.0f);
+        const D2D1_POINT_2F discC = D2D1::Point2F((btnSave.left + btnSave.right) * 0.5f, (btnSave.top + btnSave.bottom) * 0.5f);
+        if (ID2D1SolidColorBrush* db = AcquireBrush(white)) {
+            target_->DrawRectangle(D2D1::RectF(discC.x - 5.0f, discC.y - 5.0f, discC.x + 5.0f, discC.y + 5.0f), db, 1.2f);
+            target_->DrawLine(D2D1::Point2F(discC.x - 2.5f, discC.y - 5.0f), D2D1::Point2F(discC.x - 2.5f, discC.y - 1.5f), db, 1.2f);
+            target_->DrawLine(D2D1::Point2F(discC.x + 2.5f, discC.y - 5.0f), D2D1::Point2F(discC.x + 2.5f, discC.y - 1.5f), db, 1.2f);
+        }
+        SHit(btnSave, StudioAction::ClipSave, g_clipSelected);
+    }
+
+    // ── Screen Time page (screentime_module.inc) ──
+    // Today (time in front, what's left of your daily limit or your daily
+    // average, apps used), the last seven days as bars, and today's apps with
+    // their own icons and a bar for their share.
+    std::map<std::wstring, std::pair<ComPtr<ID2D1Bitmap>, uint64_t>> screenTimeIcons_;  // key -> bitmap, its pixels' generation
+
+    void DrawStudioScreenTimePage(const SharedState& state, D2D1_RECT_F r, const Settings& settings, double now) {
+        (void)state;
+        (void)now;
+        namespace bst = bb::screentime;
+        EnsureRoundStroke();
+        studioOrigin_ = publishedOrigin_;
+        const D2D1_COLOR_F white = SCol(0xffffff), grey = SCol(0x8e8e93), cardBg = SCol(0x18181a), accent = SAccent();
+        const screentime::View view = screentime::GetView();
+        const bst::Summary& sum = view.summary;
+
+        // Bunbun: the columns share the page's real width (Classic's page is narrower
+        // than Studio's), so the By app list always keeps room for its names and times.
+        const float gap = 6.0f;
+        const float leftW = std::min(304.0f, std::floor((r.right - r.left) * 0.6f));
+        auto barsGlyph = [&](D2D1_POINT_2F c) {  // the little chart beside a card's title
+            if (ID2D1SolidColorBrush* b = AcquireBrush(grey)) {
+                target_->DrawLine(D2D1::Point2F(c.x - 3.0f, c.y + 3.0f), D2D1::Point2F(c.x - 3.0f, c.y - 1.0f), b, 1.2f);
+                target_->DrawLine(D2D1::Point2F(c.x, c.y + 4.0f), D2D1::Point2F(c.x, c.y - 3.5f), b, 1.2f);
+                target_->DrawLine(D2D1::Point2F(c.x + 3.0f, c.y + 3.0f), D2D1::Point2F(c.x + 3.0f, c.y), b, 1.2f);
+            }
+        };
+
+        // ── Today ──
+        const D2D1_RECT_F r1 = D2D1::RectF(r.left, r.top, r.left + leftW, r.top + 76.0f);
+        SFillRound(r1, 12.0f, cardBg);
+        {
+            barsGlyph(D2D1::Point2F(r1.left + 16.0f, r1.top + 14.0f));
+            SText(L"Today", D2D1::RectF(r1.left + 24.0f, r1.top + 8.0f, r1.left + 80.0f, r1.top + 22.0f), SFSmall, grey);
+            const float cw = (leftW - 24.0f) / 3.0f;  // Bunbun: three even columns from x + 16
+            const bool tight = cw < 84.0f;             // Classic's narrower page: shorter labels
+            SText(bst::Duration(sum.todaySeconds), D2D1::RectF(r1.left + 16.0f, r1.top + 24.0f, r1.left + 16.0f + cw, r1.top + 54.0f), SFBig, white);
+            SText(tight ? L"Today" : L"Screen time", D2D1::RectF(r1.left + 16.0f, r1.top + 54.0f, r1.left + 16.0f + cw, r1.top + 68.0f), SFSmall, grey);
+
+            // The middle: what's left of your daily limit (Bunbun.ScreenTimeLimit), with a
+            // ring; without a limit, your daily average this week. A click changes the limit.
+            const float mx = r1.left + 16.0f + cw;
+            const long long limit = static_cast<long long>(settings.screenTimeLimit) * 3600;
+            std::wstring big, small;
+            if (limit > 0) {
+                const D2D1_POINT_2F rc = D2D1::Point2F(mx + 6.0f, r1.top + 40.0f);
+                const float frac = Clamp(static_cast<float>(sum.todaySeconds) / static_cast<float>(limit), 0.0f, 1.0f);
+                if (ID2D1SolidColorBrush* b = AcquireBrush(D2D1::ColorF(1, 1, 1, 0.18f))) target_->DrawEllipse(D2D1::Ellipse(rc, 11.0f, 11.0f), b, 2.2f);
+                if (frac > 0.0f)
+                    bb::studio::Arc(SPen(), rc, 11.0f, -1.5707963f, -1.5707963f + 6.2831853f * frac,
+                                    sum.todaySeconds >= limit ? SCol(0xff453a) : white, 2.2f);
+                const bool over = sum.todaySeconds >= limit;
+                big = bst::Duration(over ? sum.todaySeconds - limit : limit - sum.todaySeconds);
+                small = tight ? std::wstring(over ? L"over " : L"left of ") + std::to_wstring(settings.screenTimeLimit) + L"h"
+                              : (over ? L"over your " : L"left of your ") + std::to_wstring(settings.screenTimeLimit) + L"h limit";
+            } else {
+                big = bst::Duration(sum.averageSeconds);
+                small = tight ? L"Average" : L"Daily average";
+            }
+            const float tx = limit > 0 ? mx + 24.0f : mx;
+            const float c3 = r1.left + 16.0f + cw * 2.0f;
+            SText(big, D2D1::RectF(tx, r1.top + 24.0f, c3, r1.top + 54.0f), SFBig, white);
+            SText(small, D2D1::RectF(tx, r1.top + 54.0f, c3, r1.top + 68.0f), SFSmall, grey);
+            SHit(D2D1::RectF(mx - 4.0f, r1.top + 22.0f, c3, r1.top + 70.0f), StudioAction::ScreenTimeLimitEdit);
+
+            SText(std::to_wstring(sum.appsUsed), D2D1::RectF(c3, r1.top + 24.0f, r1.right - 8.0f, r1.top + 54.0f), SFBig, white);
+            SText(tight ? L"Apps" : L"Apps used", D2D1::RectF(c3, r1.top + 54.0f, r1.right - 8.0f, r1.top + 68.0f), SFSmall, grey);
+        }
+
+        // ── The last seven days ──
+        const D2D1_RECT_F r2 = D2D1::RectF(r.left, r.top + 82.0f, r.left + leftW, r.bottom);
+        SFillRound(r2, 12.0f, cardBg);
+        {
+            const D2D1_POINT_2F cc = D2D1::Point2F(r2.left + 16.0f, r2.top + 14.0f);
+            if (ID2D1SolidColorBrush* b = AcquireBrush(grey)) {
+                target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cc.x - 4.5f, cc.y - 4.5f, cc.x + 4.5f, cc.y + 4.5f), 1.5f, 1.5f), b, 1.2f);
+                target_->DrawLine(D2D1::Point2F(cc.x - 4.5f, cc.y - 1.5f), D2D1::Point2F(cc.x + 4.5f, cc.y - 1.5f), b, 1.0f);
+            }
+            SText(L"Last 7 days", D2D1::RectF(r2.left + 25.0f, r2.top + 8.0f, r2.left + 140.0f, r2.top + 22.0f), SFSmall, grey);
+            if (sum.averageSeconds > 0)
+                SText(L"avg " + bst::Duration(sum.averageSeconds), D2D1::RectF(r2.right - 110.0f, r2.top + 8.0f, r2.right - 14.0f, r2.top + 22.0f),
+                      SFSmall, grey, 2);
+            static const wchar_t* kDays[] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
+            long long most = 1;
+            for (const bst::DayTotal& d : sum.week) most = std::max(most, d.seconds);
+            const float dw = (leftW - 20.0f) / 7.0f, baseline = r2.bottom - 22.0f, tallest = baseline - (r2.top + 46.0f);
+            for (size_t i = 0; i < sum.week.size() && i < 7; ++i) {
+                const bst::DayTotal& d = sum.week[i];
+                const float dx = r2.left + 10.0f + i * dw, cx = dx + dw * 0.5f;
+                SText(kDays[d.weekday % 7], D2D1::RectF(dx, r2.bottom - 18.0f, dx + dw, r2.bottom - 4.0f), SFSmall, d.today ? white : grey, 1);
+                if (d.seconds >= 60) {
+                    // Bars scale to the busiest day; today's is white, the others grey.
+                    const float h = std::max(6.0f, tallest * static_cast<float>(d.seconds) / static_cast<float>(most));
+                    SFillRound(D2D1::RectF(cx - 9.0f, baseline - h, cx + 9.0f, baseline), 4.5f, d.today ? white : SCol(0x8e8e93, 0.55f));
+                    const long long m = d.seconds / 60;
+                    SText(m >= 60 ? std::to_wstring(m / 60) + L"h" : std::to_wstring(m) + L"m",
+                          D2D1::RectF(dx - 2.0f, baseline - h - 16.0f, dx + dw + 2.0f, baseline - h - 2.0f), SFSmall, d.today ? white : grey, 1);
+                } else {
+                    SFillRound(D2D1::RectF(cx - 8.0f, baseline - 1.5f, cx + 8.0f, baseline + 1.5f), 1.0f, SCol(0x38383a));
+                }
+            }
+        }
+
+        // ── By app ──
+        const D2D1_RECT_F r3 = D2D1::RectF(r.left + leftW + gap, r.top, r.right, r.bottom);
+        SFillRound(r3, 12.0f, cardBg);
+        barsGlyph(D2D1::Point2F(r3.left + 16.0f, r3.top + 14.0f));
+        SText(L"By app", D2D1::RectF(r3.left + 24.0f, r3.top + 8.0f, r3.left + 90.0f, r3.top + 22.0f), SFSmall, grey);
+        if (sum.apps.empty()) {
+            SText(settings.screenTime ? L"Counting from now" : L"Screen Time is off",
+                  D2D1::RectF(r3.left + 14.0f, r3.top + 60.0f, r3.right - 14.0f, r3.top + 80.0f), SFBody, white, 1);
+            SText(L"Apps show here as you use them", D2D1::RectF(r3.left + 14.0f, r3.top + 82.0f, r3.right - 14.0f, r3.top + 98.0f),
+                  SFSmall, grey, 1);
+            return;
+        }
+        const float rowH = 28.0f, listY = r3.top + 28.0f;
+        for (size_t i = 0; i < sum.apps.size() && i < 5; ++i) {
+            const bst::AppTime& app = sum.apps[i];
+            const float y = listY + i * (rowH + 2.0f);
+            if (y + rowH > r3.bottom - 2.0f) break;  // only as many rows as the card holds
+            const D2D1_RECT_F icBox = D2D1::RectF(r3.left + 12.0f, y + 2.0f, r3.left + 32.0f, y + 22.0f);
+            // The app's own icon; while it's being looked up, its initial on a tile.
+            const PixelsRef& icon = i < view.icons.size() ? view.icons[i] : PixelsRef();
+            if (icon && !icon->bgra.empty()) {
+                auto& slot = screenTimeIcons_[app.key];
+                DrawBitmapPixels(*icon, icBox, slot.first, slot.second);
+            } else {
+                SFillRound(icBox, 5.0f, SCol(0x3a3a3c));
+                SText(app.name.substr(0, 1), icBox, SFLabel, white, 1);
+            }
+            SText(app.name, D2D1::RectF(r3.left + 38.0f, y, r3.right - 50.0f, y + 14.0f), SFLabel, white);
+            SText(bst::Duration(app.seconds), D2D1::RectF(r3.right - 54.0f, y, r3.right - 10.0f, y + 14.0f), SFLabel, white, 2);
+            const float barL = r3.left + 38.0f, barR = r3.right - 12.0f, barY = y + 16.5f;
+            SFillRound(D2D1::RectF(barL, barY, barR, barY + 2.5f), 1.2f, SCol(0x28282a));
+            const float fW = (barR - barL) * Clamp(app.percent / 100.0f, 0.0f, 1.0f);
+            if (fW > 1.0f) SFillRound(D2D1::RectF(barL, barY, barL + fW, barY + 2.5f), 1.2f, i == 0 ? accent : white);
+        }
+        if (screenTimeIcons_.size() > 64) screenTimeIcons_.clear();  // apps come and go; keep the cache small
     }
 
     void DrawStudioNotePage(D2D1_RECT_F r, double now) {
@@ -1231,6 +1663,10 @@
 
     // ── Mirror page ──
     ComPtr<ID2D1Bitmap> mirrorBmp_;
+    ComPtr<ID2D1Bitmap> clipThumbBmp_[8];
+    uint64_t clipThumbGen_[8] = {};
+    ComPtr<ID2D1Bitmap> clipPreviewBmp_;
+    uint64_t clipPreviewGen_ = 0;
     uint64_t mirrorBmpId_ = 0;
 
     void DrawStudioMirrorPage(D2D1_RECT_F r) {
@@ -1348,79 +1784,883 @@
         }
     }
 
-    // ── Focus page ──
-    void DrawStudioFocusPage(const SharedState& state, D2D1_RECT_F r, double now) {
+    // ── Timers page (timers_module.inc) ──
+    // One page for every timer: a mode bar on the top right, a big ring on the
+    // left, the mode's controls to its right. Water draws its own page below the bar.
+    void DrawStudioTimersPage(const SharedState& state, D2D1_RECT_F r, double now) {
+        namespace bt = bb::timers;
         EnsureRoundStroke();
         if (g_settings.focusGuard) EnsureFocusGuard();
-        LoadFocusPicker();
-        const D2D1_COLOR_F purple = SAccent(), white = SCol(0xffffff), grey = SCol(0x8e8e93);
-        const TimerSnapshot& tm = state.timer;
-        const float W = r.right - r.left;
-        auto pill = [&](D2D1_RECT_F b, const std::wstring& label, bool primary, StudioAction action, int arg) {
+        Timers::Load();
+        const D2D1_COLOR_F accent = SAccent(), white = SCol(0xffffff), grey = SCol(0x8e8e93);
+        const D2D1_COLOR_F green = SCol(0x30d158), red = SCol(0xff453a);
+        const bool water = g_settings.waterPage;
+        bt::Mode mode = Timers::g_mode;
+        if (mode == bt::Mode::Water && !water) mode = bt::Mode::Focus;
+
+        auto pill = [&](D2D1_RECT_F b, const std::wstring& label, bool primary, StudioAction action, int arg = 0) {
             const float hover = SHover(action, arg);
             SFillRound(b, (b.bottom - b.top) * 0.5f,
                        primary ? D2D1::ColorF(1, 1, 1, SLerp(0.92f, 1.0f, hover)) : D2D1::ColorF(1, 1, 1, SLerp(0.09f, 0.18f, hover)));
             SText(label, b, SFLabel, primary ? SCol(0x141416) : white, 1);
             SHit(b, action, arg);
         };
+        // A row of pills from x, each as wide as its label; returns where the row ends.
+        auto pillW = [&](const std::wstring& label) { return SMeasure(label, SFLabel) + 28.0f; };
 
-        if (tm.active) {
-            const double left = tm.running ? std::max(0.0, tm.endsAt - now) : tm.remainingAtPause;
-            const float frac = tm.totalSeconds > 0 ? static_cast<float>(left / tm.totalSeconds) : 0.0f;
-            SText(Clock(left), D2D1::RectF(r.left, r.top + 6, r.left + W * 0.62f, r.top + 70), SFHero, white);
-            SText(tm.isBreak ? L"Break" : (tm.running ? L"Focus" : L"Focus \x00B7 paused"),
-                  D2D1::RectF(r.left + 2, r.top + 72, r.left + W * 0.62f, r.top + 90), SFBody, purple);
-            const D2D1_RECT_F bar = D2D1::RectF(r.left, r.top + 104, r.right, r.top + 108);
-            SFillRound(bar, 2, D2D1::ColorF(1, 1, 1, 0.12f));
-            SFillRound(D2D1::RectF(bar.left, bar.top, bar.left + (bar.right - bar.left) * Clamp(frac, 0.0f, 1.0f), bar.bottom), 2, purple);
-            const float bx = r.right - 120;
-            pill(D2D1::RectF(bx, r.top + 8, r.right, r.top + 38), tm.running ? L"Pause" : L"Resume", true, StudioAction::FocusPause, 0);
-            pill(D2D1::RectF(bx, r.top + 44, r.right, r.top + 74), L"+5 min", false, StudioAction::FocusAdd5, 0);
-            pill(D2D1::RectF(bx, r.top + 80 - 6, r.right, r.top + 80 + 24 - 6), L"Stop", false, StudioAction::FocusStop, 0);
-            SText(L"Bun lets you know when time is up.", D2D1::RectF(r.left, r.top + 118, r.right, r.top + 136), SFSmall, grey);
+        // ── The mode bar ──
+        static const wchar_t* kNames[] = {L"Focus", L"Timer", L"Stopwatch", L"Water"};
+        const int modes = water ? 4 : 3;
+        float segW = 0.0f;
+        for (int i = 0; i < modes; ++i) segW = std::max(segW, SMeasure(kNames[i], SFLabel) + 22.0f);
+        const D2D1_RECT_F bar = D2D1::RectF(r.right - segW * modes - 4, r.top, r.right, r.top + 26);
+        SFillRound(bar, 13, D2D1::ColorF(1, 1, 1, 0.07f));
+        for (int i = 0; i < modes; ++i) {
+            const D2D1_RECT_F seg = D2D1::RectF(bar.left + 2 + segW * i, bar.top + 2, bar.left + 2 + segW * (i + 1), bar.bottom - 2);
+            const bool on = i == static_cast<int>(mode);
+            const float hover = SHover(StudioAction::TimerMode, i);
+            if (on) SFillRound(seg, 11, D2D1::ColorF(1, 1, 1, 0.92f));
+            else if (hover > 0.01f) SFillRound(seg, 11, D2D1::ColorF(1, 1, 1, 0.08f * hover));
+            SText(kNames[i], seg, SFLabel, on ? SCol(0x141416) : SLerpCol(SCol(0xaeaeb2), white, hover), 1);
+            SHit(seg, StudioAction::TimerMode, i);
+        }
+
+        if (mode == bt::Mode::Water) {
+            DrawStudioWaterPage(state, D2D1::RectF(r.left, r.top + 30, r.right, r.bottom), now);
             return;
         }
 
-        // Idle: the picker on the left, start and presets on the right.
-        const float colW = 64.0f, rowH = 30.0f;
-        const float pickTop = r.top + 14.0f;
-        const float pickH = rowH * 3;
-        SFillRound(D2D1::RectF(r.left, pickTop + rowH, r.left + colW * 2 + 40, pickTop + rowH * 2), 9, D2D1::ColorF(1, 1, 1, 0.07f));
-        for (int col = 0; col < 2; ++col) {
-            const float x = r.left + col * (colW + 20);
-            const int value = col == 0 ? g_focusPickH : g_focusPickM;
-            const int mod = col == 0 ? 6 : 60;
-            for (int k = -1; k <= 1; ++k) {
-                const int v = ((value + k) % mod + mod) % mod;
-                wchar_t b[8];
-                swprintf_s(b, col == 0 ? L"%d" : L"%02d", v);
-                SText(b, D2D1::RectF(x, pickTop + (k + 1) * rowH, x + colW, pickTop + (k + 2) * rowH),
-                      k == 0 ? SFSong : SFBody, k == 0 ? white : SCol(0x48484a), 1);
-            }
-            SText(col == 0 ? L"h" : L"min", D2D1::RectF(x + colW - 6, pickTop + rowH, x + colW + 20, pickTop + rowH * 2), SFSmall, grey);
-            SHit(D2D1::RectF(x, pickTop, x + colW, pickTop + pickH), StudioAction::FocusWheel, col);
+        // ── The ring ──
+        const float H = r.bottom - r.top;
+        float R = std::min(64.0f, (H - 14.0f) * 0.5f);
+        const float ringW = 7.0f;
+        D2D1_POINT_2F c = D2D1::Point2F(r.left + R + 6, r.top + H * 0.5f);
+        // Bunbun: on a narrow page (Classic) the mode bar reaches over the ring; then the
+        // ring sits below the bar, smaller, so the two never overlap.
+        if (bar.left < c.x + R + 8.0f) {
+            const float avail = r.bottom - (bar.bottom + 6.0f);
+            R = std::max(30.0f, std::min(R, avail * 0.5f - 2.0f));
+            c = D2D1::Point2F(r.left + R + 6, bar.bottom + 6.0f + avail * 0.5f);
         }
-        const int total = FocusPickerMinutes();
-        SYSTEMTIME st{};
-        GetLocalTime(&st);
-        const int doneMin = (st.wHour * 60 + st.wMinute + total) % (24 * 60);
-        wchar_t done[32];
-        swprintf_s(done, L"Done at %02d:%02d", doneMin / 60, doneMin % 60);
-        SText(done, D2D1::RectF(r.left, pickTop + pickH + 6, r.left + colW * 2 + 60, pickTop + pickH + 24), SFSmall, grey);
+        const float x0 = c.x + R + 22;             // the controls' column
+        const float y0 = r.top + 38;               // below the mode bar
+        const TimerSnapshot& t = state.timer;
+        const double left = t.running ? std::max(0.0, t.endsAt - now) : t.remainingAtPause;
+        auto up = [](double s) { return std::ceil(s - 1e-6); };  // 4:59.2 left reads 5:00
+        auto ringText = [&](const std::wstring& big, const std::wstring& small, D2D1_COLOR_F smallCol) {
+            SText(big, D2D1::RectF(c.x - R, c.y - 22, c.x + R, c.y + 10), big.size() > 7 ? SFSong : SFBig, white, 1);
+            SText(small, D2D1::RectF(c.x - R + 8, c.y + 12, c.x + R - 8, c.y + 28), SFSmall, smallCol, 1);
+        };
+        auto endsAt = [&](double seconds) {
+            SYSTEMTIME st{};
+            GetLocalTime(&st);
+            const int m = static_cast<int>((st.wHour * 3600 + st.wMinute * 60 + st.wSecond + seconds) / 60) % (24 * 60);
+            wchar_t b[32];
+            swprintf_s(b, L"Ends at %02d:%02d", m / 60, m % 60);
+            return std::wstring(b);
+        };
 
-        const float rx = r.left + colW * 2 + 80;
-        SText(Clock(total * 60.0), D2D1::RectF(rx, r.top + 8, r.right, r.top + 56), SFBig, white);
-        pill(D2D1::RectF(rx, r.top + 62, rx + 110, r.top + 94), L"Start", true, StudioAction::FocusStart, total);
-        float cx = rx;
-        for (int m : {5, 15, 25, 50}) {
-            const std::wstring label = std::to_wstring(m) + L" min";
-            const float cw = SMeasure(label, SFLabel) + 22;
-            const bool on = total == m;
-            const D2D1_RECT_F chip = D2D1::RectF(cx, r.top + 104, cx + cw, r.top + 128);
-            SFillRound(chip, 12, on ? WithAlpha(purple, 0.35f) : D2D1::ColorF(1, 1, 1, SLerp(0.09f, 0.16f, SHover(StudioAction::FocusPreset, m))));
-            SText(label, chip, SFLabel, on ? white : SCol(0xe8e8ee), 1);
-            SHit(chip, StudioAction::FocusPreset, m);
-            cx += cw + 6;
+        if (mode == bt::Mode::Focus) {
+            // ── Pomodoro ──
+            // Bunbun: the ring on the left like the other modes; on the right the
+            // phase, what's next, the buttons, and the old Focus page's length chips.
+            // Every row is measured against the page's right edge so nothing clips.
+            const bt::PomodoroConfig cfg = Timers::Config(g_settings);
+            const bt::Pomodoro& p = Timers::g_pomo;
+            const bool mine = t.active && t.kind == kTimerKindPomodoro;
+            const int phaseSec = bt::PhaseMinutes(p.phase, cfg) * 60;
+            const bool brk = p.phase != bt::Phase::Focus;
+            const D2D1_COLOR_F col = brk ? green : accent;
+            const float frac = mine && t.totalSeconds > 0 ? Clamp(1.0f - static_cast<float>(left / t.totalSeconds), 0.0f, 1.0f) : 0.0f;
+            SRing(c, R, ringW, frac, col);
+            ringText(Clock(mine ? up(left) : phaseSec),
+                     mine ? (t.running ? (brk ? L"Break" : L"Focus") : L"Paused")
+                          : (Timers::g_autoStartAt > 0.0 ? L"Starting\x2026" : L"Ready"),
+                     mine && t.running ? col : grey);
+            const float xr = r.right - 4.0f;   // keep clear of the page's edge
+
+            // Row 1: the phase, then a dot per focus session of the cycle.
+            const std::wstring phase = bt::PhaseLabel(p, cfg);
+            const float phaseW = SMeasure(phase, SFSong);
+            SText(phase, D2D1::RectF(x0, y0, xr, y0 + 20), SFSong, white);
+            for (int i = 0; i < cfg.cycles && i < 12; ++i) {
+                const D2D1_POINT_2F d = D2D1::Point2F(x0 + phaseW + 14 + i * 13.0f, y0 + 10);
+                if (d.x + 5 > xr) break;
+                const bool done = i < p.cycle - 1 || (i == p.cycle - 1 && brk);
+                const bool current = i == p.cycle - 1 && !brk;
+                if (ID2D1SolidColorBrush* b = AcquireBrush(done ? accent : (current ? WithAlpha(accent, 0.45f) : D2D1::ColorF(1, 1, 1, 0.14f))))
+                    target_->FillEllipse(D2D1::Ellipse(d, 4.0f, 4.0f), b);
+            }
+
+            // Row 2: what comes next; the auto-start switch on the right.
+            const float ny = y0 + 24;
+            const std::wstring autoLabel = L"Auto-start";
+            const float autoW = 26 + 7 + SMeasure(autoLabel, SFSmall) + 8;
+            const float ax = xr - autoW;
+            const bt::Phase next = bt::NextPhase(p, cfg);
+            SText(L"Then " + std::wstring(bt::PhaseName(next)) + L" \x00B7 " + std::to_wstring(bt::PhaseMinutes(next, cfg)) + L" min",
+                  D2D1::RectF(x0, ny, ax - 8, ny + 18), SFSmall, grey);
+            const bool autoOn = cfg.autoStart;
+            const D2D1_RECT_F sw = D2D1::RectF(ax, ny + 2, ax + 26, ny + 16);
+            const float hover = SHover(StudioAction::PomoAuto);
+            SFillRound(sw, 7, autoOn ? accent : D2D1::ColorF(1, 1, 1, SLerp(0.16f, 0.24f, hover)));
+            if (ID2D1SolidColorBrush* b = AcquireBrush(white))
+                target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(autoOn ? sw.right - 7 : sw.left + 7, ny + 9), 5, 5), b);
+            SText(autoLabel, D2D1::RectF(sw.right + 7, ny - 1, xr + 4, ny + 19), SFSmall, SLerpCol(SCol(0xc7c7cc), white, hover));
+            SHit(D2D1::RectF(ax, ny - 1, xr, ny + 19), StudioAction::PomoAuto);
+
+            // Row 3: start / pause, skip, reset; today's count if there's room.
+            const float by = y0 + 52;
+            float bx = x0;
+            // Bunbun: a narrow column (Classic) gets smaller buttons, so all three fit.
+            const bool narrow = xr - x0 < 250.0f;
+            const float goW = narrow ? 72.0f : 86.0f, skipW = narrow ? 50.0f : 58.0f, resetW = narrow ? 56.0f : 62.0f, sp = narrow ? 5.0f : 6.0f;
+            const std::wstring go = mine ? (t.running ? L"Pause" : L"Resume") : L"Start";
+            pill(D2D1::RectF(bx, by, bx + goW, by + 30), go, true, StudioAction::PomoToggle);
+            bx += goW + sp;
+            if (bx + skipW <= xr) { pill(D2D1::RectF(bx, by, bx + skipW, by + 30), L"Skip", false, StudioAction::PomoSkip); bx += skipW + sp; }
+            if (bx + resetW <= xr) { pill(D2D1::RectF(bx, by, bx + resetW, by + 30), L"Reset", false, StudioAction::PomoReset); bx += resetW + sp; }
+            const int n = p.sessionsToday;
+            const std::wstring today = std::to_wstring(n) + L" today";
+            if (bx + SMeasure(today, SFSmall) + 6 <= xr)
+                SText(today, D2D1::RectF(bx, by + 6, xr, by + 24), SFSmall, grey, 2);
+
+            // Row 4: the focus length, as on the old Focus page.
+            const float cy = by + 40;
+            if (cy + 24 <= r.bottom) {
+                float chipX = x0;
+                for (int m : {15, 25, 50, 90}) {
+                    const std::wstring label = std::to_wstring(m) + (narrow ? L"m" : L" min");
+                    const float cw = SMeasure(label, SFLabel) + (narrow ? 18.0f : 22.0f);
+                    if (chipX + cw > xr) break;
+                    const bool on = cfg.focusMinutes == m;
+                    const D2D1_RECT_F chip = D2D1::RectF(chipX, cy, chipX + cw, cy + 24);
+                    SFillRound(chip, 12, on ? WithAlpha(accent, 0.35f) : D2D1::ColorF(1, 1, 1, SLerp(0.09f, 0.16f, SHover(StudioAction::PomoLength, m))));
+                    SText(label, chip, SFLabel, on ? white : SCol(0xe8e8ee), 1);
+                    SHit(chip, StudioAction::PomoLength, m);
+                    chipX += cw + 6;
+                }
+            }
+            return;
+        }
+
+        if (mode == bt::Mode::Countdown) {
+            // ── Countdown ──
+            const bool mine = t.active && t.kind == kTimerKindTimer;
+            const int set = Timers::g_countSet;
+            if (mine) {
+                const float frac = t.totalSeconds > 0 ? Clamp(static_cast<float>(left / t.totalSeconds), 0.0f, 1.0f) : 0.0f;
+                SRing(c, R, ringW, frac, accent);
+                ringText(Clock(up(left)), t.running ? endsAt(left) : L"Paused", t.running ? accent : grey);
+            } else {
+                // The dial: one turn an hour, a knob to drag; the wheel works over it too.
+                const float frac = static_cast<float>(bt::DialFraction(set));
+                const float hover = SHover(StudioAction::TimerRing);
+                SRing(c, R, ringW, frac, accent);
+                const float a = frac * 6.2831853f;
+                const D2D1_POINT_2F k = D2D1::Point2F(c.x + R * std::sin(a), c.y - R * std::cos(a));
+                if (ID2D1SolidColorBrush* b = AcquireBrush(white))
+                    target_->FillEllipse(D2D1::Ellipse(k, SLerp(6.5f, 8.0f, std::max(hover, Timers::g_ringDrag ? 1.0f : 0.0f)),
+                                                       SLerp(6.5f, 8.0f, std::max(hover, Timers::g_ringDrag ? 1.0f : 0.0f))), b);
+                ringText(Clock(set), L"Drag or scroll", grey);
+                SHit(D2D1::RectF(c.x - R - 10, c.y - R - 10, c.x + R + 10, c.y + R + 10), StudioAction::TimerRing);
+            }
+
+            SText(L"Timer", D2D1::RectF(x0, y0, r.right, y0 + 20), SFSong, white);
+            SText(mine ? (t.running ? L"Running on the island" : L"Paused")
+                       : L"Scroll for minutes \x00B7 Shift for seconds",
+                  D2D1::RectF(x0, y0 + 20, r.right, y0 + 36), SFSmall, grey);
+
+            // Presets, then + Save when the ring shows a time that isn't one yet.
+            const std::vector<int> presets = bt::ParsePresets(g_settings.timerPresets);
+            float cx = x0;
+            const float cy = y0 + 44;
+            for (int s : presets) {
+                const std::wstring label = bt::PresetLabel(s);
+                const float cw = SMeasure(label, SFLabel) + 20;
+                if (cx + cw > r.right) break;
+                const bool on = !mine && s == set;
+                const D2D1_RECT_F chip = D2D1::RectF(cx, cy, cx + cw, cy + 24);
+                SFillRound(chip, 12, on ? WithAlpha(accent, 0.4f) : D2D1::ColorF(1, 1, 1, SLerp(0.08f, 0.16f, SHover(StudioAction::CountPreset, s))));
+                SText(label, chip, SFLabel, on ? white : SCol(0xe8e8ee), 1);
+                SHit(chip, StudioAction::CountPreset, s);
+                cx += cw + 6;
+            }
+            const bool known = std::find(presets.begin(), presets.end(), set) != presets.end();
+            if (!mine && !known && presets.size() < bt::kMaxPresets) {
+                const std::wstring label = L"+ Save";
+                const float cw = SMeasure(label, SFLabel) + 20;
+                if (cx + cw <= r.right) {
+                    const D2D1_RECT_F chip = D2D1::RectF(cx, cy, cx + cw, cy + 24);
+                    const float hover = SHover(StudioAction::CountSave);
+                    if (ID2D1SolidColorBrush* b = AcquireBrush(D2D1::ColorF(1, 1, 1, SLerp(0.22f, 0.4f, hover))))
+                        target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(chip.left + 0.5f, chip.top + 0.5f, chip.right - 0.5f, chip.bottom - 0.5f), 12, 12), b, 1.0f);
+                    SText(label, chip, SFLabel, white, 1);
+                    SHit(chip, StudioAction::CountSave);
+                }
+            }
+
+            const float by = y0 + 78;
+            float bx = x0;
+            const std::wstring go = mine ? (t.running ? L"Pause" : L"Resume") : L"Start";
+            pill(D2D1::RectF(bx, by, bx + 86, by + 30), go, true, StudioAction::CountToggle);
+            bx += 92;
+            for (int m : {1, 5}) {
+                const std::wstring label = L"+" + std::to_wstring(m) + L" min";
+                const float w = pillW(label);
+                if (bx + w > r.right) break;
+                pill(D2D1::RectF(bx, by, bx + w, by + 30), label, false, StudioAction::CountAdd, m);
+                bx += w + 6;
+            }
+            if (mine && bx + 62 <= r.right) pill(D2D1::RectF(bx, by, bx + 62, by + 30), L"Reset", false, StudioAction::CountReset);
+            return;
+        }
+
+        // ── Stopwatch ──
+        const StopwatchSnapshot& sw = state.stopwatch;
+        const double elapsed = Timers::StopwatchElapsed(sw, now);
+        SRing(c, R, ringW, static_cast<float>(std::fmod(elapsed, 60.0) / 60.0), accent);
+        ringText(bt::StopwatchText(elapsed), sw.running ? L"Running" : (sw.active ? L"Paused" : L"Ready"), sw.running ? accent : grey);
+        if (sw.running) g_layoutDirty = true;  // hundredths move every frame
+
+        float bx = x0;
+        const float by = y0;
+        pill(D2D1::RectF(bx, by, bx + 86, by + 30), sw.running ? L"Pause" : (sw.active ? L"Resume" : L"Start"), true, StudioAction::SwToggle);
+        bx += 92;
+        if (sw.running) {
+            pill(D2D1::RectF(bx, by, bx + 58, by + 30), L"Lap", false, StudioAction::SwLap);
+            bx += 64;
+        } else if (sw.active) {
+            pill(D2D1::RectF(bx, by, bx + 62, by + 30), L"Reset", false, StudioAction::SwReset);
+            bx += 68;
+        }
+        const std::vector<bt::Lap>& laps = Timers::g_laps;
+        if (!laps.empty() && bx + 62 <= r.right) pill(D2D1::RectF(bx, by, bx + 62, by + 30), L"Copy", false, StudioAction::SwCopy);
+
+        // The laps, newest first; the fastest in green, the slowest in red.
+        const float ly = by + 40;
+        if (laps.empty()) {
+            SText(sw.running ? L"Lap marks a split" : L"Laps show here", D2D1::RectF(x0, ly, r.right, ly + 18), SFSmall, grey);
+            return;
+        }
+        const bt::LapMarks marks = bt::MarkLaps(laps);
+        const int rows = std::max(1, static_cast<int>((r.bottom - ly) / 17.0f));
+        const int n = static_cast<int>(laps.size());
+        for (int k = 0; k < rows && k < n; ++k) {
+            const int i = n - 1 - k;
+            const float y = ly + k * 17.0f;
+            const D2D1_COLOR_F col = i == marks.fastest ? green : (i == marks.slowest ? red : SCol(0xe8e8ee));
+            SText(L"Lap " + std::to_wstring(i + 1), D2D1::RectF(x0, y, x0 + 60, y + 17), SFBody, col);
+            SText(bt::StopwatchText(laps[static_cast<size_t>(i)].split), D2D1::RectF(x0 + 60, y, r.right - 90, y + 17), SFBody, col, 2);
+            SText(bt::StopwatchText(laps[static_cast<size_t>(i)].total), D2D1::RectF(r.right - 90, y, r.right, y + 17), SFSmall, grey, 2);
+        }
+    }
+
+    // ── Bunbun: Rolling Wave History & Spline Renderer ──
+    struct StudioWaveHistory {
+        static constexpr size_t kMax = 28;
+        float buf[kMax] = {};
+        size_t count = 0;
+        double lastPush = 0.0;
+
+        void Push(float val, double now, double interval = 0.4) {
+            if (count == 0) {
+                buf[0] = val;
+                count = 1;
+                lastPush = now;
+                return;
+            }
+            if (now - lastPush < interval) {
+                buf[count - 1] = val;
+                return;
+            }
+            lastPush = now;
+            if (count < kMax) {
+                buf[count++] = val;
+            } else {
+                for (size_t i = 1; i < kMax; ++i) buf[i - 1] = buf[i];
+                buf[kMax - 1] = val;
+            }
+        }
+    };
+
+    StudioWaveHistory cpuWave_, gpuWave_, ramWave_, diskWave_, netDownWave_, netUpWave_;
+
+    void DrawSmoothWave(D2D1_RECT_F r, const float* vals, size_t n, float minVal, float maxVal,
+                        D2D1_COLOR_F strokeCol, float strokeW, bool filled = false,
+                        D2D1_COLOR_F fillColTop = D2D1::ColorF(1, 1, 1, 0.22f),
+                        D2D1_COLOR_F fillColBottom = D2D1::ColorF(1, 1, 1, 0.0f)) {
+        if (n < 2 || r.right <= r.left || r.bottom <= r.top) return;
+        const float range = std::max(0.001f, maxVal - minVal);
+        std::vector<D2D1_POINT_2F> pts(n);
+        for (size_t i = 0; i < n; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(n - 1);
+            const float x = r.left + t * (r.right - r.left);
+            const float norm = std::clamp((vals[i] - minVal) / range, 0.0f, 1.0f);
+            const float y = r.bottom - norm * (r.bottom - r.top);
+            pts[i] = D2D1::Point2F(x, y);
+        }
+
+        ComPtr<ID2D1PathGeometry> path;
+        if (FAILED(d2dFactory_->CreatePathGeometry(&path)) || !path) return;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(path->Open(&sink)) || !sink) return;
+
+        sink->BeginFigure(pts[0], filled ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW);
+        for (size_t i = 0; i + 1 < n; ++i) {
+            const D2D1_POINT_2F p0 = (i > 0) ? pts[i - 1] : pts[i];
+            const D2D1_POINT_2F p1 = pts[i];
+            const D2D1_POINT_2F p2 = pts[i + 1];
+            const D2D1_POINT_2F p3 = (i + 2 < n) ? pts[i + 2] : p2;
+            const D2D1_POINT_2F c1 = D2D1::Point2F(p1.x + (p2.x - p0.x) / 6.0f, p1.y + (p2.y - p0.y) / 6.0f);
+            const D2D1_POINT_2F c2 = D2D1::Point2F(p2.x - (p3.x - p1.x) / 6.0f, p2.y - (p3.y - p1.y) / 6.0f);
+            sink->AddBezier(D2D1::BezierSegment(c1, c2, p2));
+        }
+
+        if (filled) {
+            sink->AddLine(D2D1::Point2F(r.right, r.bottom));
+            sink->AddLine(D2D1::Point2F(r.left, r.bottom));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+
+            D2D1_GRADIENT_STOP stops[2] = {
+                {0.0f, fillColTop},
+                {1.0f, fillColBottom}
+            };
+            ComPtr<ID2D1GradientStopCollection> stopColl;
+            ComPtr<ID2D1LinearGradientBrush> gradBrush;
+            if (SUCCEEDED(target_->CreateGradientStopCollection(stops, 2, &stopColl)) &&
+                SUCCEEDED(target_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, r.top), D2D1::Point2F(0, r.bottom)),
+                    stopColl.Get(), &gradBrush))) {
+                target_->FillGeometry(path.Get(), gradBrush.Get());
+            }
+
+            // Stroke on top
+            ComPtr<ID2D1PathGeometry> linePath;
+            if (SUCCEEDED(d2dFactory_->CreatePathGeometry(&linePath)) && linePath) {
+                ComPtr<ID2D1GeometrySink> lineSink;
+                if (SUCCEEDED(linePath->Open(&lineSink)) && lineSink) {
+                    lineSink->BeginFigure(pts[0], D2D1_FIGURE_BEGIN_HOLLOW);
+                    for (size_t i = 0; i + 1 < n; ++i) {
+                        const D2D1_POINT_2F p0 = (i > 0) ? pts[i - 1] : pts[i];
+                        const D2D1_POINT_2F p1 = pts[i];
+                        const D2D1_POINT_2F p2 = pts[i + 1];
+                        const D2D1_POINT_2F p3 = (i + 2 < n) ? pts[i + 2] : p2;
+                        const D2D1_POINT_2F c1 = D2D1::Point2F(p1.x + (p2.x - p0.x) / 6.0f, p1.y + (p2.y - p0.y) / 6.0f);
+                        const D2D1_POINT_2F c2 = D2D1::Point2F(p2.x - (p3.x - p1.x) / 6.0f, p2.y - (p3.y - p1.y) / 6.0f);
+                        lineSink->AddBezier(D2D1::BezierSegment(c1, c2, p2));
+                    }
+                    lineSink->EndFigure(D2D1_FIGURE_END_OPEN);
+                    lineSink->Close();
+                    if (ID2D1SolidColorBrush* sb = AcquireBrush(strokeCol))
+                        target_->DrawGeometry(linePath.Get(), sb, strokeW);
+                }
+            }
+        } else {
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            sink->Close();
+            if (ID2D1SolidColorBrush* sb = AcquireBrush(strokeCol))
+                target_->DrawGeometry(path.Get(), sb, strokeW);
+        }
+    }
+
+    // ── Bunbun: Studio System Page Redo (Vayli 2x2 layout) ──
+    void DrawStudioSystemPage(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
+        EnsureRoundStroke();
+        studioOrigin_ = publishedOrigin_;
+        const float w = rect.right - rect.left;
+        const float h = rect.bottom - rect.top;
+        const float gap = 10.0f;
+        const float colW = (w - gap) * 0.5f;
+        const float rowH = (h - gap) * 0.5f;
+
+        const D2D1_RECT_F r1 = D2D1::RectF(rect.left, rect.top, rect.left + colW, rect.top + rowH);
+        const D2D1_RECT_F r2 = D2D1::RectF(rect.left + colW + gap, rect.top, rect.right, rect.top + rowH);
+        const D2D1_RECT_F r3 = D2D1::RectF(rect.left, rect.top + rowH + gap, rect.left + colW, rect.bottom);
+        const D2D1_RECT_F r4 = D2D1::RectF(rect.left + colW + gap, rect.top + rowH + gap, rect.right, rect.bottom);
+
+        const D2D1_COLOR_F cardBg = SCol(0x18181a);
+        const D2D1_COLOR_F white = SCol(0xffffff);
+        const D2D1_COLOR_F grey = SCol(0x8e8e93);
+        const D2D1_COLOR_F labelCol = SCol(0xa0a0a0);
+        const D2D1_COLOR_F green = SCol(0x30d158);
+        const D2D1_COLOR_F accent = SAccent();
+
+        // ── Card 1: Battery ──
+        SFillRound(r1, 12.0f, cardBg);
+        {
+            // Battery icon
+            D2D1_RECT_F bp = D2D1::RectF(r1.left + 16.0f, r1.top + 10.0f, r1.left + 29.0f, r1.top + 19.0f);
+            if (ID2D1SolidColorBrush* br = AcquireBrush(labelCol)) {
+                target_->DrawRoundedRectangle(D2D1::RoundedRect(bp, 2.0f, 2.0f), br, 1.2f);
+                D2D1_RECT_F tip = D2D1::RectF(bp.right + 0.5f, bp.top + 2.5f, bp.right + 2.0f, bp.bottom - 2.5f);
+                target_->FillRoundedRectangle(D2D1::RoundedRect(tip, 0.8f, 0.8f), br);
+            }
+            SText(L"Battery", D2D1::RectF(r1.left + 34.0f, r1.top + 8.0f, r1.left + 120.0f, r1.top + 22.0f), SFLabel, labelCol);
+
+            // Health
+            if (state.connectivity.hasBattery) {
+                const int health = state.connectivity.designMwh > 0
+                    ? std::clamp(state.connectivity.fullMwh * 100 / state.connectivity.designMwh, 0, 100)
+                    : 100;
+                SText(L"Health " + std::to_wstring(health) + L"%", D2D1::RectF(r1.right - 90.0f, r1.top + 8.0f, r1.right - 16.0f, r1.top + 22.0f), SFSmall, grey, 2);
+            } else {
+                SText(L"AC Power", D2D1::RectF(r1.right - 90.0f, r1.top + 8.0f, r1.right - 16.0f, r1.top + 22.0f), SFSmall, grey, 2);
+            }
+
+            // Big percent
+            const int batt = state.connectivity.hasBattery ? state.connectivity.batteryPercent : 100;
+            const std::wstring bStr = std::to_wstring(batt) + L"%";
+            SText(bStr, D2D1::RectF(r1.left + 16.0f, r1.top + 26.0f, r1.left + 90.0f, r1.top + 56.0f), SFBig, white);
+
+            // Subtitle
+            const float bW = SMeasure(bStr, SFBig);
+            std::wstring sub;
+            if (!state.connectivity.hasBattery) sub = L"Plugged in";
+            else if (batt == 100 && state.connectivity.onPower) sub = L"Fully charged";
+            else if (state.connectivity.charging) sub = L"Charging";
+            else if (state.connectivity.batterySecondsLeft != BATTERY_LIFE_UNKNOWN) {
+                const int hSec = static_cast<int>(state.connectivity.batterySecondsLeft);
+                sub = std::to_wstring(hSec / 3600) + L"h " + std::to_wstring((hSec % 3600) / 60) + L"m remaining";
+            } else sub = L"On battery";
+            SText(sub, D2D1::RectF(r1.left + 16.0f + bW + 8.0f, r1.top + 34.0f, r1.right - 16.0f, r1.top + 52.0f), SFLabel, grey);
+
+            // Progress Bar
+            const float barL = r1.left + 16.0f, barR = r1.right - 16.0f;
+            SFillRound(D2D1::RectF(barL, r1.top + 64.0f, barR, r1.top + 71.0f), 3.5f, SCol(0x28282a));
+            const float f = std::clamp(batt / 100.0f, 0.0f, 1.0f);
+            const D2D1_COLOR_F barCol = state.connectivity.charging ? green : accent;
+            SFillRound(D2D1::RectF(barL, r1.top + 64.0f, barL + (barR - barL) * f, r1.top + 71.0f), 3.5f, barCol);
+        }
+
+        // ── Card 2: Network ──
+        SFillRound(r2, 12.0f, cardBg);
+        {
+            // Wi-Fi glyph
+            const D2D1_POINT_2F wc = D2D1::Point2F(r2.left + 22.0f, r2.top + 17.0f);
+            SArc(wc, 2.5f, -2.4f, -0.74f, accent, 1.2f);
+            SArc(wc, 5.5f, -2.4f, -0.74f, accent, 1.2f);
+            SArc(wc, 8.5f, -2.4f, -0.74f, accent, 1.2f);
+            SText(L"Network", D2D1::RectF(r2.left + 34.0f, r2.top + 8.0f, r2.left + 120.0f, r2.top + 22.0f), SFLabel, labelCol);
+
+            // Bunbun: Wi-Fi and Bluetooth switches (the Wi-Fi & Bluetooth page is part of
+            // System in Studio). A click turns the radio on or off; with no usable
+            // radio (none fitted, or its driver failed) the chip is dimmed and opens
+            // the Windows settings page instead.
+            {
+                float chipR = r2.right - 12.0f;
+                auto chip = [&](const wchar_t* label, int radio, int arg) {
+                    const bool on = radio == 1, missing = radio < 0;
+                    const float w = SMeasure(label, SFSmall) + 20.0f;
+                    const D2D1_RECT_F c = D2D1::RectF(chipR - w, r2.top + 6.0f, chipR, r2.top + 24.0f);
+                    const float hover = SHover(StudioAction::RadioToggle, arg);
+                    SFillRound(c, 9.0f, on ? WithAlpha(accent, SLerp(0.85f, 1.0f, hover)) : SLerpCol(SCol(0x2c2c2e), SCol(0x3a3a3c), hover));
+                    if (ID2D1SolidColorBrush* b = AcquireBrush(on ? white : grey))
+                        target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.left + 8.0f, (c.top + c.bottom) * 0.5f), 2.5f, 2.5f), b);
+                    SText(label, D2D1::RectF(c.left + 13.0f, c.top, c.right - 4.0f, c.bottom), SFSmall,
+                          on ? white : missing ? SCol(0x5a5a5e) : grey, 1);
+                    if (missing) SHit(c, StudioAction::RadioSettings, arg);
+                    else SHit(c, StudioAction::RadioToggle, arg);
+                    chipR = c.left - 5.0f;
+                };
+                chip(L"Bluetooth", state.connectivity.bluetoothRadio, 1);
+                chip(L"Wi-Fi", state.connectivity.wifiRadio, 0);
+            }
+
+            // Connection Name (a click opens Windows' Wi-Fi or Ethernet settings, to pick a network)
+            std::wstring netName = state.connectivity.wifiName;
+            if (netName.empty()) netName = state.connectivity.ethernetConnected ? L"Ethernet"
+                                         : state.connectivity.wifiRadio == 0 ? L"Wi-Fi is off" : L"Not Connected";
+            SText(netName, D2D1::RectF(r2.left + 16.0f, r2.top + 23.0f, r2.right - 16.0f, r2.top + 45.0f), SFTitle, white);
+            SHit(D2D1::RectF(r2.left + 12.0f, r2.top + 23.0f, std::min(r2.right - 12.0f, r2.left + 20.0f + SMeasure(netName, SFTitle)), r2.top + 45.0f),
+                 StudioAction::RadioSettings, state.connectivity.ethernetConnected && !state.connectivity.wifiConnected ? 2 : 0);
+
+            // Sub-label
+            std::wstring netSub;
+            if (state.connectivity.wifiConnected) {
+                netSub = state.connectivity.wifiSignal > 0
+                    ? (L"Wi-Fi \x00B7 " + std::to_wstring(state.connectivity.wifiSignal) + L"% signal")
+                    : L"Wi-Fi \x00B7 Connected";
+            } else if (state.connectivity.ethernetConnected) {
+                netSub = L"Ethernet \x00B7 Connected";  // Bunbun: no made-up link speed
+            } else {
+                netSub = L"Disconnected";
+            }
+            SText(netSub, D2D1::RectF(r2.left + 16.0f, r2.top + 45.0f, r2.right - 16.0f, r2.top + 59.0f), SFSmall, grey);
+
+            // Down speed & sparkline
+            wchar_t downBuf[32];
+            FormatBitRate(downBuf, state.system.netDownMbps, true);
+            const std::wstring downText = L"\x2193 " + std::wstring(downBuf);
+            const float dW = SMeasure(downText, SFSmall);
+            SText(downText, D2D1::RectF(r2.left + 16.0f, r2.top + 63.0f, r2.left + 16.0f + dW + 4.0f, r2.top + 77.0f), SFSmall, white);
+            netDownWave_.Push(state.system.netDownMbps, now);
+            const D2D1_RECT_F rDown = D2D1::RectF(r2.left + 16.0f + dW + 6.0f, r2.top + 64.0f, r2.left + 16.0f + dW + 48.0f, r2.top + 76.0f);
+            float maxDown = 1.0f;
+            for (size_t k = 0; k < netDownWave_.count; ++k) maxDown = std::max(maxDown, netDownWave_.buf[k]);
+            if (netDownWave_.count < 4) {
+                float sInit[6] = {};  // Bunbun: flat until there are real samples
+                DrawSmoothWave(rDown, sInit, 6, 0.0f, 1.0f, accent, 1.2f);
+            } else {
+                DrawSmoothWave(rDown, netDownWave_.buf, netDownWave_.count, 0.0f, maxDown, accent, 1.2f);
+            }
+
+            // Up speed & sparkline
+            wchar_t upBuf[32];
+            FormatBitRate(upBuf, state.system.netUpMbps, true);
+            const std::wstring upText = L"\x2191 " + std::wstring(upBuf);
+            const float uW = SMeasure(upText, SFSmall);
+            const float upStart = r2.left + colW * 0.54f;
+            SText(upText, D2D1::RectF(upStart, r2.top + 63.0f, upStart + uW + 4.0f, r2.top + 77.0f), SFSmall, white);
+            netUpWave_.Push(state.system.netUpMbps, now);
+            const D2D1_RECT_F rUp = D2D1::RectF(upStart + uW + 6.0f, r2.top + 64.0f, r2.right - 14.0f, r2.top + 76.0f);
+            float maxUp = 1.0f;
+            for (size_t k = 0; k < netUpWave_.count; ++k) maxUp = std::max(maxUp, netUpWave_.buf[k]);
+            if (netUpWave_.count < 4) {
+                float sInit[6] = {};  // Bunbun: flat until there are real samples
+                DrawSmoothWave(rUp, sInit, 6, 0.0f, 1.0f, accent, 1.2f);
+            } else {
+                DrawSmoothWave(rUp, netUpWave_.buf, netUpWave_.count, 0.0f, maxUp, accent, 1.2f);
+            }
+        }
+
+        // ── Card 3: Performance (CPU, GPU, RAM, Disk) ──
+        // Bunbun: real samples only. Each wave starts flat at the current value (no
+        // made-up history), and GPU has a column only when Windows reports its load.
+        SFillRound(r3, 12.0f, cardBg);
+        {
+            SIcon(StudioPage::Hardware, D2D1::Point2F(r3.left + 22.0f, r3.top + 14.0f), 13.0f, accent);
+            SText(L"Performance", D2D1::RectF(r3.left + 34.0f, r3.top + 8.0f, r3.left + 140.0f, r3.top + 22.0f), SFLabel, labelCol);
+
+            const int gpu = state.system.gpuPercent;
+            const int diskUsed = 100 - state.system.diskFreePercent;
+            cpuWave_.Push(static_cast<float>(state.system.cpuPercent), now);
+            ramWave_.Push(static_cast<float>(state.system.memoryPercent), now);
+            diskWave_.Push(static_cast<float>(diskUsed), now);
+            if (gpu >= 0) gpuWave_.Push(static_cast<float>(gpu), now);
+            struct PerfCol { const wchar_t* label; int value; StudioWaveHistory* wave; bool filled; };
+            PerfCol cols[4] = {{L"CPU", state.system.cpuPercent, &cpuWave_, false}};
+            int n = 1;
+            if (gpu >= 0) cols[n++] = {L"GPU", gpu, &gpuWave_, false};
+            cols[n++] = {L"RAM", state.system.memoryPercent, &ramWave_, true};
+            cols[n++] = {L"Disk", diskUsed, &diskWave_, false};
+            const float pColW = (r3.right - r3.left - 32.0f) / static_cast<float>(n);
+            for (int k = 0; k < n; ++k) {
+                const float x = r3.left + 16.0f + pColW * k;
+                SText(std::to_wstring(cols[k].value) + L"%", D2D1::RectF(x, r3.top + 25.0f, x + pColW, r3.top + 45.0f), SFTitle, white);
+                SText(cols[k].label, D2D1::RectF(x, r3.top + 45.0f, x + pColW, r3.top + 57.0f), SFSmall, grey);
+                const D2D1_RECT_F wr = D2D1::RectF(x, r3.top + (cols[k].filled ? 60.0f : 64.0f), x + pColW - 4.0f, r3.top + 76.0f);
+                const StudioWaveHistory& w = *cols[k].wave;
+                float flat[2] = {w.count ? w.buf[0] : 0.0f, w.count ? w.buf[0] : 0.0f};
+                const float* vals = w.count >= 2 ? w.buf : flat;
+                const size_t cnt = w.count >= 2 ? w.count : 2;
+                if (cols[k].filled)
+                    DrawSmoothWave(wr, vals, cnt, 0.0f, 100.0f, accent, 1.3f, true, WithAlpha(accent, 0.25f), WithAlpha(accent, 0.0f));
+                else
+                    DrawSmoothWave(wr, vals, cnt, 0.0f, 100.0f, accent, 1.3f);
+            }
+        }
+
+        // ── Card 4: Volume & Bluetooth ──
+        SFillRound(r4, 12.0f, cardBg);
+        {
+            const int vol = (g_studioVolumeDrag && g_studioVolumeLevelPending >= 0.0f)
+                ? static_cast<int>(std::round(g_studioVolumeLevelPending * 100.0f))
+                : state.system.volumePercent;
+
+            SSpeaker(D2D1::Point2F(r4.left + 22.0f, r4.top + 14.0f), 13.0f, vol, state.system.volumeMuted, accent);
+            SText(L"Volume", D2D1::RectF(r4.left + 34.0f, r4.top + 8.0f, r4.left + 90.0f, r4.top + 22.0f), SFLabel, labelCol);
+
+            // Right header: Connected Bluetooth device name & its battery!
+            if (!state.connectivity.connectedBtName.empty()) {
+                std::wstring btStr = L"\U0001F3A7 " + state.connectivity.connectedBtName; // 🎧
+                if (state.connectivity.connectedBtBattery >= 0) {
+                    btStr += L" \x00B7 \U0001F50B " + std::to_wstring(state.connectivity.connectedBtBattery) + L"%"; // 🔋 %
+                }
+                SText(btStr, D2D1::RectF(r4.left + 50.0f, r4.top + 8.0f, r4.right - 14.0f, r4.top + 22.0f), SFSmall, green, 2);
+                const float bw = std::min(r4.right - r4.left - 64.0f, SMeasure(btStr, SFSmall) + 8.0f);
+                SHit(D2D1::RectF(r4.right - 14.0f - bw, r4.top + 6.0f, r4.right - 10.0f, r4.top + 24.0f), StudioAction::RadioSettings, 1);
+            } else if (!state.system.audioDeviceName.empty()) {  // Bunbun: only the real device name, never a made-up one
+                SText(state.system.audioDeviceName, D2D1::RectF(r4.left + 50.0f, r4.top + 8.0f, r4.right - 14.0f, r4.top + 22.0f), SFSmall, grey, 2);
+            }
+
+            // Big Volume %
+            SText(std::to_wstring(vol) + L"%", D2D1::RectF(r4.left + 16.0f, r4.top + 26.0f, r4.left + 100.0f, r4.top + 56.0f), SFBig, white);
+
+            // Circular Mute Button
+            const D2D1_RECT_F muteRect = D2D1::RectF(r4.right - 44.0f, r4.top + 26.0f, r4.right - 16.0f, r4.top + 54.0f);
+            SFillRound(muteRect, 14.0f, SCol(state.system.volumeMuted ? 0x501b1b : 0x242426));
+            SSpeaker(D2D1::Point2F(r4.right - 30.0f, r4.top + 40.0f), 13.0f, vol, state.system.volumeMuted, white);
+            SHit(muteRect, StudioAction::Volume, -1);
+
+            // Volume Slider
+            const float slL = r4.left + 16.0f, slR = r4.right - 16.0f;
+            SFillRound(D2D1::RectF(slL, r4.top + 66.0f, slR, r4.top + 70.0f), 2.0f, SCol(0x28282a));
+            const float kx = slL + (slR - slL) * std::clamp(vol / 100.0f, 0.0f, 1.0f);
+            SFillRound(D2D1::RectF(slL, r4.top + 66.0f, kx, r4.top + 70.0f), 2.0f, accent);
+            if (ID2D1SolidColorBrush* kb = AcquireBrush(white)) {
+                target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(kx, r4.top + 68.0f), 5.5f, 5.5f), kb);
+            }
+            SHit(D2D1::RectF(slL, r4.top + 58.0f, slR, r4.top + 78.0f), StudioAction::Volume, 0);
+        }
+    }
+
+    // ── Bunbun: Studio Weather Page Redo (Vayli 3-card layout) ──
+    void DrawStudioWeatherPage(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
+        EnsureRoundStroke();
+        studioOrigin_ = publishedOrigin_;
+        const float w = rect.right - rect.left;
+        const float h = rect.bottom - rect.top;
+        const float gap = 6.0f;
+        const float w1 = 138.0f;
+        const float w3 = 140.0f;
+        const float w2 = w - w1 - w3 - gap * 2.0f; // 182px
+
+        const D2D1_RECT_F rc1 = D2D1::RectF(rect.left, rect.top, rect.left + w1, rect.bottom);
+        const D2D1_RECT_F rc2 = D2D1::RectF(rect.left + w1 + gap, rect.top, rect.left + w1 + gap + w2, rect.bottom);
+        const D2D1_RECT_F rc3 = D2D1::RectF(rc2.right + gap, rect.top, rect.right, rect.bottom);
+
+        const D2D1_COLOR_F cardBg = SCol(0x18181a);
+        const D2D1_COLOR_F white = SCol(0xffffff);
+        const D2D1_COLOR_F grey = SCol(0x8e8e93);
+
+        const D2D1_COLOR_F accent = SAccent();
+
+        // ── Card 1: Current Weather ──
+        SFillRound(rc1, 12.0f, cardBg);
+        {
+            // Big weather icon (dynamic accent)
+            ComPtr<ID2D1SolidColorBrush> icStrong, icSoft;
+            target_->CreateSolidColorBrush(accent, &icStrong);
+            target_->CreateSolidColorBrush(WithAlpha(accent, 0.45f), &icSoft);
+            if (icStrong && icSoft) {
+                DrawWeatherIcon(D2D1::Point2F(rc1.left + 36.0f, rc1.top + 34.0f), 38.0f,
+                                WeatherVisualFromCode(state.weather.weatherCode), icStrong.Get(), icSoft.Get());
+            }
+
+            // Big temperature
+            wchar_t tBuf[16];
+            swprintf(tBuf, 16, L"%.0f\x00B0", state.weather.temperature);
+            SText(tBuf, D2D1::RectF(rc1.left + 14.0f, rc1.top + 54.0f, rc1.right - 14.0f, rc1.top + 88.0f), SFHero, white);
+
+            // Condition text
+            // Bunbun: only what the service sent; nothing made up when a value is missing.
+            const std::wstring desc = state.weather.weatherDesc;
+            SText(desc, D2D1::RectF(rc1.left + 14.0f, rc1.top + 90.0f, rc1.right - 14.0f, rc1.top + 106.0f), SFBody, white);
+
+            // H / L / Feels like
+            wchar_t hlBuf[64];
+            if (state.weather.feelsLike.empty())
+                swprintf(hlBuf, 64, L"H %.0f\x00B0 L %.0f\x00B0", state.weather.todayHigh, state.weather.todayLow);
+            else
+                swprintf(hlBuf, 64, L"H %.0f\x00B0 L %.0f\x00B0 \x00B7 Feels like %s\x00B0", state.weather.todayHigh, state.weather.todayLow,
+                         state.weather.feelsLike.c_str());
+            SText(hlBuf, D2D1::RectF(rc1.left + 10.0f, rc1.top + 108.0f, rc1.right - 8.0f, rc1.top + 124.0f), SFSmall, grey);
+
+            // Divider
+            SLine(D2D1::Point2F(rc1.left + 14.0f, rc1.top + 132.0f), D2D1::Point2F(rc1.right - 14.0f, rc1.top + 132.0f), SCol(0x28282a), 1.0f);
+
+            // Sunrise / Sunset
+            wchar_t sunBuf[64] = L"";
+            if (!state.weather.sunrise.empty() && !state.weather.sunset.empty())
+                swprintf(sunBuf, 64, L"Sunrise %s \x00B7 Sunset %s", state.weather.sunrise.c_str(), state.weather.sunset.c_str());
+            SText(sunBuf, D2D1::RectF(rc1.left + 10.0f, rc1.top + 140.0f, rc1.right - 8.0f, rc1.top + 154.0f), SFSmall, grey);
+
+            // Updated time
+            const int mins = static_cast<int>(std::max(0.0, now - state.weather.lastUpdated) / 60.0);
+            const std::wstring updStr = mins <= 1 ? L"Updated just now" : (L"Updated " + std::to_wstring(mins) + L"m ago");
+            SText(updStr, D2D1::RectF(rc1.left + 14.0f, rc1.top + 156.0f, rc1.right - 14.0f, rc1.top + 170.0f), SFSmall, SCol(0x636366));
+        }
+
+        // ── Card 2: Hourly Forecast & Stats ──
+        SFillRound(rc2, 12.0f, cardBg);
+        {
+            SText(L"Hourly", D2D1::RectF(rc2.left + 14.0f, rc2.top + 8.0f, rc2.left + 80.0f, rc2.top + 22.0f), SFSmall, grey);
+
+            const size_t hours = std::min<size_t>(6, state.weather.hourly.size());
+            const float hStep = (w2 - 24.0f) / static_cast<float>(std::max<size_t>(1, hours - (hours > 1 ? 1 : 0)));
+            std::vector<D2D1_POINT_2F> curvePts(hours);
+
+            float tMin = 1e6f, tMax = -1e6f;
+            for (size_t i = 0; i < hours; ++i) {
+                const float t = state.weather.hourly[i].temp;
+                tMin = std::min(tMin, t);
+                tMax = std::max(tMax, t);
+            }
+            if (tMax <= tMin) tMax = tMin + 2.0f;
+
+            ComPtr<ID2D1SolidColorBrush> icStrong, icSoft;
+            target_->CreateSolidColorBrush(white, &icStrong);
+            target_->CreateSolidColorBrush(WithAlpha(white, 0.45f), &icSoft);
+
+            for (size_t i = 0; i < hours; ++i) {
+                const float cx = rc2.left + 12.0f + static_cast<float>(i) * hStep;
+                const std::wstring lbl = state.weather.hourly[i].timeLabel;
+                SText(lbl, D2D1::RectF(cx - 16.0f, rc2.top + 22.0f, cx + 16.0f, rc2.top + 34.0f), SFSmall, grey, 1);
+
+                if (icStrong && icSoft) {
+                    const int code = state.weather.hourly[i].weatherCode;
+                    DrawWeatherIcon(D2D1::Point2F(cx, rc2.top + 43.0f), 12.0f, WeatherVisualFromCode(code), icStrong.Get(), icSoft.Get());
+                }
+
+                const float tVal = state.weather.hourly[i].temp;
+                wchar_t tStr[16];
+                swprintf(tStr, 16, L"%.0f\x00B0", tVal);
+                SText(tStr, D2D1::RectF(cx - 16.0f, rc2.top + 52.0f, cx + 16.0f, rc2.top + 64.0f), SFSmall, white, 1);
+
+                const float py = (rc2.top + 104.0f) - ((tVal - tMin) / (tMax - tMin)) * 26.0f;
+                curvePts[i] = D2D1::Point2F(cx, py);
+            }
+
+            // Smooth Catmull-Rom Bézier spline with gradient fill
+            ComPtr<ID2D1PathGeometry> curvePath;
+            if (hours >= 2 && SUCCEEDED(d2dFactory_->CreatePathGeometry(&curvePath)) && curvePath) {
+                ComPtr<ID2D1GeometrySink> sink;
+                if (SUCCEEDED(curvePath->Open(&sink)) && sink) {
+                    sink->BeginFigure(curvePts[0], D2D1_FIGURE_BEGIN_FILLED);
+                    for (size_t i = 0; i + 1 < hours; ++i) {
+                        const D2D1_POINT_2F p0 = (i > 0) ? curvePts[i - 1] : curvePts[i];
+                        const D2D1_POINT_2F p1 = curvePts[i];
+                        const D2D1_POINT_2F p2 = curvePts[i + 1];
+                        const D2D1_POINT_2F p3 = (i + 2 < hours) ? curvePts[i + 2] : p2;
+                        const D2D1_POINT_2F c1 = D2D1::Point2F(p1.x + (p2.x - p0.x) / 6.0f, p1.y + (p2.y - p0.y) / 6.0f);
+                        const D2D1_POINT_2F c2 = D2D1::Point2F(p2.x - (p3.x - p1.x) / 6.0f, p2.y - (p3.y - p1.y) / 6.0f);
+                        sink->AddBezier(D2D1::BezierSegment(c1, c2, p2));
+                    }
+                    sink->AddLine(D2D1::Point2F(curvePts[hours - 1].x, rc2.top + 116.0f));
+                    sink->AddLine(D2D1::Point2F(curvePts[0].x, rc2.top + 116.0f));
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+
+                    D2D1_GRADIENT_STOP stops[2] = {
+                        {0.0f, WithAlpha(accent, 0.25f)},
+                        {1.0f, WithAlpha(accent, 0.0f)}
+                    };
+                    ComPtr<ID2D1GradientStopCollection> stopColl;
+                    ComPtr<ID2D1LinearGradientBrush> gradBrush;
+                    if (SUCCEEDED(target_->CreateGradientStopCollection(stops, 2, &stopColl)) &&
+                        SUCCEEDED(target_->CreateLinearGradientBrush(
+                            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, rc2.top + 76.0f), D2D1::Point2F(0, rc2.top + 116.0f)),
+                            stopColl.Get(), &gradBrush))) {
+                        target_->FillGeometry(curvePath.Get(), gradBrush.Get());
+                    }
+                }
+            }
+
+            // Stroke line on top
+            ComPtr<ID2D1PathGeometry> linePath;
+            if (hours >= 2 && SUCCEEDED(d2dFactory_->CreatePathGeometry(&linePath)) && linePath) {
+                ComPtr<ID2D1GeometrySink> sink;
+                if (SUCCEEDED(linePath->Open(&sink)) && sink) {
+                    sink->BeginFigure(curvePts[0], D2D1_FIGURE_BEGIN_HOLLOW);
+                    for (size_t i = 0; i + 1 < hours; ++i) {
+                        const D2D1_POINT_2F p0 = (i > 0) ? curvePts[i - 1] : curvePts[i];
+                        const D2D1_POINT_2F p1 = curvePts[i];
+                        const D2D1_POINT_2F p2 = curvePts[i + 1];
+                        const D2D1_POINT_2F p3 = (i + 2 < hours) ? curvePts[i + 2] : p2;
+                        const D2D1_POINT_2F c1 = D2D1::Point2F(p1.x + (p2.x - p0.x) / 6.0f, p1.y + (p2.y - p0.y) / 6.0f);
+                        const D2D1_POINT_2F c2 = D2D1::Point2F(p2.x - (p3.x - p1.x) / 6.0f, p2.y - (p3.y - p1.y) / 6.0f);
+                        sink->AddBezier(D2D1::BezierSegment(c1, c2, p2));
+                    }
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                    sink->Close();
+                    if (ID2D1SolidColorBrush* sb = AcquireBrush(accent))
+                        target_->DrawGeometry(linePath.Get(), sb, 1.4f);
+                }
+            }
+
+            // Circular white dots at the 6 points
+            if (ID2D1SolidColorBrush* dotBrush = AcquireBrush(white)) {
+                for (size_t i = 0; i < hours; ++i) {
+                    target_->FillEllipse(D2D1::Ellipse(curvePts[i], 2.5f, 2.5f), dotBrush);
+                }
+            }
+
+            // Bottom 3 Stats (Humidity, Wind, UV Index)
+            const float sColW = (w2 - 16.0f) / 3.0f;
+            const float sy = rc2.top + 136.0f;
+
+            // Stat 1: Humidity
+            SText(L"\U0001F4A7 Humidity", D2D1::RectF(rc2.left + 8.0f, sy, rc2.left + 8.0f + sColW + 6.0f, sy + 14.0f), SFSmall, grey);
+            SText(state.weather.humidity.empty() ? std::wstring(L"\x2014") : state.weather.humidity + L"%", D2D1::RectF(rc2.left + 8.0f, sy + 15.0f, rc2.left + 8.0f + sColW, sy + 32.0f), SFLabel, white);
+
+            // Stat 2: Wind
+            SText(L"\U0001F4A8 Wind", D2D1::RectF(rc2.left + 8.0f + sColW, sy, rc2.left + 8.0f + sColW * 2, sy + 14.0f), SFSmall, grey);
+            const std::wstring windVal = state.weather.windSpeed.empty() ? std::wstring(L"\x2014")
+                                        : state.weather.windSpeed + (settings.weatherFahrenheit ? L" mph" : L" km/h");
+            SText(windVal, D2D1::RectF(rc2.left + 8.0f + sColW, sy + 15.0f, rc2.left + 8.0f + sColW * 2, sy + 32.0f), SFLabel, white);
+
+            // Stat 3: UV Index
+            SText(L"\x2600 UV index", D2D1::RectF(rc2.left + 8.0f + sColW * 2, sy, rc2.right - 4.0f, sy + 14.0f), SFSmall, grey);
+            const std::wstring uvVal = state.weather.uvDesc.empty() ? std::wstring(L"\x2014") : state.weather.uvDesc;
+            const StudioFontId uvFont = (uvVal.size() > 6) ? SFSmall : SFLabel;
+            SText(uvVal, D2D1::RectF(rc2.left + 8.0f + sColW * 2, sy + (uvFont == SFSmall ? 16.0f : 15.0f), rc2.right - 4.0f, sy + 32.0f), uvFont, white);
+        }
+
+        // ── Card 3: 5-Day Forecast ──
+        SFillRound(rc3, 12.0f, cardBg);
+        {
+            SText(L"5-Day", D2D1::RectF(rc3.left + 14.0f, rc3.top + 8.0f, rc3.left + 80.0f, rc3.top + 22.0f), SFSmall, grey);
+
+            const size_t days = std::min<size_t>(5, state.weather.daily.size());
+            float allMin = 1e6f, allMax = -1e6f;
+            for (size_t i = 0; i < days; ++i) {
+                allMin = std::min(allMin, state.weather.daily[i].minTemp);
+                allMax = std::max(allMax, state.weather.daily[i].maxTemp);
+            }
+            if (allMax <= allMin) allMax = allMin + 4.0f;
+
+            ComPtr<ID2D1SolidColorBrush> icStrong, icSoft;
+            target_->CreateSolidColorBrush(white, &icStrong);
+            target_->CreateSolidColorBrush(WithAlpha(white, 0.45f), &icSoft);
+
+            for (size_t i = 0; i < days; ++i) {
+                const float rowY = rc3.top + 28.0f + static_cast<float>(i) * 28.0f;
+
+                const std::wstring& dName = state.weather.daily[i].dayName;
+                const float dLo = state.weather.daily[i].minTemp;
+                const float dHi = state.weather.daily[i].maxTemp;
+                const int dCode = state.weather.daily[i].weatherCode;
+
+                // Day Name
+                SText(dName, D2D1::RectF(rc3.left + 12.0f, rowY, rc3.left + 46.0f, rowY + 24.0f), SFLabel, white);
+
+                // Weather glyph
+                if (icStrong && icSoft) {
+                    DrawWeatherIcon(D2D1::Point2F(rc3.left + 54.0f, rowY + 12.0f), 12.0f, WeatherVisualFromCode(dCode), icStrong.Get(), icSoft.Get());
+                }
+
+                // Min temp
+                wchar_t loBuf[16];
+                swprintf(loBuf, 16, L"%.0f\x00B0", dLo);
+                SText(loBuf, D2D1::RectF(rc3.left + 64.0f, rowY, rc3.left + 86.0f, rowY + 24.0f), SFSmall, grey, 2);
+
+                // Horizontal range bar
+                const float barL = rc3.left + 92.0f, barR = rc3.right - 34.0f;
+                const float barW = barR - barL;
+                SFillRound(D2D1::RectF(barL, rowY + 10.0f, barR, rowY + 14.0f), 2.0f, SCol(0x28282a));
+
+                const float f0 = std::clamp((dLo - allMin) / (allMax - allMin), 0.0f, 1.0f);
+                const float f1 = std::clamp((dHi - allMin) / (allMax - allMin), 0.0f, 1.0f);
+                const float rx0 = barL + barW * f0;
+                const float rx1 = barL + barW * f1;
+                SFillRound(D2D1::RectF(rx0, rowY + 10.0f, rx1, rowY + 14.0f), 2.0f, white);
+
+                // Today row has current temperature indicator dot
+                if (i == 0) {
+                    const float curF = std::clamp((state.weather.temperature - allMin) / (allMax - allMin), 0.0f, 1.0f);
+                    const float curX = barL + barW * curF;
+                    if (ID2D1SolidColorBrush* db = AcquireBrush(accent)) {
+                        target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(curX, rowY + 12.0f), 3.0f, 3.0f), db);
+                    }
+                }
+
+                // Max temp
+                wchar_t hiBuf[16];
+                swprintf(hiBuf, 16, L"%.0f\x00B0", dHi);
+                SText(hiBuf, D2D1::RectF(rc3.right - 30.0f, rowY, rc3.right - 10.0f, rowY + 24.0f), SFLabel, white, 2);
+            }
         }
     }
 

@@ -112,15 +112,16 @@ their data:
 | **Music** | While something plays (MPRIS): cover, title, artist, album, controls, a glow in the album's colour; click the progress bar to jump to that point |
 | **Lyrics** | Synced lyrics for the song that's playing, the current line in the middle (Features → Lyrics) |
 | **Calendar** | The month, today, and today's to-dos as an agenda. Calendar links (`.ics`) aren't read on Linux yet |
-| **Weather** | Open-Meteo, like Windows: now, today's high and low, the next hours. Your city from Settings, else roughly where you are from your IP address. Fetched with GIO, or `curl` where GIO can't do https |
-| **System** | CPU, memory and disk, network speed and uptime, from `/proc` and `/sys` |
-| **Quick toggles** | Wi-Fi (NetworkManager), Bluetooth (BlueZ) and Do not disturb (GNOME's notification banners) |
+| **Weather** | Open-Meteo, like Windows: now (feels like, humidity, wind, UV, sunrise and sunset), the next hours as a curve, and five days. °C / °F and Change City in the header. Your city from Settings, else roughly where you are from your IP address. Fetched with GIO, or `curl` where GIO can't do https |
+| **System** | Battery (health and time left), network with Wi-Fi and Bluetooth switches, CPU, memory, disk and GPU (AMD and Intel report it) with small waves, and volume with mute and a slider (`pactl`), from `/proc`, `/sys`, NetworkManager and BlueZ |
+| **Quick toggles** | Wi-Fi (NetworkManager), Bluetooth (BlueZ) and Do not disturb (GNOME's notification banners). Its own page in Classic; in Studio the switches are on the System page |
 | **To-do** | The same `todos.tsv` as the settings app; click to tick one off. Reminders show on the island when they're due |
 | **Agent** | What the agent is doing, its command, diff or recent tasks, the steps or your Claude Code limits, the model chip |
-| **Clipboard** | The last 8 texts you copied; click one to copy it again. On Wayland it may miss copies made while another app has the keyboard |
+| **Clipboard** | The last 40 texts and links you copied, in two panels: filter and pick on the left, the whole copy with Copy and Delete on the right. No images yet. On Wayland it may miss copies made while another app has the keyboard |
 | **Note** | `note.txt` next to `settings.ini`; click a `[ ]` line to tick it, **Edit** opens it in your text editor |
-| **Focus** | A focus timer with presets; the island tells you when time is up |
-| **Water** | Today's water against your goal, + glass, undo and the week. Reminders (Features → Water) come as a toast: click it to log the glass |
+| **Timers** | Like Windows: **Focus** (Pomodoro with short and long breaks, auto-start, length chips), **Timer** (click or scroll the dial, Shift for seconds, your own presets), **Stopwatch** with laps, and **Water** as a mode. The island tells you when a phase or a countdown ends |
+| **Screen Time** | How long each app has been in front today and over the week, with each app's own name and icon (from its `.desktop` entry and your icon theme), and an optional daily limit. **X11 only**: Wayland doesn't let an app see which window is in front, so on Wayland the page says so. Kept in `screentime.tsv` in the state folder |
+| **Water** | A mode of the Timers page: today's water against your goal, + glass, undo and the week. Reminders (Features → Water) come as a toast: click it to log the glass |
 | **All apps** | Every page and Settings in one grid |
 
 **Page order** (Settings → Island pages) orders these the same way as on Windows; the pages Linux

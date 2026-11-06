@@ -1,4 +1,4 @@
-import { BatteryMedium, Bell, CalendarDays, Droplet, Gamepad2, LayoutGrid, Mic, Music2, Quote, Search, SlidersHorizontal } from "lucide-react";
+import { BatteryMedium, Bell, CalendarDays, Droplet, Gamepad2, LayoutGrid, Mic, Music2, Quote, Search, SlidersHorizontal, Timer } from "lucide-react";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { neverOnLinux, notOnLinux, useIsLinux } from "../platform";
 import { useStore } from "../store";
@@ -18,13 +18,15 @@ export const GROUPS: Group[] = [
       "Bunbun.BatteryMoods", "Bunbun.ChargingReminderMinutes"] },
   { id: "notify", title: "Notifications", desc: "Your apps' notifications (also during Do Not Disturb, if you like), a peek at what you copy, and timers.", icon: <Bell size={18} />,
     keys: ["Modules.NotificationRespectDnD", "Modules.Clipboard", "Modules.TimerModule"] },
+  { id: "timers", title: "Timers", desc: "Pomodoro lengths, starting the next phase by itself, the countdown's presets, and Water as a mode.", icon: <Timer size={18} />,
+    keys: ["Bunbun.WaterPage", "Bunbun.PomodoroFocus", "Bunbun.PomodoroShortBreak", "Bunbun.PomodoroLongBreak", "Bunbun.PomodoroCycles", "Bunbun.PomodoroAutoStart", "Bunbun.TimerPresets"] },
   { id: "water", title: "Water", desc: "Reminders to drink, paced across your active hours, and the bottle to refill.", icon: <Droplet size={18} />, main: "Bunbun.WaterReminders",
     keys: ["Bunbun.WaterGoalMl", "Bunbun.WaterGlassMl", "Bunbun.WaterBottleMl", "Bunbun.WaterStartHour", "Bunbun.WaterEndHour"] },
   { id: "calendar", title: "Reminders & meetings", desc: "Reminder sounds, your calendar link with a Join button, and browser downloads.", icon: <CalendarDays size={18} />,
     keys: ["Modules.CalendarIcsUrl", "Modules.MeetingAlertMinutes", "Modules.ReminderSound", "Modules.QuietReminders", "Modules.Downloads"] },
-  { id: "pages", title: "Page options", desc: "Weather city and units, system numbers, the file shelf and the focus guard.", icon: <SlidersHorizontal size={18} />,
+  { id: "pages", title: "Page options", desc: "Weather city and units, system numbers, the file shelf, the focus guard and a daily screen time limit.", icon: <SlidersHorizontal size={18} />,
     keys: ["Modules.WeatherCity", "Modules.WeatherFahrenheit", "Modules.ShowMetricText", "Modules.FileTrayMaxItems", "Modules.FileTrayPersist",
-      "Bunbun.FocusGuard", "Bunbun.FocusGuardApps"] },
+      "Bunbun.FocusGuard", "Bunbun.FocusGuardApps", "Bunbun.ScreenTimeLimit"] },
   { id: "game", title: "Game overlay", desc: "A compact metrics strip for fullscreen play.", icon: <Gamepad2 size={18} />, main: "Modules.GameOverlay",
     keys: ["Modules.GameOverlayCompact", "Modules.GameOverlayShowFps", "Modules.GameOverlayShowCpu", "Modules.GameOverlayShowGpu", "Modules.GameOverlayShowRam", "Modules.GameOverlayShowDisk"] },
   { id: "privacy", title: "Privacy dots", desc: "Orange for the microphone, green for the camera, blue while the screen is recorded.", icon: <Mic size={18} />, main: "Indicators.PrivacyDots",

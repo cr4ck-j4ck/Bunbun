@@ -1,13 +1,13 @@
 import { Reorder, useDragControls } from "framer-motion";
-import { call } from "../bridge";
 import {
-  Battery, Bot, CalendarDays, ChevronDown, ChevronUp, Clipboard, CloudSun, Cpu, Droplet, FolderDown, GripVertical, Home, Camera,
+  Battery, Bot, CalendarDays, ChartColumnBig, ChevronDown, ChevronUp, Clipboard, CloudSun, Cpu, Droplet, FolderDown, GripVertical, Home, Camera,
   LayoutGrid, Link2, ListChecks, Music2, Plus, Quote, RefreshCw, Sparkles, StickyNote, Timer, ToggleRight, X,
 } from "lucide-react";
-import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
+import { call } from "../bridge";
 import { LINUX_CARD_STAND_IN, LINUX_PAGES, useIsLinux } from "../platform";
 import { schema, useStore } from "../store";
-import { PageHead, Section, TextField, Toggle } from "../ui/controls";
+import { PageHead, Section, Segmented, TextField, Toggle } from "../ui/controls";
 import { PageKey, PageThumb } from "../ui/PageThumb";
 
 // Pages in the island's default order (DashboardTabIds). `key` is what
@@ -15,8 +15,9 @@ import { PageKey, PageThumb } from "../ui/PageThumb";
 type PageInfo = { key: PageKey; name: string; desc: string; icon: ReactNode; setting?: string; when?: string };
 const PAGES: PageInfo[] = [
   { key: "calendar", name: "Calendar", desc: "The date, your next meeting and today's to-dos.", icon: <CalendarDays size={16} /> },
-  { key: "weather", name: "Weather", desc: "Now and the next few hours.", icon: <CloudSun size={16} />, setting: "Modules.Weather" },
-  { key: "system", name: "System", desc: "CPU, memory, GPU, disk and network.", icon: <Cpu size={16} />, setting: "Modules.HardwareMonitorModule" },
+  { key: "weather", name: "Weather", desc: "Now, the next hours and five days, with humidity, wind and UV. Switch °C / °F and the city from the page.", icon: <CloudSun size={16} />, setting: "Modules.Weather" },
+  { key: "system", name: "System", desc: "Battery, network, CPU, memory and GPU, volume and Bluetooth. In Studio it also holds the Wi-Fi & Bluetooth toggles.", icon: <Cpu size={16} />, setting: "Modules.HardwareMonitorModule" },
+  // Classic only: in Studio these toggles are part of the System page.
   { key: "toggles", name: "Wi-Fi & Bluetooth", desc: "Quick toggles and your battery.", icon: <ToggleRight size={16} />, setting: "Modules.ConnectivityModule" },
   { key: "tray", name: "File shelf", desc: "Drop files on the island, drag them out later.", icon: <FolderDown size={16} />, setting: "Modules.FileTrayModule" },
   { key: "todo", name: "To-dos", desc: "Your list and reminders.", icon: <ListChecks size={16} />, setting: "Modules.TodoModule" },
@@ -24,9 +25,11 @@ const PAGES: PageInfo[] = [
   { key: "agent", name: "Agent", desc: "What your coding agent is doing, its plan and usage.", icon: <Bot size={16} />, setting: "Bunbun.AgentTab", when: "With an agent connected" },
   { key: "clipboard", name: "Clipboard", desc: "Your last 8 copies; click one to copy it again.", icon: <Clipboard size={16} />, setting: "Bunbun.ClipboardHistory" },
   { key: "note", name: "Quick note", desc: "One note with checkboxes.", icon: <StickyNote size={16} />, setting: "Bunbun.QuickNote" },
-  { key: "focus", name: "Focus", desc: "A focus timer with presets.", icon: <Timer size={16} />, setting: "Bunbun.FocusPage" },
+  { key: "focus", name: "Timers", desc: "Pomodoro, a countdown you set on a ring, a stopwatch with laps, and Water.", icon: <Timer size={16} />, setting: "Bunbun.FocusPage" },
+  // Not listed (merged): Water is a mode of the Timers page. Kept so Bunbun.PageOrder still parses it.
   { key: "water", name: "Water", desc: "Today's water, a + glass button and the week. Reminders are in Features.", icon: <Droplet size={16} />, setting: "Bunbun.WaterPage" },
   { key: "mirror", name: "Mirror", desc: "A camera preview before a call.", icon: <Camera size={16} />, setting: "Bunbun.MirrorPage" },
+  { key: "screentime", name: "Screen Time", desc: "Today's screen time and the last week, by app, with each app's own name and icon. Kept on this PC only.", icon: <ChartColumnBig size={16} />, setting: "Bunbun.ScreenTime" },
   { key: "apps", name: "All apps", desc: "Every page, the colour picker and Settings in one grid.", icon: <LayoutGrid size={16} />, setting: "Bunbun.AppsPage" },
 ];
 const DEFAULT_ORDER = PAGES.map((p) => p.key);
@@ -37,70 +40,55 @@ function parseOrder(value: string): PageKey[] {
   return [...named, ...DEFAULT_ORDER.filter((k) => !named.includes(k))];
 }
 
-// Real snapshots of each page, taken by the island itself (getPagePreviews).
+// ── Pictures of the pages ───────────────────────────────────────────────────
+// Example pictures ship with the app (PICTURES below) and show by default. Nothing
+// is captured by itself: only "Take pictures of my island" asks the island to show
+// each page for a moment and snapshot it. After that, the user can switch between
+// the examples and their own pictures (remembered in this browser view only).
 type Shot = { src: string; at: number };
 const ShotsContext = createContext<Record<string, Shot>>({});
 const useShot = (key: string): Shot | undefined => useContext(ShotsContext)[key];
+const PREF = "bunbun.pagePictures";
 
-function useShots(signature: string) {
+function useOwnPictures() {
   const [shots, setShots] = useState<Record<string, Shot>>({});
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
-  const newest = useRef(0);
-  // Only pictures newer than the ones we have, so polling stays cheap.
-  const load = useCallback(() => call<Record<string, Shot> | boolean>("getPagePreviews", { since: newest.current })
-    .then((r) => {
-      if (!r || typeof r !== "object" || !Object.keys(r).length) return;
-      for (const shot of Object.values(r)) newest.current = Math.max(newest.current, shot.at);
-      setShots((old) => ({ ...old, ...r }));
-    }).catch(() => {}), []);
-  // The island also saves a page's picture whenever you look at it, so keep checking.
-  useEffect(() => {
-    load();
-    const t = window.setInterval(load, 3000);
-    return () => window.clearInterval(t);
-  }, [load]);
+  const [mine, setMineState] = useState(() => { try { return localStorage.getItem(PREF) === "mine"; } catch { return false; } });
+  const setMine = (v: boolean) => {
+    setMineState(v);
+    try { localStorage.setItem(PREF, v ? "mine" : "examples"); } catch { /* private view: not remembered */ }
+  };
+  // Reads the pictures already taken (files on this PC); it takes none.
+  const load = useCallback(() => call<Record<string, Shot> | boolean>("getPagePreviews", { since: 0 })
+    .then((r) => { if (r && typeof r === "object") setShots(r); }).catch(() => {}), []);
+  useEffect(() => { load(); }, [load]);
 
-  const capture = useCallback(async () => {
+  const take = useCallback(async () => {
     setBusy(true);
     setNote("");
     try {
       const r = await call<{ running: boolean; count: number }>("capturePages");
-      if (!r || typeof r !== "object" || !r.running) { setNote("Start the island to see pictures of its pages."); return; }
-      if (!r.count) return;  // already taking them
-      // The island shows each page for about 0.7 s; reload as the pictures come in.
-      const until = Date.now() + 1400 + r.count * 700;
-      while (Date.now() < until) {
-        await new Promise((res) => setTimeout(res, 900));
-        await load();
-      }
+      if (!r || typeof r !== "object" || !r.running) { setNote("Start the island first, then take the pictures."); return; }
+      // The island shows each page for about 0.7 s.
+      await new Promise((res) => setTimeout(res, 1400 + (r.count || 0) * 700));
       await load();
+      setMine(true);
     } finally {
       setBusy(false);
     }
   }, [load]);
 
-  // Fresh pictures by themselves: when the screen opens, and shortly after you
-  // change the pages, the order or the Home cards here.
-  const first = useRef(true);
-  useEffect(() => {
-    const t = window.setTimeout(capture, first.current ? 600 : 2200);
-    first.current = false;
-    return () => window.clearTimeout(t);
-  }, [signature, capture]);
-
-  return { shots, busy, note, capture };
+  const has = Object.keys(shots).length > 0;
+  return { shots: mine && has ? shots : {}, has, mine: mine && has, setMine, busy, note, take };
 }
 
 export function IslandPages() {
   const s = useStore();
   const studio = s.get("Bunbun.Layout") !== "classic";
-  // Settings that change what the pages look like; a change retakes the pictures.
-  const signature = ["Bunbun.Layout", "Bunbun.PageOrder", "Bunbun.HomeTile1", "Bunbun.HomeTile2", "Bunbun.HomeTile3", "Bunbun.HomeLinks",
-    ...PAGES.map((p) => p.setting ?? "")].map((k) => (k ? s.get(k) : "")).join("|");
-  const { shots, busy, note, capture } = useShots(signature);
+  const pics = useOwnPictures();
   return (
-    <ShotsContext.Provider value={shots}>
+    <ShotsContext.Provider value={pics.shots}>
     <div className="page">
       <PageHead title="Island pages" subtitle="Choose which pages your island has and drag them into the order you like. Scroll or click the tab bar on the island to move between them." />
 
@@ -118,12 +106,18 @@ export function IslandPages() {
       </Section>
 
       <div className="note shots-note">
-        <RefreshCw size={16} className={busy ? "spin" : ""} />
+        <RefreshCw size={16} className={pics.busy ? "spin" : ""} />
         <span>
-          {busy ? "Updating the pictures: the island shows each page for a moment…"
-            : note || "These are your real island's pages. They update by themselves when you change something here or look at a page on the island."}
+          {pics.busy ? "Taking pictures: the island shows each page for a moment\u2026"
+            : pics.note || (pics.mine ? "Pictures of your island." : "Example pictures of each page.")}
         </span>
-        <button className="btn small" disabled={busy} onClick={capture}>{busy ? "Updating…" : "Update now"}</button>
+        {pics.has && !pics.busy && (
+          <Segmented value={pics.mine ? "mine" : "examples"} onChange={(v) => pics.setMine(v === "mine")}
+            options={[{ value: "examples", label: "Examples" }, { value: "mine", label: "My island" }]} />
+        )}
+        <button className="btn small" disabled={pics.busy} onClick={pics.take}>
+          {pics.busy ? "Taking\u2026" : pics.has ? "Retake" : "Take pictures of my island"}
+        </button>
       </div>
 
       <HomeCards studio={studio} />
@@ -134,20 +128,20 @@ export function IslandPages() {
   );
 }
 
-// Pictures that ship with the app, for pages the island hasn't shown yet (the
-// Music and Lyrics pages only exist while a song plays, for example).
-const FALLBACK: Record<string, string> = Object.fromEntries(
+// Pictures of each page that ship with the app: assets/pages/<page key>.png
+// (home.png, music.png, screentime.png...), added by hand. A page without one
+// shows its sketch.
+const PICTURES: Record<string, string> = Object.fromEntries(
   Object.entries(import.meta.glob("../assets/pages/*.png", { eager: true, query: "?url", import: "default" }) as Record<string, string>)
     .map(([path, url]) => [path.replace(/^.*\/|\.png$/g, ""), url]),
 );
 
-/** The island's own picture of a page, else the bundled one, else the sketch. */
+/** The user's own picture (if they chose My island), else the bundled one, else the sketch. */
 function Thumb({ page, off }: { page: PageKey; off?: boolean }) {
-  const shot = useShot(page);
-  const src = shot?.src ?? FALLBACK[page];
+  const src = useShot(page)?.src ?? PICTURES[page];
   if (!src) return <PageThumb page={page} off={off} />;
   return (
-    <div className={`thumb real ${off ? "off" : ""} ${shot ? "" : "sample"}`} title={shot ? `Your island, ${new Date(shot.at).toLocaleString()}` : "Example picture"}>
+    <div className={`thumb real ${off ? "off" : ""}`}>
       <img src={src} alt="" />
     </div>
   );
@@ -157,27 +151,37 @@ function Thumb({ page, off }: { page: PageKey; off?: boolean }) {
 
 function PageList() {
   const s = useStore();
+  const studio = s.get("Bunbun.Layout") !== "classic";
+  // Pages merged into another one aren't listed: in Studio, Wi-Fi & Bluetooth is part
+  // of System; Water is a mode of Timers (its switch is in Productivity, Timers).
+  const merged = (k: PageKey) => (k === "toggles" && studio) || k === "water";
   const [order, setOrder] = useState<PageKey[]>(() => parseOrder(s.get("Bunbun.PageOrder")));
   useEffect(() => setOrder(parseOrder(s.get("Bunbun.PageOrder"))), [s.get("Bunbun.PageOrder")]);
+  const visible = order.filter((k) => !merged(k));
+  // The listed pages in their new order; the hidden ones keep going at the end.
+  const withHidden = (next: PageKey[]) => [...next, ...order.filter(merged)];
 
   const save = (next: PageKey[]) => {
-    setOrder(next);
-    s.set("Bunbun.PageOrder", next.join(",") === DEFAULT_ORDER.join(",") ? "" : next.join(","));
+    const full = withHidden(next.filter((k) => !merged(k)));
+    setOrder(full);
+    const isDefault = next.filter((k) => !merged(k)).join(",") === DEFAULT_ORDER.filter((k) => !merged(k)).join(",");
+    s.set("Bunbun.PageOrder", isDefault ? "" : full.join(","));
   };
   const move = (key: PageKey, by: number) => {
-    const i = order.indexOf(key), j = i + by;
-    if (j < 0 || j >= order.length) return;
-    const next = [...order];
+    const i = visible.indexOf(key), j = i + by;
+    if (j < 0 || j >= visible.length) return;
+    const next = [...visible];
     [next[i], next[j]] = [next[j], next[i]];
     save(next);
   };
-  const shown = PAGES.filter((p) => !p.setting || s.bool(p.setting)).length;
+  const listed = PAGES.filter((p) => !merged(p.key));
+  const shown = listed.filter((p) => !p.setting || s.bool(p.setting)).length;
 
   return (
     <section className="section">
       <div className="section-title">
         <h3>Pages</h3>
-        <span>{shown + 1} of {PAGES.length + 1} on</span>
+        <span>{shown + 1} of {listed.length + 1} on</span>
         {s.get("Bunbun.PageOrder") && <button className="link" onClick={() => save(DEFAULT_ORDER)}>Reset order</button>}
       </div>
       <div className="page-first">
@@ -185,10 +189,10 @@ function PageList() {
         <div className="label"><b><Home size={15} /> Home <span className="badge">Always first</span></b>
           <span>The three cards below, or the player while music plays in Classic. In Studio, Home stays first and the player comes next.</span></div>
       </div>
-      <Reorder.Group axis="y" values={order} onReorder={setOrder} className="page-list" as="div">
-        {order.map((k, i) => (
-          <PageRow key={k} page={byKey[k]} first={i === 0} last={i === order.length - 1}
-            onMove={(by) => move(k, by)} onDrop={() => save(order)} />
+      <Reorder.Group axis="y" values={visible} onReorder={(next) => setOrder(withHidden(next))} className="page-list" as="div">
+        {visible.map((k, i) => (
+          <PageRow key={k} page={byKey[k]} first={i === 0} last={i === visible.length - 1}
+            onMove={(by) => move(k, by)} onDrop={() => save(visible)} />
         ))}
       </Reorder.Group>
     </section>
@@ -282,13 +286,12 @@ function HomeCards({ studio }: { studio: boolean }) {
 }
 
 function HomeShot() {
-  const shot = useShot("home");
-  const src = shot?.src ?? FALLBACK.home;
+  const src = useShot("home")?.src ?? PICTURES.home;
   if (!src) return null;
   return (
     <div className="home-shot">
-      <img src={src} alt="Home on your island" />
-      <span>Your island now. Pick a card below to change it; take the pictures again to see it here.</span>
+      <img src={src} alt="The Home page" />
+      <span>The Home page. Pick what each card shows below.</span>
     </div>
   );
 }

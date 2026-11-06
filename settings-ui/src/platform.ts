@@ -23,6 +23,11 @@ export function useIsLinux(): boolean {
 // src/platform/linux (island_linux.cpp, studio_linux.cpp) and src/agents.
 export const LINUX_SETTINGS = new Set([
   "Appearance.SizeScale", "Appearance.MatchScreenSize", "Appearance.OffsetY", "Themes.PillOpacity", "Themes.AccentColorMode", "Themes.CustomAccentHex",
+  // edgelight_linux.cpp, timers_linux.cpp, screentime_linux.cpp
+  "Bunbun.EdgeLight", "Bunbun.EdgeLightOn", "Bunbun.EdgeLightColor", "Bunbun.EdgeLightCustomColor",
+  "Bunbun.PomodoroFocus", "Bunbun.PomodoroShortBreak", "Bunbun.PomodoroLongBreak", "Bunbun.PomodoroCycles", "Bunbun.PomodoroAutoStart",
+  "Bunbun.TimerPresets", "Bunbun.ScreenTime", "Bunbun.ScreenTimeLimit",
+  "Appearance.DisplayLink", "Appearance.DisplayShapes", "Appearance.DisplaySizes",  // island_linux.cpp: Linked / Separate, each display's look
   // look_linux.cpp: shape, theme, colours, text, sounds, privacy dots
   "Appearance.ShapeStyle", "Themes.ThemePreset", "Themes.PillBgColor", "Themes.TextPrimaryColor", "Themes.ContourBorderMode",
   "Themes.ContourBorderHex", "Themes.DropShadow", "Themes.FontFamily", "Themes.TextScale", "Themes.IslandFill", "Themes.SolidColor",
@@ -49,7 +54,7 @@ export const LINUX_SETTINGS = new Set([
   "Modules.DoNotDisturbIndicator", "Modules.Clipboard", "Modules.StatusCountdownProgress", "Modules.TimerModule",
   "Modules.ReminderSound", "Modules.QuietReminders", "Bunbun.FocusGuard", "Bunbun.FocusGuardApps",
   "Modules.DateFormat", "Modules.FirstDayOfWeek",
-  "Bunbun.IdleFace", "Bunbun.EyeColor", "Bunbun.EyeStatusColors", "Bunbun.IdleStripItems", "Bunbun.StatusRing", "Bunbun.MascotDnd",
+  "Bunbun.IdleFace", "Bunbun.EyeColor", "Bunbun.EyeStatusColors", "Bunbun.IdleStripItems", "Bunbun.IdleName", "Bunbun.StatusRing", "Bunbun.MascotDnd",
   "Modules.KaraokeLyrics", "Modules.LyricsVisualizer", "Modules.KaraokeLetterGlow", "Modules.LyricsNeighborLinesVisible", "Modules.LyricsOffsetBluetoothMs",
   "Modules.ClockFormat", "Modules.ShowSeconds", "Modules.Media", "Behavior.ExpandOnHover",
   "Modules.Weather", "Modules.WeatherCity", "Modules.WeatherFahrenheit", "Modules.HardwareMonitorModule",
@@ -83,6 +88,6 @@ export const notOnLinux = (keys: string[] | undefined) => !!keys?.length && keys
 export const neverOnLinux = (keys: string[] | undefined) => !!keys?.length && keys.every((k) => LINUX_NEVER.has(k));
 
 // Island pages Linux has (Home and Music are always there): all of them.
-export const LINUX_PAGES = new Set(["calendar", "weather", "system", "toggles", "tray", "todo", "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water"]);
+export const LINUX_PAGES = new Set(["calendar", "weather", "system", "toggles", "tray", "todo", "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water", "screentime"]);
 // Home cards Linux shows something else for, until those pages exist (none left).
 export const LINUX_CARD_STAND_IN: Record<string, string> = {};

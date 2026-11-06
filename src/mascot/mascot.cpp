@@ -214,6 +214,7 @@ const wchar_t* MoodFile(Mood m) {
         case Mood::Streaming: return L"streaming.png";
         case Mood::Dnd: return L"dnd.png";
         case Mood::Live: return L"live.png";
+        case Mood::Drinking: return L"drinking.png";
         default: return L"idle.png";
     }
 }
@@ -226,6 +227,7 @@ const wchar_t* FallbackFile(Mood m) {
         case Mood::Streaming: return L"snack.png";  // a pack without popcorn frames still munches
         case Mood::Dnd: return L"sleepy.png";       // eyes closed, settled in
         case Mood::Live: return L"working.png";     // at the laptop
+        case Mood::Drinking: return L"snack.png";   // sipping instead of munching
         default: return L"idle.png";
     }
 }
@@ -1160,6 +1162,7 @@ thread_local SpideyPalette t_spidey = SpideyPaletteFor(Style{});  // set by Draw
 // Streaming is drawn as Snack (the same chewing face and motion) with the eyes
 // open on the screen and popcorn instead of each character's own snack.
 thread_local bool t_streaming = false;  // set by DrawStyled for each frame
+thread_local bool t_drinking = false;   // Mood::Drinking, drawn as Snack with a glass (DrawStyled)
 // Do Not Disturb is drawn as Sleepy with headphones and a moon badge; Live as
 // Working (at the laptop) with a pulsing REC badge and broadcast waves.
 thread_local bool t_dnd = false;
@@ -1998,6 +2001,60 @@ void Pizza(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F mouth, float 
     rt->SetTransform(world);
 }
 
+// Drinking: a glass of water tipped up to the mouth. It tilts further as it empties,
+// the water's surface stays level, and a drop or two falls from the rim.
+void WaterGlass(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F mouth, float s, float since,
+                const D2D1_MATRIX_3X2_F& world) {
+    const float p = std::clamp(since / 2.4f, 0.0f, 1.0f);           // how far through the drink
+    const float raise = std::min(1.0f, since / 0.35f);                 // up to the mouth first
+    const float sip = 0.5f + 0.5f * std::sin(since * 9.0f);            // little gulps
+    // Degrees about the rim: upright below the mouth at first, then the base swings out
+    // and up as it empties (a positive angle turns clockwise, so negative tips it to the right).
+    const float tilt = -(70.0f * raise + 45.0f * p) - sip * 4.0f;
+    const float hw = s * 0.095f, bw = s * 0.074f, h = s * 0.28f;      // half widths at the rim and base, height
+    const D2D1_POINT_2F rim = D2D1::Point2F(mouth.x + s * 0.05f, mouth.y + s * 0.03f);
+    const D2D1_POINT_2F c = D2D1::Point2F(rim.x, rim.y + h * 0.5f);
+    const float top = rim.y, bottom = rim.y + h;
+    rt->SetTransform(D2D1::Matrix3x2F::Rotation(tilt, rim) * world);
+    const float lw = std::max(0.8f, s * 0.012f);
+    // The water: from the base up to a level that drops as it's drunk.
+    const float level = 0.85f - 0.70f * p;
+    const float wy = bottom - h * level;
+    auto edgeAt = [&](float y) { const float k = (y - top) / h; return hw + (bw - hw) * k; };
+    ComPtr<ID2D1GeometrySink> sink;
+    ComPtr<ID2D1PathGeometry> water = NewPath(rt, &sink);
+    if (water) {
+        sink->BeginFigure(D2D1::Point2F(c.x - edgeAt(wy), wy), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(c.x + edgeAt(wy), wy));
+        sink->AddLine(D2D1::Point2F(c.x + bw, bottom));
+        sink->AddLine(D2D1::Point2F(c.x - bw, bottom));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->Close();
+        rt->FillGeometry(water.Get(), cache.Get(rt, Hex(0x5AC8FA, 0.85f)));
+    }
+    rt->DrawLine(D2D1::Point2F(c.x - edgeAt(wy), wy), D2D1::Point2F(c.x + edgeAt(wy), wy), cache.Get(rt, Hex(0xBFEAFF)), lw * 0.8f);
+    // The glass: clear, with a bright outline and a glint.
+    ComPtr<ID2D1PathGeometry> glass = NewPath(rt, &sink);
+    if (glass) {
+        sink->BeginFigure(D2D1::Point2F(c.x - hw, top), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(c.x + hw, top));
+        sink->AddLine(D2D1::Point2F(c.x + bw, bottom));
+        sink->AddLine(D2D1::Point2F(c.x - bw, bottom));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->Close();
+        rt->FillGeometry(glass.Get(), cache.Get(rt, Hex(0xFFFFFF, 0.14f)));
+        rt->DrawGeometry(glass.Get(), cache.Get(rt, Hex(0xE6F6FF, 0.95f)), lw);
+    }
+    rt->DrawLine(D2D1::Point2F(c.x + hw * 0.45f, top + h * 0.15f), D2D1::Point2F(c.x + bw * 0.45f, bottom - h * 0.2f),
+                 cache.Get(rt, Hex(0xFFFFFF, 0.55f)), lw * 0.8f);
+    rt->SetTransform(world);
+    // A drop falling from the rim now and then.
+    const float d = std::fmod(since, 0.8f) / 0.8f;
+    if (since > 0.4f && p < 0.95f)
+        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(mouth.x - s * 0.01f, mouth.y + s * (0.05f + 0.16f * d)), s * 0.013f, s * 0.018f),
+                        cache.Get(rt, Hex(0x5AC8FA, 0.9f * (1.0f - d))));
+}
+
 // Spidey's error: his web line has snapped. The upper half dangles limply from
 // above (drawn in `frame`, which doesn't tilt with him) and a frayed stub is
 // left on top of his head (drawn in `world`).
@@ -2595,7 +2652,7 @@ void DazaiFace(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float 
             // Holding a bun in both bandaged hands, munching.
             const float bite = SnackBite(t);
             MouthLine(rt, cache, D2D1::Point2F(c.x, c.y + ry * 0.48f), rx * 0.08f, ry * (0.04f + 0.06f * bite), lw, kDazaiInk);
-            if (t_streaming) break;  // streaming: only the munching mouth; the popcorn comes after the face
+            if (t_streaming || t_drinking) break;  // only the mouth; the popcorn or the glass comes after the face
             const D2D1_POINT_2F b = D2D1::Point2F(c.x, c.y + ry * (0.78f + 0.05f * bite));
             const D2D1_ELLIPSE bun = D2D1::Ellipse(b, rx * 0.30f, ry * 0.22f);
             rt->FillEllipse(bun, brush(Hex(0x9A5A2C)));
@@ -2770,6 +2827,7 @@ bool NeedsFastFrames(Mood mood, double t, double moodSince) {
     switch (mood) {
         case Mood::Alert: return true;
         case Mood::Talking: return true;  // the mouth moves several times a second
+        case Mood::Drinking: return t - moodSince < 2.8;
         case Mood::Happy: return t - moodSince < 2.2;
         default: return false;
     }
@@ -2868,6 +2926,8 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
     }
     t_streaming = mood == Mood::Streaming;
     if (t_streaming) mood = Mood::Snack;
+    t_drinking = mood == Mood::Drinking;
+    if (t_drinking) mood = Mood::Snack;
     t_dnd = mood == Mood::Dnd;
     if (t_dnd) mood = Mood::Sleepy;
     t_live = mood == Mood::Live;
@@ -3217,7 +3277,12 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
         }
     }
 
-    if (mood == Mood::Snack && t_streaming) {
+    if (mood == Mood::Snack && t_drinking) {
+        // Spidey drinks under his rolled-up mask, like his pizza.
+        const D2D1_POINT_2F mouth = L.spiderman ? D2D1::Point2F(headC.x - headRx * 0.06f, headC.y + headRy * 0.78f)
+                                                : D2D1::Point2F(headC.x, headC.y + headRy * 0.42f);
+        WaterGlass(rt, cache, mouth, s, since, world);
+    } else if (mood == Mood::Snack && t_streaming) {
         Popcorn(rt, cache, headC, headRx, headRy, s, t, world);
     } else if (mood == Mood::Snack) {
         // Each character has its own favourite.

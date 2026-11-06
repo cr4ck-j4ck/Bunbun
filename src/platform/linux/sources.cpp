@@ -49,9 +49,37 @@ void Sample() {
             g_battery.has = true;
             g_battery.percent = std::clamp(atoi(cap.c_str()), 0, 100);
             g_battery.charging = status.rfind("Charging", 0) == 0 || status.rfind("Full", 0) == 0;
+            g_battery.full = status.rfind("Full", 0) == 0;
+            // Health and time left: energy_* (µWh) or charge_* (µAh), whichever the battery has.
+            auto num = [&](const char* name) {
+                std::string v;
+                return bb::plat::ReadFile(dir + "/" + name, &v) ? atof(v.c_str()) : -1.0;
+            };
+            double full = num("energy_full"), design = num("energy_full_design"), now = num("energy_now"), rate = num("power_now");
+            if (full <= 0) { full = num("charge_full"); design = num("charge_full_design"); now = num("charge_now"); rate = num("current_now"); }
+            if (full > 0 && design > 0) g_battery.health = std::clamp(static_cast<int>(full * 100 / design + 0.5), 0, 100);
+            if (status.rfind("Discharging", 0) == 0 && now > 0 && rate > 0) g_battery.secondsLeft = static_cast<long>(now / rate * 3600);
             break;
         }
         closedir(d);
+    }
+    // The charger: any "Mains" supply that's online.
+    if (DIR* d = opendir("/sys/class/power_supply")) {
+        while (dirent* e = readdir(d)) {
+            const std::string dir = std::string("/sys/class/power_supply/") + e->d_name;
+            std::string type, online;
+            if (bb::plat::ReadFile(dir + "/type", &type) && type.rfind("Mains", 0) == 0 && bb::plat::ReadFile(dir + "/online", &online) &&
+                atoi(online.c_str()) == 1)
+                g_battery.onPower = true;
+        }
+        closedir(d);
+    }
+    // GPU busy: AMD (amdgpu) and recent Intel drivers expose it; others don't.
+    g_load.gpu = -1;
+    for (int card = 0; card < 4 && g_load.gpu < 0; ++card) {
+        std::string busy;
+        if (bb::plat::ReadFile("/sys/class/drm/card" + std::to_string(card) + "/device/gpu_busy_percent", &busy))
+            g_load.gpu = std::clamp(atoi(busy.c_str()), 0, 100);
     }
     std::string stat;
     if (bb::plat::ReadFile("/proc/stat", &stat) && stat.rfind("cpu ", 0) == 0) {
@@ -175,9 +203,11 @@ int g_weatherGen = 0;  // drops answers to a request a newer one replaced
 void Forecast(double lat, double lon, const std::string& place, int gen) {
     char url[512];
     snprintf(url, sizeof url,
-             "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code"
-             "&hourly=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&forecast_days=2&timezone=auto%s",
-             lat, lon, g_weather.fahrenheit ? "&temperature_unit=fahrenheit" : "");
+             "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+             "&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,wind_speed_10m,uv_index"
+             "&hourly=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset"
+             "&forecast_days=5&timezone=auto%s",
+             lat, lon, g_weather.fahrenheit ? "&temperature_unit=fahrenheit&wind_speed_unit=mph" : "");
     Fetch(url, [place, gen](const std::string& body) {
         if (gen != g_weatherGen) return;
         g_weather.loading = false;
@@ -193,11 +223,42 @@ void Forecast(double lat, double lon, const std::string& place, int gen) {
         g_weather.city = place;
         g_weather.temp = cur->getNumber("temperature_2m");
         g_weather.code = static_cast<int>(cur->getNumber("weather_code"));
+        g_weather.updatedAt = Mono();
+        auto has = [&](const char* k) { const json::Value* x = cur->find(k); return x && x->isNumber(); };
+        g_weather.feels = has("apparent_temperature") ? cur->getNumber("apparent_temperature") : -999;
+        g_weather.humidity = has("relative_humidity_2m") ? static_cast<int>(cur->getNumber("relative_humidity_2m") + 0.5) : -1;
+        g_weather.wind = has("wind_speed_10m") ? cur->getNumber("wind_speed_10m") : -1;
+        g_weather.uv = has("uv_index") ? cur->getNumber("uv_index") : -1;
+        g_weather.days.clear();
+        g_weather.sunrise.clear();
+        g_weather.sunset.clear();
         if (const json::Value* d = v.find("daily")) {
             const json::Value* hi = d->find("temperature_2m_max");
             const json::Value* lo = d->find("temperature_2m_min");
+            const json::Value* dc = d->find("weather_code");
+            const json::Value* dt = d->find("time");
             if (hi && hi->isArray() && !hi->arr.empty()) g_weather.high = hi->arr[0].num;
             if (lo && lo->isArray() && !lo->arr.empty()) g_weather.low = lo->arr[0].num;
+            // "2026-11-06T06:39" -> "6:39"
+            auto clock = [](const json::Value* a) {
+                if (!a || !a->isArray() || a->arr.empty() || a->arr[0].str.size() < 16) return std::string();
+                const std::string& s = a->arr[0].str;
+                return std::to_string(atoi(s.c_str() + 11) % 12 == 0 ? 12 : atoi(s.c_str() + 11) % 12) + s.substr(13, 3);
+            };
+            g_weather.sunrise = clock(d->find("sunrise"));
+            g_weather.sunset = clock(d->find("sunset"));
+            static const char* kDays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+            for (size_t i = 0; hi && lo && dc && dt && i < hi->arr.size() && i < lo->arr.size() && i < dc->arr.size() && i < dt->arr.size() && i < 5; ++i) {
+                tm day{};
+                const std::string& ds = dt->arr[i].str;  // "2026-11-06"
+                day.tm_year = atoi(ds.c_str()) - 1900;
+                day.tm_mon = atoi(ds.c_str() + 5) - 1;
+                day.tm_mday = atoi(ds.c_str() + 8);
+                day.tm_hour = 12;
+                mktime(&day);
+                g_weather.days.push_back({i == 0 ? std::string("Today") : kDays[day.tm_wday % 7], lo->arr[i].num, hi->arr[i].num,
+                                          static_cast<int>(dc->arr[i].num)});
+            }
         }
         g_weather.hours.clear();
         const json::Value* h = v.find("hourly");
@@ -314,11 +375,28 @@ void RefreshRadios() {
         if (GVariant* p = GetProp("org.freedesktop.NetworkManager", "/org/freedesktop/NetworkManager",
                                   "org.freedesktop.NetworkManager", "PrimaryConnection")) {
             const char* path = g_variant_get_string(p, nullptr);
-            if (path && strcmp(path, "/") != 0)
-                if (GVariant* id = GetProp("org.freedesktop.NetworkManager", path, "org.freedesktop.NetworkManager.Connection.Active", "Id")) {
+            if (path && strcmp(path, "/") != 0) {
+                const char* active = "org.freedesktop.NetworkManager.Connection.Active";
+                if (GVariant* id = GetProp("org.freedesktop.NetworkManager", path, active, "Id")) {
                     r.network = g_variant_get_string(id, nullptr);
                     g_variant_unref(id);
                 }
+                if (GVariant* type = GetProp("org.freedesktop.NetworkManager", path, active, "Type")) {
+                    r.wired = strcmp(g_variant_get_string(type, nullptr), "802-3-ethernet") == 0;
+                    g_variant_unref(type);
+                }
+                // Wi-Fi: the access point in use says how strong it is.
+                if (!r.wired)
+                    if (GVariant* ap = GetProp("org.freedesktop.NetworkManager", path, active, "SpecificObject")) {
+                        const char* apPath = g_variant_get_string(ap, nullptr);
+                        if (apPath && strcmp(apPath, "/") != 0)
+                            if (GVariant* s = GetProp("org.freedesktop.NetworkManager", apPath, "org.freedesktop.NetworkManager.AccessPoint", "Strength")) {
+                                r.signal = g_variant_get_byte(s);
+                                g_variant_unref(s);
+                            }
+                        g_variant_unref(ap);
+                    }
+            }
             g_variant_unref(p);
         }
     }
@@ -332,6 +410,7 @@ void RefreshRadios() {
         r.dnd = !g_settings_get_boolean(s, "show-banners");
     }
     const bool changed = r.wifi != g_radios.wifi || r.bt != g_radios.bt || r.dnd != g_radios.dnd || r.network != g_radios.network ||
+                         r.signal != g_radios.signal || r.wired != g_radios.wired ||
                          r.wifiKnown != g_radios.wifiKnown || r.btKnown != g_radios.btKnown;
     g_radios = r;
     if (changed) Changed();
@@ -340,7 +419,24 @@ void RefreshRadios() {
 // ── Clipboard ───────────────────────────────────────────────────────────────
 
 std::vector<std::string> g_clips;
+std::vector<double> g_clipAt;  // when each was copied (the island's clock), alongside g_clips
+constexpr size_t kClipMax = 40;  // as on Windows (kRichClipMax)
 bool g_clipOn = true;
+
+// A copy goes to the top (an older copy of the same text moves up).
+void PushClip(const std::string& t) {
+    for (size_t i = g_clips.size(); i-- > 0;)
+        if (g_clips[i] == t) {
+            g_clips.erase(g_clips.begin() + static_cast<long>(i));
+            g_clipAt.erase(g_clipAt.begin() + static_cast<long>(i));
+        }
+    g_clips.insert(g_clips.begin(), t);
+    g_clipAt.insert(g_clipAt.begin(), g_get_monotonic_time() / 1e6);
+    if (g_clips.size() > kClipMax) {
+        g_clips.resize(kClipMax);
+        g_clipAt.resize(kClipMax);
+    }
+}
 bool g_clipSelfSet = false;  // the next change is our own copy
 std::function<void(const std::string&)> g_onCopy;
 
@@ -352,9 +448,7 @@ void OnClipboardText(GtkClipboard*, const gchar* text, gpointer) {
     if (t.size() > 4000) t.resize(4000);
     if (g_onCopy) g_onCopy(t);
     if (!g_clipOn) return;
-    g_clips.erase(std::remove(g_clips.begin(), g_clips.end(), t), g_clips.end());
-    g_clips.insert(g_clips.begin(), t);
-    if (g_clips.size() > 8) g_clips.resize(8);
+    PushClip(t);
     Changed();
 }
 
@@ -411,6 +505,7 @@ void ReadTodos(bool force = false) {
 
 Focus g_focus;
 bool g_focusFinished = false;
+int g_focusFinishedKind = 0;  // the kind of the timer that just finished
 
 }  // namespace
 
@@ -433,6 +528,7 @@ void Start(std::function<void()> changed) {
     // The focus timer runs out even while its page isn't on screen.
     g_timeout_add(250, [](gpointer) -> gboolean {
         if (g_focus.active && g_focus.running && Mono() >= g_focus.endsAt) {
+            g_focusFinishedKind = g_focus.kind;
             g_focus = Focus{false, false, 0, 0, 0, g_focus.pickH, g_focus.pickM};
             g_focusFinished = true;
             Changed();
@@ -456,7 +552,7 @@ void LoadSettings() {
         RefreshWeather();
     }
     g_clipOn = s::GetBool(L"Bunbun.ClipboardHistory");
-    if (!g_clipOn) g_clips.clear();
+    if (!g_clipOn) { g_clips.clear(); g_clipAt.clear(); }
 }
 
 void FetchUrl(const std::string& url, std::function<void(const std::string&)> done) { Fetch(url, std::move(done)); }
@@ -465,6 +561,13 @@ const Load& SystemLoad() { Sample(); return g_load; }
 const Battery& BatteryState() { Sample(); return g_battery; }
 
 const Weather& CurrentWeather() { return g_weather; }
+
+std::string UvWords(double uv) {
+    if (uv < 0) return "";
+    const int u = static_cast<int>(uv + 0.5);
+    const char* w = u < 3 ? "Low" : u < 6 ? "Moderate" : u < 8 ? "High" : u < 11 ? "Very high" : "Extreme";
+    return std::to_string(u) + " " + w;
+}
 
 const char* WeatherWords(int code) {
     switch (code) {
@@ -514,20 +617,24 @@ void CopyClip(int index) {
     const std::string text = g_clips[static_cast<size_t>(index)];
     g_clipSelfSet = true;
     gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), text.c_str(), -1);
-    // Copying an old one moves it to the top, as on Windows.
-    g_clips.erase(g_clips.begin() + index);
-    g_clips.insert(g_clips.begin(), text);
+    PushClip(text);  // copying an old one moves it to the top, as on Windows
 }
 
-void ClearClips() { g_clips.clear(); }
+void ClearClips() { g_clips.clear(); g_clipAt.clear(); }
+
+const std::vector<double>& ClipTimes() { return g_clipAt; }
+
+void RemoveClip(int index) {
+    if (index < 0 || index >= static_cast<int>(g_clips.size())) return;
+    g_clips.erase(g_clips.begin() + index);
+    g_clipAt.erase(g_clipAt.begin() + index);
+}
 
 void CopyText(const std::string& text) {
     g_clipSelfSet = true;
     gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), text.c_str(), -1);
     if (!g_clipOn) return;
-    g_clips.erase(std::remove(g_clips.begin(), g_clips.end(), text), g_clips.end());
-    g_clips.insert(g_clips.begin(), text);
-    if (g_clips.size() > 8) g_clips.resize(8);
+    PushClip(text);
 }
 
 const std::vector<std::wstring>& NoteLines() {
@@ -605,8 +712,18 @@ Focus& FocusState() {
     return g_focus;
 }
 
+void FocusStartSeconds(int seconds, int kind) {
+    if (seconds <= 0) return;
+    g_focus.active = g_focus.running = true;
+    g_focus.kind = kind;
+    g_focus.total = seconds;
+    g_focus.remaining = g_focus.total;
+    g_focus.endsAt = Mono() + g_focus.total;
+}
+
 void FocusStart(int minutes) {
     if (minutes <= 0) return;
+    g_focus.kind = 0;
     g_focus.active = g_focus.running = true;
     g_focus.total = minutes * 60.0;
     g_focus.remaining = g_focus.total;
@@ -637,6 +754,12 @@ bool FocusTakeFinished() {
     const bool f = g_focusFinished;
     g_focusFinished = false;
     return f;
+}
+
+int FocusTakeFinishedKind() {
+    if (!g_focusFinished) return -1;
+    g_focusFinished = false;
+    return g_focusFinishedKind;
 }
 
 }  // namespace bb::lsrc

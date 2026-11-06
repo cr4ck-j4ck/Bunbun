@@ -19,7 +19,7 @@ type Preview = {
  * wallpaper by the settings host, so what you see here is exactly what is on
  * screen. Falls back to a mock-up when the island isn't running.
  */
-export function LivePreview({ showActualSize = true }: { showActualSize?: boolean }) {
+export function LivePreview({ showActualSize = true, display = 0 }: { showActualSize?: boolean; display?: number }) {
   const [data, setData] = useState<Preview | null>(null);
   const [actualW, setActualW] = useState(0);
   const alive = useRef(true);
@@ -30,7 +30,8 @@ export function LivePreview({ showActualSize = true }: { showActualSize?: boolea
     const tick = async () => {
       if (document.visibilityState === "visible") {
         try {
-          const p = await call<Preview>("capturePreview", { width: 1280 });
+          // display: a display's own island (a mirror); 0 the island's own display.
+          const p = await call<Preview>("capturePreview", { width: 1280, display });
           if (alive.current) setData(p);
         } catch { /* host busy; try again next tick */ }
       }
@@ -38,7 +39,7 @@ export function LivePreview({ showActualSize = true }: { showActualSize?: boolea
     };
     tick();
     return () => { alive.current = false; window.clearTimeout(timer); };
-  }, []);
+  }, [display]);
 
   if (!inHost || (data && !data.running)) {
     return (

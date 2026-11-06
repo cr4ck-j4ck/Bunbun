@@ -68,6 +68,9 @@ add_executable(bunbun
     ${LINUX}/island_linux.cpp
     ${LINUX}/studio_linux.cpp
     ${LINUX}/look_linux.cpp
+    ${LINUX}/edgelight_linux.cpp
+    ${LINUX}/timers_linux.cpp
+    ${LINUX}/screentime_linux.cpp
     ${LINUX}/features_linux.cpp
     ${LINUX}/calendar_linux.cpp
     ${LINUX}/shelf_linux.cpp

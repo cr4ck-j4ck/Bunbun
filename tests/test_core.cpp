@@ -12,6 +12,10 @@
 #include "../src/common/update.h"
 #include "../src/common/todos.h"
 #include "../src/common/chime_wav.h"
+#include "../src/common/screentime.h"
+#include "../src/common/edgelight.h"
+#include "../src/common/ag_quota.h"
+#include "../src/common/agent_limits.h"
 #include "../src/common/applist.h"
 #include "../src/common/water.h"
 
@@ -51,6 +55,94 @@ static void WriteAll(const std::wstring& path, const std::string& s) {
 
 // The UI chimes (common/chime_wav.h, shared by Windows and Linux): each one is a
 // valid 16-bit mono WAV of the expected length, louder with the volume.
+// Screen Time's bookkeeping (common/screentime.h): days, the file, the summary.
+// What plays the edge light (common/edgelight.h).
+// Antigravity's quota pools (common/ag_quota.h).
+static void TestAgPools() {
+    namespace aq = bb::agquota;
+    const std::vector<aq::Pool> models = {
+        {"Gemini 3.8 Flash (High)", 0.98f, 1000}, {"Gemini 3.8 Flash (Low)", 0.98f, 1000},
+        {"Claude Sonnet 4.6 (Thinking)", 1.0f, 2000}, {"Claude Opus 4.6 (Thinking)", 1.0f, 2000}, {"GPT-OSS 120B (Medium)", 1.0f, 2000}};
+    const std::vector<aq::Pool> pools = aq::MakePools(models);
+    CHECK(pools.size() == 2);
+    CHECK(pools[0].name == "Gemini 3.8 Flash" && pools[0].resetAt == 1000);    // the most used first
+    CHECK(pools[1].name == "Claude Sonnet 4.6, Claude Opus 4.6 +1");
+    CHECK(aq::BaseModelName("Plain") == "Plain");
+    CHECK(aq::RemainingNow(0.4f, 1000, 999) == 0.4f);   // before the reset
+    CHECK(aq::RemainingNow(0.4f, 1000, 1000) == 1.0f);  // after it: refilled
+    CHECK(aq::RemainingNow(0.4f, 0, 5000) == 0.4f);     // no reset time known
+}
+
+// The Agent page's limits row (common/agent_limits.h).
+static void TestAgentLimits() {
+    namespace lm = bb::limits;
+    CHECK(lm::ResetsIn(1000, 1000).empty() && lm::ResetsIn(0, 5).empty());
+    CHECK(lm::ResetsIn(1000 + 45 * 60, 1000) == L"resets in 45m");
+    CHECK(lm::ResetsIn(1000 + 130 * 60, 1000) == L"resets in 2h 10m");
+    CHECK(lm::ResetsIn(1000 + 120 * 60, 1000) == L"resets in 2h");
+    CHECK(lm::ResetsIn(1000 + 3 * 86400, 1000) == L"resets in 3d");
+    // Claude: a window past its reset is back at 0; no numbers at all gives the note.
+    const lm::Row c = lm::Claude(40, 900, 70, 5000, 12, 1000);
+    CHECK(c.bars.size() == 3 && c.bars[0].used == 0.0f && c.bars[1].used == 70.0f && c.bars[2].label == L"Context");
+    CHECK(lm::Claude(-1, 0, -1, 0, -1, 1000).bars.empty() && !lm::Claude(-1, 0, -1, 0, -1, 1000).note.empty());
+    // Antigravity: one bar per pool, a refilled pool at 0.
+    const lm::Row a = lm::Antigravity({{"Gemini Flash", 0.6f, 900}, {"Claude, GPT", 0.9f, 5000}}, 1000);
+    CHECK(a.bars.size() == 2 && a.bars[0].used == 0.0f && a.bars[0].resetAt == 0);
+    CHECK(a.bars[1].used > 9.9f && a.bars[1].used < 10.1f && a.bars[1].resetAt == 5000);
+    // Cursor: the plan, and why there are no numbers.
+    CHECK(lm::PlanName(L"free") == L"Free plan" && lm::PlanName(L"free_trial") == L"Pro trial" && lm::PlanName(L"").empty());
+    CHECK(lm::Cursor(L"pro").note.rfind(L"Pro plan", 0) == 0 && lm::Cursor(L"").bars.empty());
+}
+
+static void TestEdgeLightOn() {
+    namespace el = bb::edgelight;
+    CHECK(el::ParseOn(L"") == (el::kOnOpen | el::kOnNotification | el::kOnAgent));
+    CHECK(el::ParseOn(L"  ") == el::ParseOn(L""));
+    CHECK(el::ParseOn(L"hover") == el::kOnHover);
+    CHECK(el::ParseOn(L" Track , ALWAYS,") == (el::kOnTrack | el::kOnAlways));
+    CHECK(el::ParseOn(L"close,system,nonsense") == (el::kOnClose | el::kOnSystem));
+    CHECK(el::ParseOn(L"nonsense") == 0u);  // something set, nothing known: plays on nothing
+}
+
+static void TestScreenTime() {
+    namespace st = bb::screentime;
+    CHECK(st::Weekday(19700101) == 4);   // a Thursday
+    CHECK(st::Weekday(20261106) == 5);   // Friday
+    CHECK(st::FromDayNumber(st::DayNumber(20240229)) == 20240229);
+    CHECK(st::FromDayNumber(st::DayNumber(20261101) - 1) == 20261031);
+
+    st::Log log;
+    st::Add(&log, 20261106, L"aumid:WhatsApp!App", L"WhatsApp", L"C:\\WA\\WhatsApp.Root.exe", 600);
+    st::Add(&log, 20261106, L"c:\\chrome\\chrome.exe", L"Google Chrome", L"c:\\Chrome\\chrome.exe", 1800);
+    st::Add(&log, 20261106, L"c:\\chrome\\chrome.exe", L"", L"", 30);   // more of it; the name stays
+    st::Add(&log, 20261106, L"c:\\tool\\tool.exe", L"Tool", L"", 20);   // under a minute: not "used"
+    st::Add(&log, 20261104, L"c:\\chrome\\chrome.exe", L"Google Chrome", L"", 3600);
+    st::Add(&log, 20261020, L"c:\\old\\old.exe", L"Old", L"", 99);       // older than a week
+
+    // The file keeps everything, tabs in names included (as spaces).
+    st::Add(&log, 20261105, L"k", L"A\tB", L"", 5);
+    const st::Log back = st::Parse(st::Serialize(log));
+    CHECK(back.days.size() == log.days.size());
+    CHECK(back.days.at(20261106).at(L"c:\\chrome\\chrome.exe").seconds == 1830);
+    CHECK(back.days.at(20261106).at(L"c:\\chrome\\chrome.exe").name == L"Google Chrome");
+    CHECK(back.days.at(20261105).at(L"k").name == L"A B");
+    CHECK(st::Parse(L"garbage\nx\ty\n20261106\t-5\tk\tn\tp\n").days.empty());
+
+    st::Prune(&log, 20261106);
+    CHECK(log.days.count(20261020) == 0 && log.days.count(20261104) == 1);
+
+    const st::Summary s = st::Summarize(log, 20261106);
+    CHECK(s.todaySeconds == 600 + 1830 + 20);
+    CHECK(s.appsUsed == 2);
+    CHECK(s.apps.size() == 3 && s.apps[0].name == L"Google Chrome" && s.apps[1].name == L"WhatsApp");
+    CHECK(s.apps[0].percent == 75);
+    CHECK(s.week.size() == 7 && s.week.back().today && s.week.back().day == 20261106 && s.week.front().day == 20261031);
+    CHECK(s.week[4].day == 20261104 && s.week[4].seconds == 3600 && s.week[4].weekday == 3);
+    CHECK(s.averageSeconds == (2450 + 3600 + 5) / 3);
+    CHECK(st::Duration(0) == L"0m" && st::Duration(30) == L"<1m" && st::Duration(45 * 60) == L"45m");
+    CHECK(st::Duration(2 * 3600 + 5 * 60) == L"2h 5m" && st::Duration(3600) == L"1h");
+}
+
 static void TestChimes() {
     using bb::chime::Chime;
     const size_t bytes[] = {30914, 23858, 24740, 6218, 6218};  // Done, Question, Error, Open, Close
@@ -513,6 +605,10 @@ int wmain(int argc, wchar_t** argv) {
     TestAppList();
     TestWater();
     TestChimes();
+    TestScreenTime();
+    TestEdgeLightOn();
+    TestAgPools();
+    TestAgentLimits();
     std::printf(g_failed ? "%d check(s) failed\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;
 }

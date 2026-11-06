@@ -1,6 +1,8 @@
 // Bunbun — the water reminder on Linux. See water_linux.h.
 #include "water_linux.h"
 
+#include <glib.h>
+
 #include <ctime>
 
 #include "../../common/water.h"
@@ -90,10 +92,19 @@ Due Check() {
     return due == w::Due::Refill ? Due::Refill : Due::Drink;
 }
 
+// The mascot drinks along, and cheers the glass that reaches the goal (DrankAt / GoalAt).
+double g_drankAt = -100, g_goalAt = -100;
+double DrankAt() { return g_drankAt; }
+double GoalAt() { return g_goalAt; }
+
 void Drink() {
     int minute = 0;
-    w::Drink(g_settings, Day(&minute), g_settings.glassMl);
+    w::Day& d = Day(&minute);
+    const int before = d.takenMl;
+    w::Drink(g_settings, d, g_settings.glassMl);
     Save();
+    g_drankAt = g_get_monotonic_time() / 1e6;  // the island's clock (Now)
+    if (g_settings.goalMl > 0 && before < g_settings.goalMl && d.takenMl >= g_settings.goalMl) g_goalAt = g_drankAt + 2.6;
 }
 
 void Undo() {

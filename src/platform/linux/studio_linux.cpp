@@ -32,6 +32,7 @@
 
 #include "../../agents/hook_installer.h"
 #include "../../common/ag_quota.h"
+#include "../../common/agent_limits.h"
 #include "../../island/studio_icons.h"
 #include "platform.h"
 #include "settings.h"
@@ -42,6 +43,8 @@
 #include "lyrics_linux.h"
 #include "sources.h"
 #include "water_linux.h"
+#include "timers_linux.h"
+#include "screentime_linux.h"
 
 namespace bb::lisland {
 namespace {
@@ -80,21 +83,29 @@ struct AgSnapshot {
     bool valid = false;
     float remaining = 1.0f;
     long long resetAt = 0;
+    std::vector<bb::agquota::Pool> pools;  // every pool of models, the most used first
 };
 std::mutex g_agMutex;
-AgSnapshot g_ag;  // guarded by g_agMutex
+AgSnapshot g_ag;            // guarded by g_agMutex
+std::wstring g_cursorPlan;  // Cursor's plan ("free", "pro"): all Cursor keeps locally; guarded by g_agMutex
 
-bool ReadAgQuota(AgSnapshot* out) {
-    std::string path;
-    for (const char* dir : {"/.config/Antigravity IDE", "/.config/Antigravity"}) {
+// The first of these state databases that exists ("" for none).
+std::string StateDb(std::initializer_list<const char*> dirs) {
+    for (const char* dir : dirs) {
         const std::string p = bb::plat::HomeDir() + dir + "/User/globalStorage/state.vscdb";
-        if (bb::plat::FileExists(p)) { path = p; break; }
+        if (bb::plat::FileExists(p)) return p;
     }
-    if (path.empty()) return false;
+    return {};
+}
+
+// One value from a VS Code-style state database, read-only ("" when missing).
+std::string ReadStateValue(const std::string& path, const char* key) {
+    if (path.empty()) return {};
     static void* lib = dlopen("libsqlite3.so.0", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) return false;
+    if (!lib) return {};
     using OpenFn = int (*)(const char*, void**, int, const char*);
     using PrepareFn = int (*)(void*, const char*, int, void**, const char**);
+    using BindFn = int (*)(void*, int, const char*, int, void (*)(void*));
     using StepFn = int (*)(void*);
     using TextFn = const unsigned char* (*)(void*, int);
     using BytesFn = int (*)(void*, int);
@@ -102,30 +113,43 @@ bool ReadAgQuota(AgSnapshot* out) {
     using CloseFn = int (*)(void*);
     auto open = reinterpret_cast<OpenFn>(dlsym(lib, "sqlite3_open_v2"));
     auto prepare = reinterpret_cast<PrepareFn>(dlsym(lib, "sqlite3_prepare_v2"));
+    auto bind = reinterpret_cast<BindFn>(dlsym(lib, "sqlite3_bind_text"));
     auto step = reinterpret_cast<StepFn>(dlsym(lib, "sqlite3_step"));
     auto text = reinterpret_cast<TextFn>(dlsym(lib, "sqlite3_column_text"));
     auto bytes = reinterpret_cast<BytesFn>(dlsym(lib, "sqlite3_column_bytes"));
     auto finalize = reinterpret_cast<FinalizeFn>(dlsym(lib, "sqlite3_finalize"));
     auto close = reinterpret_cast<CloseFn>(dlsym(lib, "sqlite3_close"));
-    if (!open || !prepare || !step || !text || !bytes || !finalize || !close) return false;
+    if (!open || !prepare || !bind || !step || !text || !bytes || !finalize || !close) return {};
     void* db = nullptr;
     constexpr int kReadOnly = 0x00000001;
     if (open(path.c_str(), &db, kReadOnly, nullptr) != 0 || !db) {
         if (db) close(db);
-        return false;
+        return {};
     }
     std::string value;
     void* stmt = nullptr;
-    if (prepare(db, "SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.userStatus'", -1, &stmt, nullptr) == 0 && stmt) {
-        if (step(stmt) == 100 /* SQLITE_ROW */)
+    if (prepare(db, "SELECT value FROM ItemTable WHERE key=?", -1, &stmt, nullptr) == 0 && stmt) {
+        if (bind(stmt, 1, key, -1, nullptr) == 0 && step(stmt) == 100 /* SQLITE_ROW */)
             if (const unsigned char* t = text(stmt, 0)) value.assign(reinterpret_cast<const char*>(t), static_cast<size_t>(bytes(stmt, 0)));
         finalize(stmt);
     }
     close(db);
+    return value;
+}
+
+bool ReadAgQuota(AgSnapshot* out) {
+    const std::string value = ReadStateValue(StateDb({"/.config/Antigravity IDE", "/.config/Antigravity"}),
+                                             "antigravityUnifiedStateSync.userStatus");
     bb::agquota::Quota q;
     if (value.empty() || !bb::agquota::Decode(value, &q)) return false;
-    *out = {true, q.remaining, q.resetAt};
+    *out = {true, q.remaining, q.resetAt, q.pools};
     return true;
+}
+
+std::wstring ReadCursorPlan() {
+    std::string plan = ReadStateValue(StateDb({"/.config/Cursor"}), "cursorAuth/stripeMembershipType");
+    if (plan.size() >= 2 && plan.front() == '"' && plan.back() == '"') plan = plan.substr(1, plan.size() - 2);
+    return bb::plat::Wide(plan);
 }
 
 AgSnapshot AgQuota() {
@@ -135,8 +159,10 @@ AgSnapshot AgQuota() {
             for (;;) {
                 AgSnapshot snap;
                 const bool ok = ReadAgQuota(&snap);
+                const std::wstring plan = ReadCursorPlan();
                 {
                     std::lock_guard lock(g_agMutex);
+                    g_cursorPlan = plan;
                     if (ok) g_ag = snap;
                     else g_ag.valid = false;
                 }
@@ -148,6 +174,21 @@ AgSnapshot AgQuota() {
     if (!g_s.antigravityQuota || !g_s.showAgent[AgentAntigravity]) return {};
     std::lock_guard lock(g_agMutex);
     return g_ag;
+}
+
+std::wstring CursorPlan() {
+    AgQuota();  // starts the reader
+    std::lock_guard lock(g_agMutex);
+    return g_cursorPlan;
+}
+
+// The most used pool's share used now, percent (a pool past its reset counts as refilled).
+float AgUsedNow(const AgSnapshot& s) {
+    const long long now = static_cast<long long>(time(nullptr));
+    float used = 0;
+    for (const auto& p : s.pools) used = std::max(used, (1.0f - bb::agquota::RemainingNow(p.remaining, p.resetAt, now)) * 100.0f);
+    if (s.pools.empty()) used = (1.0f - bb::agquota::RemainingNow(s.remaining, s.resetAt, now)) * 100.0f;
+    return used;
 }
 
 AgentKind AgentKindFor(const std::wstring& name) {
@@ -227,7 +268,8 @@ st::PageSwitches Switches() {
     p.lyrics = llyrics::PageOn() && g_track.active && g_mediaOn;
     p.tray = bb::lshelf::ShelfOn();
     p.mirror = bb::lshelf::MirrorOn();
-    p.water = bb::lwater::PageOn();
+    p.water = false;  // Water is a mode of the Timers page (Bunbun.WaterPage = Water in Timers)
+    p.screentime = bb::lscreen::On();
     p.agent = g_s.agentTab && AgentsShown();
     p.order = g_s.pageOrder;
     return p;
@@ -648,65 +690,144 @@ bool PickUsage(float* used, const char** tag = nullptr) {
     const int main = MainAgentKind();
     const bool auto_ = g_s.mainAgent < 0;
     if (claude && (main == AgentClaude || (auto_ && !(main == AgentAntigravity && ag.valid)))) {
-        *used = g_agent.usage5h;
+        *used = bb::limits::UsedNow(g_agent.usage5h, g_agent.usage5hResets, static_cast<long long>(time(nullptr)));
         if (tag) *tag = "5h";
         return true;
     }
     if (ag.valid && (main == AgentAntigravity || auto_)) {
-        *used = (1.0f - ag.remaining) * 100.0f;
+        *used = AgUsedNow(ag);
         if (tag) *tag = "AG";
         return true;
     }
     return false;
 }
 
+// Mascot and page name on the left (Weather adds its unit switch and Change
+// City); on the right, close, gear, eyedropper, battery, agent usage, then the
+// date and time, which give way (date first) when the left side needs the room.
+// The same layout as Windows (studio_draw.inc's EndStudioFrame).
 void PaintHeader(cairo_t* cr, const Rect& isl) {
-    const double hy = isl.y + 17, cx = isl.x + isl.w / 2;
-    if (g_page != Page::Home) {
-        std::wstring first, second;
-        st::PageName(g_page, g_agent.agent, &first, &second);
-        const double fx = isl.x + 22, w1 = Measure(cr, U(first), FTitle);
-        SText(cr, first, fx, hy - 10, w1 + 2, 20, FTitle, F(W(1)));
-        SText(cr, second, fx + w1, hy - 10, 150, 20, FTitle, F(PageColour(g_page)));
-    }
-    // Mini mascot, date and time, centred.
-    const std::string date = bb::lfeat::FormatDate(time(nullptr));  // Modules.DateFormat
-    const std::string clock = ClockText();
-    const double dateW = Measure(cr, date, FBody), timeW = Measure(cr, clock, FTitle);
-    const double mascotW = g_mascotOn ? 22 : 0;
-    double gx = cx - (mascotW + dateW + 6 + timeW) / 2;
-    if (g_mascotOn && g_alpha > 0.3) DrawMascot(cr, gx + 9, hy, 18);
-    gx += mascotW;
-    SText(cr, date, gx, hy - 9, dateW + 2, 18, FBody, F(C(0x8e8e93)));
-    gx += dateW + 6;
-    SText(cr, clock, gx, hy - 10, timeW + 2, 20, FTitle, F(W(1)));
+    const double hy = isl.y + 17;
+    const Col grey = C(0x8e8e93);
 
-    // The settings gear, and the usage ring to its left.
-    const double gearX = isl.x + isl.w - 26;
-    // The colour picker's eyedropper, left of the gear (as on Windows).
-    {
-        const double dx = gearX - 28;
-        const bool hover = NextHitHovered();
-        if (hover) Dot(cr, dx, hy, 13, F(C(0x3a3a3c)));
-        cairo_save(cr);
-        st::Eyedropper(PenFor(cr), Pt(dx, hy), hover ? 16.5f : 15.0f, D2(F(hover ? W(1) : C(0x8e8e93))));
-        cairo_restore(cr);
-        g_hits.push_back({{dx - 13, hy - 13, 26, 26}, Action::ColorPick});
+    // ── Left: mascot, then the page name ──
+    double fx = isl.x + 18;
+    if (g_mascotOn && g_alpha > 0.3) {
+        DrawMascot(cr, fx + 9, hy, 18);
+        fx += 26;
     }
-    const bool gearHover = NextHitHovered();
-    if (gearHover) Dot(cr, gearX, hy, 13, F(C(0x3a3a3c)));
-    Gear(cr, gearX, hy, gearHover ? 16.5 : 15, F(gearHover ? W(1) : C(0x8e8e93)));
-    g_hits.push_back({{gearX - 13, hy - 13, 26, 26}, Action::Settings});
+    std::wstring first, second;
+    st::PageName(g_page, g_agent.agent, &first, &second);
+    bool subtitled = true;
+    if (g_page == Page::Hardware) { first = L"System"; second = L"Power \x00B7 Network \x00B7 Audio"; }
+    else if (g_page == Page::Weather) {
+        first = L"Weather";
+        const std::string city = lsrc::CurrentWeather().city;
+        second = city.empty() ? L"" : bb::plat::Wide(city);
+    } else if (g_page == Page::ScreenTime) { first = L"Screen Time"; second.clear(); }
+    else subtitled = false;
+    const double w1 = Measure(cr, U(first), FTitle);
+    SText(cr, first, fx, hy - 10, w1 + 2, 20, FTitle, F(W(1)));
+    fx += w1;
+    if (!second.empty()) {
+        if (subtitled) {
+            const double barX = fx + 8;
+            cairo_rectangle(cr, barX - 0.6, hy - 6.5, 1.2, 13);
+            Source(cr, F(C(0x3a3a3c)));
+            cairo_fill(cr);
+            const double w2 = Measure(cr, U(second), FBody);
+            SText(cr, second, barX + 9, hy - 9, w2 + 2, 18, FBody, F(grey));
+            fx = barX + 9 + w2;
+        } else {
+            const double w2 = Measure(cr, U(second), FTitle);
+            SText(cr, second, fx, hy - 10, w2 + 2, 20, FTitle, F(PageColour(g_page)));
+            fx += w2;
+        }
+    }
+    // Weather's own controls follow its name: a °C / °F capsule and Change City.
+    if (g_page == Page::Weather) {
+        const bool f = lsrc::CurrentWeather().fahrenheit;
+        const Rect tog{fx + 12, hy - 11, 56, 22};
+        Fill(cr, tog.x, tog.y, tog.w, tog.h, 11, F(C(0x242426)));
+        const Rect cHalf{tog.x + 2, tog.y, 25, tog.h}, fHalf{tog.x + 29, tog.y, tog.w - 31, tog.h};
+        const Rect on = f ? fHalf : cHalf;
+        Fill(cr, on.x, on.y + 2, on.w, on.h - 4, 9, F(C(0x3a3a3c)));
+        SText(cr, "\xC2\xB0" "C", cHalf.x, cHalf.y, cHalf.w, cHalf.h, FSmall, F(f ? grey : W(1)), 1);
+        SText(cr, "\xC2\xB0" "F", fHalf.x, fHalf.y, fHalf.w, fHalf.h, FSmall, F(f ? W(1) : grey), 1);
+        g_hits.push_back({tog, Action::WeatherUnit});
+        const Rect city{tog.x + tog.w + 6, hy - 11, 90, 22};
+        const bool hover = NextHitHovered();
+        Fill(cr, city.x, city.y, city.w, city.h, 11, F(hover ? C(0x3a3a3c) : C(0x242426)));
+        SText(cr, "Change City", city.x, city.y, city.w, city.h, FSmall, F(W(1)), 1);
+        g_hits.push_back({city, Action::WeatherCity});
+        fx = city.x + city.w;
+    }
+    const double leftEnd = fx + 14;
+
+    // ── Right: close, gear, eyedropper, battery, usage, date and time ──
+    const double closeX = isl.x + isl.w - 22;
+    {
+        const bool hover = NextHitHovered();
+        if (hover) Dot(cr, closeX, hy, 11, F(C(0x3a3a3c)));
+        Source(cr, F(hover ? W(1) : grey));
+        cairo_set_line_width(cr, 1.4);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_move_to(cr, closeX - 4.5, hy - 4.5); cairo_line_to(cr, closeX + 4.5, hy + 4.5);
+        cairo_move_to(cr, closeX + 4.5, hy - 4.5); cairo_line_to(cr, closeX - 4.5, hy + 4.5);
+        cairo_stroke(cr);
+        g_hits.push_back({{closeX - 12, hy - 12, 24, 24}, Action::Close});
+    }
+    const double gearX = closeX - 24;
+    {
+        const bool hover = NextHitHovered();
+        if (hover) Dot(cr, gearX, hy, 12, F(C(0x3a3a3c)));
+        Gear(cr, gearX, hy, hover ? 15.4 : 14, F(hover ? W(1) : grey));
+        g_hits.push_back({{gearX - 12, hy - 12, 24, 24}, Action::Settings});
+    }
+    const double dropX = gearX - 24;
+    {
+        const bool hover = NextHitHovered();
+        if (hover) Dot(cr, dropX, hy, 12, F(C(0x3a3a3c)));
+        cairo_save(cr);
+        st::Eyedropper(PenFor(cr), Pt(dropX, hy), hover ? 15.4f : 14.0f, D2(F(hover ? W(1) : grey)));
+        cairo_restore(cr);
+        g_hits.push_back({{dropX - 12, hy - 12, 24, 24}, Action::ColorPick});
+    }
+    double rightEdge = dropX - 16;
+    const lsrc::Battery& bat = lsrc::BatteryState();
+    if (bat.has) {  // the battery, like the status bar: 100% and a little cell
+        const std::string pct = std::to_string(bat.percent) + "%";
+        const double bw = Measure(cr, pct, FSmall);
+        const double bx = rightEdge - 18;
+        RoundRect(cr, bx, hy - 4.5, 14, 9, 2);
+        Source(cr, F(W(1)));
+        cairo_set_line_width(cr, 1.2);
+        cairo_stroke(cr);
+        Fill(cr, bx + 14.5, hy - 2, 1.5, 4, 0.8, F(W(1)));
+        Fill(cr, bx + 1, hy - 3.5, 12 * std::clamp(bat.percent / 100.0, 0.0, 1.0), 7, 1, F(bat.percent <= 20 ? C(0xff453a) : C(0x30d158)));
+        SText(cr, pct, rightEdge - 22 - bw, hy - 8, bw + 2, 16, FSmall, F(W(1)), 2);
+        rightEdge -= 26 + bw;
+    }
     float used = 0;
     const char* tag = "5h";
     if (AgentsShown() && PickUsage(&used, &tag)) {
         char pct[16];
         snprintf(pct, sizeof pct, "%s %d%%", tag, static_cast<int>(used + 0.5f));
         const double pw = Measure(cr, pct, FLabel);
-        const double rx = gearX - 58 - pw;
+        const double rx = rightEdge - pw - 14;
         Ring(cr, rx, hy, 6, 2.4, used / 100.0, C(st::UsageColour(used)));
-        SText(cr, pct, rx + 10, hy - 8, pw + 2, 16, FLabel, F(C(0x8e8e93)));
+        SText(cr, pct, rx + 10, hy - 8, pw + 2, 16, FLabel, F(grey));
         g_hits.push_back({{rx - 9, hy - 10, pw + 21, 20}, Action::AgentPage});
+        rightEdge = rx - 9;
+    }
+    const std::string date = bb::lfeat::FormatDate(time(nullptr));  // Modules.DateFormat
+    const std::string clock = ClockText();
+    const double timeW = Measure(cr, clock, FTitle), dateW = Measure(cr, date, FBody);
+    const double timeRight = rightEdge - 12, timeLeft = timeRight - timeW;
+    if (timeLeft >= leftEnd) {
+        SText(cr, clock, timeLeft, hy - 10, timeW + 2, 20, FTitle, F(W(1)));
+        const double dateLeft = timeLeft - 6 - dateW;
+        if (dateLeft >= leftEnd) SText(cr, date, dateLeft, hy - 9, dateW + 2, 18, FBody, F(grey));
     }
 }
 
@@ -1672,6 +1793,13 @@ void PaintMirror(cairo_t* cr, const Rect& r) {
     Pill(cr, {r.x + r.w - 84, r.y + r.h - 34, 74, 26}, "Turn off", false, Action::MirrorToggle);
 }
 
+struct { double x = 0, y = 0; } g_timerRing;  // the countdown dial's centre, for clicks on it
+#include "pages_timers_linux.inc"
+#include "pages_system_linux.inc"
+#include "pages_weather_linux.inc"
+#include "pages_screentime_linux.inc"
+#include "pages_clipboard_linux.inc"
+
 // ── More Home cards ─────────────────────────────────────────────────────────
 
 void TileWeather(cairo_t* cr, const Rect& r) {
@@ -2058,36 +2186,51 @@ void PaintAgentPage(cairo_t* cr, const Rect& r) {
             }
             SText(cr, kSteps[i], x, by + 7, segW, 15, FSmall, done || current ? W(1) : C(0x636366));
         }
-    } else if ((g_s.usageLimits && g_s.showAgent[AgentClaude] && (a.usage5h >= 0 || a.contextPct >= 0)) || AgQuota().valid) {
-        struct Bar { const char* name; float pct; };
-        const AgSnapshot ag = AgQuota();
-        const bool claude = g_s.usageLimits && g_s.showAgent[AgentClaude];
-        const Bar bars[3] = {{"5-hour limit", claude ? a.usage5h : -1.0f}, {"Week", claude ? a.usage7d : -1.0f},
-                             ag.valid ? Bar{"Antigravity", (1.0f - ag.remaining) * 100.0f} : Bar{"Context", claude ? a.contextPct : -1.0f}};
-        const double segW = (r.w - 2 * 14) / 3;
-        for (int i = 0; i < 3; ++i) {
-            const double x = r.x + i * (segW + 14);
-            const float p = bars[i].pct;
-            Fill(cr, x, by, segW, 4, 2, W(0.16));
-            if (p >= 0) Fill(cr, x, by, segW * std::clamp(p / 100.0, 0.0, 1.0), 4, 2, C(st::UsageColour(p)));
-            std::string label = bars[i].name;
-            if (p >= 0) label += kDot + std::to_string(static_cast<int>(p + 0.5f)) + "%";
-            if (i == 0 && p >= 0 && a.usage5hResets > 0) label += ResetsIn(a.usage5hResets);
-            if (i == 2 && ag.valid && ag.resetAt > 0) label += ResetsIn(ag.resetAt);
-            SText(cr, label, x, by + 7, segW, 15, FSmall, p >= 0 ? C(0xaeaeb2) : C(0x636366));
+    } else {
+        // The limits of the agent on this page (or the main agent between tasks), from
+        // what it keeps on this PC: Claude Code's windows and context, Antigravity's
+        // model pools, Cursor's plan. The same as Windows (common/agent_limits.h).
+        const long long unixNow = static_cast<long long>(time(nullptr));
+        const int kind = a.agent.empty() ? MainAgentKind() : static_cast<int>(AgentKindFor(a.agent));
+        bb::limits::Row row;
+        if (kind == AgentAntigravity && g_s.antigravityQuota) {
+            const AgSnapshot ag = AgQuota();
+            row = bb::limits::Antigravity(ag.valid ? ag.pools : std::vector<bb::agquota::Pool>{}, unixNow);
+        } else if (kind == AgentCursor) {
+            row = bb::limits::Cursor(CursorPlan());
+        } else if (kind == AgentClaude && g_s.usageLimits) {
+            row = bb::limits::Claude(a.usage5h, a.usage5hResets, a.usage7d, a.usage7dResets, a.contextPct, unixNow);
         }
-    } else if (g_s.usageLimits && g_s.showAgent[AgentClaude]) {
-        SText(cr, "Connect Claude Code in Settings to see your usage limits here.", r.x, by, r.w, 20, FSmall, C(0x636366));
+        if (!row.bars.empty()) {
+            const double ly = r.y + r.h - 38;  // a second line under each bar for its reset time
+            const int n = static_cast<int>(row.bars.size());
+            const double segW = (r.w - (n - 1) * 14) / n;
+            for (int i = 0; i < n; ++i) {
+                const bb::limits::Bar& b = row.bars[static_cast<size_t>(i)];
+                const double x = r.x + i * (segW + 14);
+                const float p = b.used;
+                Fill(cr, x, ly, segW, 4, 2, W(0.16));
+                if (p > 0) Fill(cr, x, ly, std::max(4.0, segW * std::clamp(p / 100.0, 0.0, 1.0)), 4, 2, C(st::UsageColour(p)));
+                std::string label = U(b.label);
+                if (p >= 0) label += kDot + std::to_string(static_cast<int>(p + 0.5f)) + "%";
+                SText(cr, label, x, ly + 7, segW, 14, FSmall, p >= 0 ? C(0xaeaeb2) : C(0x636366));
+                const std::wstring reset = bb::limits::ResetsIn(b.resetAt, unixNow);
+                if (!reset.empty()) SText(cr, reset, x, ly + 21, segW, 13, FSmall, C(0x636366));
+            }
+        } else if (!row.note.empty()) {
+            SText(cr, row.note, r.x, by, r.w, 20, FSmall, C(0x8e8e93));
+        }
     }
 }
 
 // ── Page pictures (Settings → Island pages) ────────────────────────────────
-// The same files as Windows: <state>/previews/<page key>.png. Linux draws each
-// page offscreen, so taking them never changes what the island shows.
+// The same files as Windows: <state>/previews/<page key>.png, taken only when
+// asked ("Take pictures of my island"). Linux draws each page offscreen, so
+// taking them never changes what the island shows.
 
 const char* PageKey(Page p) {
     static const char* kKeys[] = {"home", "music", "calendar", "weather", "system", "toggles", "tray", "todo",
-                                  "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water"};
+                                  "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water", "screentime"};
     return kKeys[std::clamp(static_cast<int>(p), 0, static_cast<int>(std::size(kKeys)) - 1)];
 }
 
@@ -2131,25 +2274,6 @@ bool SavePicture(int tabIndex) {
     const std::string dir = bb::plat::StateDir() + "/previews";
     bb::plat::MakeDirs(dir);
     return ok && bb::plat::WriteFileAtomic(dir + "/" + PageKey(page) + ".png", png);
-}
-
-// Pictures without asking: a page that has stayed open for 1.5 s is saved, at
-// most every 15 s per page, so Island pages keeps up with the island by itself.
-Page g_heldPage = Page::Home;
-double g_heldSince = 0;
-double g_savedAt[16] = {};
-
-void NotePageHeld() {
-    const double now = Now();
-    if (g_page != g_heldPage) {
-        g_heldPage = g_page;
-        g_heldSince = now;
-        return;
-    }
-    double& saved = g_savedAt[static_cast<int>(g_page) & 15];
-    if (now - g_heldSince < 1.5 || now - saved < 15) return;
-    saved = now;
-    g_idle_add([](gpointer i) -> gboolean { SavePicture(GPOINTER_TO_INT(i)); return G_SOURCE_REMOVE; }, GINT_TO_POINTER(g_tabIdx));
 }
 
 }  // namespace
@@ -2203,6 +2327,13 @@ void StudioLoadSettings() {
 
 bool StudioLayout() { return g_s.studio; }
 
+void StudioAccentRgb(double rgb[3]) {
+    const Col c = Accent();
+    rgb[0] = c.r;
+    rgb[1] = c.g;
+    rgb[2] = c.b;
+}
+
 int StudioContext() { return g_track.active && g_mediaOn ? 0 : 1; }
 
 void StudioShowAgentPage() { g_wantAgentPage = true; }
@@ -2212,8 +2343,7 @@ bool StudioOnMirror() { return g_page == Page::Mirror; }
 void PaintStudio(cairo_t* cr, const Rect& isl, double mix) {
     CheckCompose();
     UpdateTabs();
-    PaintStudioFrame(cr, isl, mix);
-    if (mix >= 0.99) NotePageHeld();
+    PaintStudioFrame(cr, isl, mix);  // page pictures are taken only when asked (StudioCapturePages)
 }
 
 namespace {
@@ -2241,17 +2371,18 @@ void PaintStudioFrame(cairo_t* cr, const Rect& isl, double mix) {
         case Page::Lyrics: PaintLyrics(cr, pg); break;
         case Page::Agent: PaintAgentPage(cr, pg); break;
         case Page::Calendar: PaintCalendar(cr, pg); break;
-        case Page::Weather: PaintWeather(cr, pg); break;
-        case Page::Hardware: PaintSystem(cr, pg); break;
+        case Page::Weather: PaintWeatherCards(cr, pg); break;
+        case Page::Hardware: PaintSystemCards(cr, pg); break;
         case Page::Connectivity: PaintToggles(cr, pg); break;
         case Page::Todo: PaintTodo(cr, pg); break;
-        case Page::Clipboard: PaintClipboard(cr, pg); break;
+        case Page::Clipboard: PaintClipboardPanels(cr, pg); break;
         case Page::Note: PaintNote(cr, pg); break;
-        case Page::Focus: PaintFocus(cr, pg); break;
+        case Page::Focus: PaintTimers(cr, pg); break;
         case Page::Apps: PaintApps(cr, pg); break;
         case Page::Tray: PaintShelf(cr, pg); break;
         case Page::Mirror: PaintMirror(cr, pg); break;
         case Page::Water: PaintWater(cr, pg); break;
+        case Page::ScreenTime: PaintScreenTime(cr, pg); break;
         default: PaintHome(cr, pg); break;
     }
     cairo_pop_group_to_source(cr);
@@ -2262,6 +2393,18 @@ void PaintStudioFrame(cairo_t* cr, const Rect& isl, double mix) {
     g_alpha = 1;
 }
 }  // namespace
+
+bool StudioScrollTimer(double delta, bool fine) {
+    if (g_page != Page::Focus || bb::ltimers::Mode() != bb::timers::Mode::Countdown) return false;
+    if (g_hoverHit < 0 || g_hoverHit >= static_cast<int>(g_hits.size()) || g_hits[g_hoverHit].action != Action::TimerRing) return false;
+    static double acc = 0;
+    acc += delta;
+    if (std::fabs(acc) < 1.0) return true;  // a touchpad's small steps add up
+    const int notches = acc < 0 ? 1 : -1;  // up adds time
+    acc = 0;
+    bb::ltimers::CountdownStep(notches, fine);
+    return true;
+}
 
 void StudioScroll(double delta) {
     if (RichCardShown()) {  // the plan scrolls
@@ -2518,6 +2661,62 @@ bool StudioDo(const Hit& h) {
             if (h.index / 2 == 0) f.pickH = (f.pickH + dir + 6) % 6;
             else f.pickM = (f.pickM + dir * 5 + 60) % 60;
             if (f.pickH == 0 && f.pickM == 0) f.pickM = 5;
+            return true;
+        }
+        case Action::Close: CloseIsland(); return true;
+        case Action::ClipFilter: g_clipFilter = h.index; g_clipSelected = 0; return true;
+        case Action::ClipSelect: g_clipSelected = h.index; return true;
+        case Action::ClipDelete: lsrc::RemoveClip(h.index); return true;
+        case Action::ScreenTimeLimit: {  // none, 2 h, 4 h ... 12 h, none; none is the default, written as unset
+            static const int kSteps[] = {0, 2, 4, 6, 8, 10, 12};
+            int next = 0;
+            for (size_t k = 0; k + 1 < std::size(kSteps); ++k)
+                if (bb::lscreen::LimitHours() == kSteps[k]) next = kSteps[k + 1];
+            const std::wstring v = std::to_wstring(next);
+            bb::settings::Set(L"Bunbun.ScreenTimeLimit", next ? &v : nullptr);
+            return true;
+        }
+        case Action::VolumeMute: bb::lfeat::ToggleMute(); return true;
+        case Action::VolumeSet:  // where on the slider it was clicked
+            if (h.r.w > 0) bb::lfeat::SetVolume(static_cast<int>(std::clamp((g_mouseX - h.r.x) / h.r.w, 0.0, 1.0) * 100 + 0.5));
+            return true;
+        case Action::TimerMode: bb::ltimers::SetMode(static_cast<bb::timers::Mode>(std::clamp(h.index, 0, bb::timers::kModeCount - 1))); return true;
+        case Action::PomoToggle: bb::ltimers::PomodoroToggle(); return true;
+        case Action::PomoSkip: bb::ltimers::PomodoroSkip(); return true;
+        case Action::PomoReset: bb::ltimers::PomodoroReset(); return true;
+        case Action::PomoAuto: bb::ltimers::PomodoroAuto(); return true;
+        case Action::PomoLength: bb::ltimers::PomodoroLength(h.index); return true;
+        case Action::CountToggle: bb::ltimers::CountdownToggle(); return true;
+        case Action::CountAdd: bb::ltimers::CountdownAdd(h.index); return true;
+        case Action::CountReset: bb::ltimers::CountdownReset(); return true;
+        case Action::CountPreset: bb::ltimers::CountdownSet(h.index); return true;
+        case Action::CountSave: bb::ltimers::SavePreset(); return true;
+        case Action::TimerRing: {  // a click on the dial: straight up is 0, clockwise, one turn an hour
+            const double angle = std::atan2(g_mouseX - g_timerRing.x, g_timerRing.y - g_mouseY);
+            bb::ltimers::CountdownSet(bb::timers::SecondsFromAngle(angle));
+            return true;
+        }
+        case Action::SwToggle: bb::ltimers::StopwatchToggle(); return true;
+        case Action::SwLap: bb::ltimers::StopwatchLap(); return true;
+        case Action::SwReset: bb::ltimers::StopwatchReset(); return true;
+        case Action::SwCopy: lsrc::CopyText(bb::ltimers::LapsText()); return true;
+        case Action::WeatherUnit: {  // Modules.WeatherFahrenheit; the default (off) is written as unset
+            static const std::wstring on = L"true";
+            bb::settings::Set(L"Modules.WeatherFahrenheit", lsrc::CurrentWeather().fahrenheit ? nullptr : &on);
+            return true;
+        }
+        case Action::WeatherCity: OpenSettings("tools"); return true;  // Page options: the weather city
+        case Action::RadioToggle: {
+            const lsrc::Radios& r = lsrc::RadioState();
+            if (h.index == 0 && r.wifiKnown) lsrc::SetWifi(!r.wifi);
+            else if (h.index == 1 && r.btKnown) lsrc::SetBluetooth(!r.bt);
+            return true;
+        }
+        case Action::RadioSettings: {  // pick a network or a device in the desktop's own settings
+            const bool bt = h.index == 1;
+            if (!bb::plat::Spawn({"gnome-control-center", bt ? "bluetooth" : "wifi"}) &&
+                !bb::plat::Spawn({"systemsettings", bt ? "kcm_bluetooth" : "kcm_networkmanagement"}))
+                bb::plat::Spawn({bt ? "blueman-manager" : "nm-connection-editor"});
             return true;
         }
         case Action::Radio: {

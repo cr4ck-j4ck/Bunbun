@@ -15,14 +15,18 @@
 #include "../mascot/mascot.h"
 #include "../assistant/assistant.h"
 #include "../common/todos.h"  // Bunbun: to-do file and repeats, shared with the settings app
+#include "../common/timers.h"  // Bunbun: the Timers page's rules, shared with Linux
 #include "../common/json.h"   // Bunbun: talking to the local AI helper
 #include "../common/applist.h"  // Bunbun: app lists typed in Settings (full screen, music / video)
 #include "../common/chime_wav.h"  // Bunbun: the UI chimes, shared with Linux
 #include "../common/ics.h"        // Bunbun: calendar links (.ics), shared with Linux
 #include "../common/ag_quota.h"   // Bunbun: Antigravity's quota, shared with Linux
+#include "../common/agent_limits.h"  // Bunbun: what the Agent page's limits row shows per agent
 #include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
 #include "../agents/agent_diff.h"      // Bunbun: the approval card's diff lines, shared with Linux
 #include "../common/water.h"           // Bunbun: the water reminder's rules, shared with Linux
+#include "../common/screentime.h"      // Bunbun: Screen Time's bookkeeping (screentime_module.inc)
+#include "../common/edgelight.h"       // Bunbun: what plays the edge light (edgelight_module.inc)
 #include "../updater.h"  // Bunbun: one-click updates from the island's update notice
 #include "studio_icons.h"  // Bunbun: Studio page model and icons, shared with the Linux island
 #include <windows.h>
@@ -78,6 +82,7 @@
 #include <regex>   // Bunbun: meeting links in calendar events
 #include <string>
 #include <string_view>
+#include <condition_variable>
 #include <thread>
 #include <future>
 #include <unordered_map>
@@ -777,8 +782,15 @@ struct Settings {
     bool musicSwipe = true;
     bool idleEyes = false;  // Bunbun: eyes instead of the mascot beside the clock
     bool idleShowClock = true;    // Bunbun: Bunbun.IdleStripItems
+    std::wstring idleName;        // Bunbun: "name": this text in the time's place (Bunbun.IdleName)
     int statusRing = 1;           // Bunbun: Bunbun.StatusRing: 0 off, 1 auto, 2 water, 3 tasks, 4 focus
+    int edgeLight = 2;            // Bunbun: Bunbun.EdgeLight: 0 off, 1 comet, 2 twin comets, 3 breathe
+    unsigned edgeLightOn = 0;     // Bunbun: Bunbun.EdgeLightOn, EdgeLight::kOn* bits (what plays it)
+    int edgeLightColor = 0;       // Bunbun: Bunbun.EdgeLightColor: 0 default (white), 1 dynamic, 2 custom
+    D2D1_COLOR_F edgeLightCustom = D2D1::ColorF(0.353f, 0.784f, 0.98f, 1.0f);  // Bunbun: Bunbun.EdgeLightCustomColor
     bool focusPage = true;        // Bunbun: Focus page and guard (studio_module.inc)
+    bool screenTime = true;       // Bunbun: Screen Time page
+    int screenTimeLimit = 0;      // Bunbun: Bunbun.ScreenTimeLimit, hours a day (0 = none)
     bool appsPage = true;         // Bunbun: All apps page
     int homeTile[3] = {-1, -1, -1};  // Bunbun: Home slots, -1 = automatic (HomeTile order)
     bool bluetoothLowWarning = true;  // Bunbun: heads-up at 20% for connected BT devices
@@ -791,6 +803,9 @@ struct Settings {
     std::wstring homeLinks;       // Bunbun: "Name|address; ..." under the Home tiles
     std::wstring pageOrder;       // Bunbun: Bunbun.PageOrder, page keys in tab order (DashboardTabIds)
     bool focusGuard = false;
+    int pomoFocus = 25, pomoShort = 5, pomoLong = 15, pomoCycles = 4;  // Bunbun: Bunbun.Pomodoro*
+    bool pomoAutoStart = true;     // Bunbun: Bunbun.PomodoroAutoStart
+    std::wstring timerPresets;     // Bunbun: Bunbun.TimerPresets
     std::wstring focusGuardApps;
     bool idleShowWeather = true;
     int eyeColor = 0;             // Bunbun: Bunbun.EyeColor, index into kEyeColors
@@ -805,6 +820,10 @@ struct Settings {
     bool mirrorPositionSame = true;
     Position mirrorPosition = Position::TopCenter;
     std::wstring displayPositions;  // "2=bottom-center;3=top-left"
+    bool displaysSeparate = false;  // Bunbun: Appearance.DisplayLink = separate (else linked)
+    std::wstring displayShapes, displaySizes;  // Bunbun: Appearance.DisplayShapes / DisplaySizes ("2=pill;3=notch", "2=1.2")
+    bool baseNotch = false, baseW11 = false;     // Bunbun: Appearance.ShapeStyle as set (the shape may follow the display)
+    Position basePosition = Position::TopCenter;  // Bunbun: Appearance.Position as set (position may follow the display)
 };
 
 struct BitmapPixels {
@@ -937,6 +956,21 @@ struct TimerSnapshot {
     double remainingAtPause = 0.0;
     bool justFinished = false;
     double finishedExpiresAt = 0.0;
+    int kind = 0;                 // Bunbun: kTimerKindTimer or kTimerKindPomodoro (timers_module.inc)
+    std::wstring label;           // Bunbun: what the pill calls it ("Focus 1 of 4", "Timer"); empty = default
+    std::wstring doneLabel;       // Bunbun: what it says when it ends ("Focus done · Take a break")
+};
+
+// Bunbun: the Timers page's kinds of timer on g_state.timer.
+constexpr int kTimerKindTimer = 0;     // a countdown (the Timer mode, Ask Bun's timers)
+constexpr int kTimerKindPomodoro = 1;  // a Pomodoro focus session or break
+
+// Bunbun: the Timers page's stopwatch (timers_module.inc).
+struct StopwatchSnapshot {
+    bool active = false;          // started and not reset
+    bool running = false;
+    double startedAt = 0.0;       // NowSeconds() when it last started running
+    double accumulated = 0.0;     // seconds counted before that
 };
 
 enum class DeviceEventType {
@@ -982,6 +1016,7 @@ struct SystemSnapshot {
     std::wstring foregroundTitle;
     std::wstring micApp;
     std::wstring cameraApp;
+    std::wstring audioDeviceName; // Bunbun: default audio output endpoint name
 };
 
 #include "modules/bunbun_types.inc"  // Bunbun: types for the Bunbun modules
@@ -1008,6 +1043,9 @@ struct ConnectivitySnapshot {
     int remainingMwh = 0;
     int fullMwh = 0;             // today's full charge
     int designMwh = 0;           // when new
+    // Bunbun: connected Bluetooth device & battery (for Studio System page)
+    std::wstring connectedBtName;
+    int connectedBtBattery = -1;  // 0-100 or -1 if unknown
     // Long-press lists, only filled while one is on screen.
     std::vector<WifiNetwork> wifiNetworks;
     std::vector<BluetoothListDevice> bluetoothList;
@@ -1017,6 +1055,20 @@ struct Activity {
     IslandKind kind = IslandKind::Idle;
     float width = 120.0f;
     float height = 36.0f;
+};
+
+struct WeatherHourlyPoint {
+    std::wstring timeLabel; // "Now", "10 AM", etc.
+    float temp = 0.0f;
+    int weatherCode = 0;
+    bool isDay = true;
+};
+
+struct WeatherDailyPoint {
+    std::wstring dayName; // "Today", "Sat", etc.
+    float minTemp = 0.0f;
+    float maxTemp = 0.0f;
+    int weatherCode = 0;
 };
 
 struct WeatherSnapshot {
@@ -1030,6 +1082,15 @@ struct WeatherSnapshot {
     std::wstring humidity;
     std::wstring feelsLike;
     double lastUpdated = 0.0;
+    // Bunbun Studio Weather extensions:
+    float todayHigh = 0.0f;
+    float todayLow = 0.0f;
+    float uvIndex = 0.0f;
+    std::wstring uvDesc;       // e.g. "2 Low"
+    std::wstring sunrise;      // e.g. "6:39"
+    std::wstring sunset;       // e.g. "5:40"
+    std::vector<WeatherHourlyPoint> hourly; // 6 points
+    std::vector<WeatherDailyPoint> daily;   // 5 days
 };
 
 struct DoNotDisturbSnapshot {
@@ -1209,6 +1270,14 @@ int g_agentHoveredButton = -1;
 class Renderer;
 std::mutex g_frameMutex;
 Renderer* g_snapshotRenderer = nullptr;  // guarded by g_frameMutex
+// Bunbun: Separate displays. The second renderer that draws the other displays'
+// islands at rest, what they show (the island's last resting activity, in content
+// units, without the notch's extra width) and this frame's state. Render thread only.
+Renderer* g_restRenderer = nullptr;
+struct SharedState;
+struct RestLook { bool valid = false; int kind = 0; float width = 0, height = 0, bunSlot = 0; };
+RestLook g_restLook;
+const SharedState* g_restState = nullptr;
 
 // Bunbun: width of the mascot slot at the left of the collapsed island (idle
 // strip and music pill), 0 when hidden. Set by the render loop, read by
@@ -1238,6 +1307,7 @@ struct SharedState {
     BrightnessSnapshot brightness;
     CapsLockSnapshot capsLock;
     TimerSnapshot timer;
+    StopwatchSnapshot stopwatch;  // Bunbun: the Timers page's stopwatch
     DeviceSnapshot device;
     BluetoothDeviceSnapshot bluetoothDevice;
     DoNotDisturbSnapshot doNotDisturb;
@@ -1356,6 +1426,8 @@ std::atomic<int> g_lyricsEffectiveOffsetBtMs{0};      // Bluetooth output: setti
 // Set when the default render endpoint must be re-read. Declared up here (not next to
 // VolumeNotifyClient) so the Bluetooth watcher, which comes earlier in the file, can set it.
 std::atomic<bool> g_volumeEndpointStale{true};
+std::atomic<bool> g_studioVolumeDrag{false};
+std::atomic<double> g_suppressVolumeNotificationUntil{0.0};
 std::atomic<bool> g_layoutDirty = true;
 std::atomic<bool> g_clickExpanded = false;
 std::atomic<int> g_pressedMediaButton = -1;
@@ -1449,9 +1521,9 @@ bool GameOverlayShown(bool enabled) {
     return (enabled || g_gameOverlayPinned.load()) && NowSeconds() >= g_gameOverlayPeekUntil.load(std::memory_order_relaxed);
 }
 std::atomic<bool> g_pinnedExpanded{false};
+std::atomic<bool> g_hoverSuppressed{false};  // Bunbun: suppresses hover expansion after Close until mouse leaves
 std::atomic<bool> g_capturingPages{false};  // Bunbun: IslandCapturePages is stepping through the pages
 std::atomic<bool> g_dashboardOpen{false};    // Bunbun: the dashboard (not an activity) is open on screen
-void StartPassivePagePictures();             // Bunbun: end of file
 std::atomic<int> g_pillOpacityOverride{-1};
 
 constexpr GUID kSubTypeIeeeFloat = {
@@ -2490,7 +2562,22 @@ inline HMONITOR GetAnchorMonitorFor(int targetMonitor) {
     return selectedMonitor;
 }
 
+// Bunbun: Separate displays. The display the working island is on. It moves only
+// when the pointer reaches another display's island while this one is at rest (the
+// render loop sets it), not whenever the pointer crosses screens: that moved the
+// island, rebuilt the others and re-sized it on every pass between displays.
+std::atomic<HMONITOR> g_separateAnchor{nullptr};
+
 inline HMONITOR GetAnchorMonitor() {
+    if (g_settings.displaysAll && g_settings.displaysSeparate) {
+        HMONITOR m = g_separateAnchor.load(std::memory_order_relaxed);
+        MONITORINFO mi{sizeof mi};
+        if (!m || !GetMonitorInfoW(m, &mi)) {  // first use, or that display went away
+            m = GetAnchorMonitorFor(-1);
+            g_separateAnchor.store(m, std::memory_order_relaxed);
+        }
+        return m;
+    }
     return GetAnchorMonitorFor(g_settings.targetMonitor);
 }
 
@@ -2604,6 +2691,7 @@ void LoadSettings() {
     } else if (EqualsNoCase(position, L"bottom-right")) {
         next.position = Position::BottomRight;
     }
+    next.basePosition = next.position;  // Bunbun: Separate displays may move `position` per display
 
     next.displaysAll = EqualsNoCase(GetStringSettingCopy(L"Appearance.Displays"), L"all");
     {
@@ -2611,6 +2699,9 @@ void LoadSettings() {
         next.mirrorPositionSame = !ParsePositionName(mp, &next.mirrorPosition);
     }
     next.displayPositions = GetStringSettingCopy(L"Appearance.DisplayPositions");
+    next.displaysSeparate = EqualsNoCase(GetStringSettingCopy(L"Appearance.DisplayLink"), L"separate");
+    next.displayShapes = GetStringSettingCopy(L"Appearance.DisplayShapes");
+    next.displaySizes = GetStringSettingCopy(L"Appearance.DisplaySizes");
 
     const std::wstring scale = GetStringSettingCopy(L"Appearance.SizeScale");
     if (!scale.empty()) {
@@ -2646,6 +2737,8 @@ void LoadSettings() {
     next.idleEyes = EqualsNoCase(GetStringSettingCopy(L"Bunbun.IdleFace"), L"eyes");
     next.eyeStatusColors = Wh_GetIntSetting(L"Bunbun.EyeStatusColors") != 0;
     next.focusPage = Wh_GetIntSetting(L"Bunbun.FocusPage") != 0;
+    next.screenTime = Wh_GetIntSetting(L"Bunbun.ScreenTime") != 0;
+    next.screenTimeLimit = std::clamp(Wh_GetIntSetting(L"Bunbun.ScreenTimeLimit"), 0, 24);
     next.appsPage = Wh_GetIntSetting(L"Bunbun.AppsPage") != 0;
     for (int i = 0; i < 3; ++i) {
         static const wchar_t* kKeys[3] = {L"Bunbun.HomeTile1", L"Bunbun.HomeTile2", L"Bunbun.HomeTile3"};
@@ -2667,6 +2760,12 @@ void LoadSettings() {
     next.homeLinks = GetStringSettingCopy(L"Bunbun.HomeLinks");
     next.pageOrder = GetStringSettingCopy(L"Bunbun.PageOrder");
     next.focusGuard = Wh_GetIntSetting(L"Bunbun.FocusGuard") != 0;
+    next.pomoFocus = Wh_GetIntSetting(L"Bunbun.PomodoroFocus");  // Bunbun: the Timers page
+    next.pomoShort = Wh_GetIntSetting(L"Bunbun.PomodoroShortBreak");
+    next.pomoLong = Wh_GetIntSetting(L"Bunbun.PomodoroLongBreak");
+    next.pomoCycles = Wh_GetIntSetting(L"Bunbun.PomodoroCycles");
+    next.pomoAutoStart = Wh_GetIntSetting(L"Bunbun.PomodoroAutoStart") != 0;
+    next.timerPresets = GetStringSettingCopy(L"Bunbun.TimerPresets");
     next.focusGuardApps = GetStringSettingCopy(L"Bunbun.FocusGuardApps");
     next.usageLimits = Wh_GetIntSetting(L"Bunbun.UsageLimits") != 0;
     next.antigravityQuota = Wh_GetIntSetting(L"Bunbun.AntigravityQuota") != 0;
@@ -2682,12 +2781,26 @@ void LoadSettings() {
     {
         std::wstring items = GetStringSettingCopy(L"Bunbun.IdleStripItems");
         for (auto& c : items) c = towlower(c);
-        next.idleShowClock = items.empty() || items == L"time-weather" || items == L"time";
-        next.idleShowWeather = items.empty() || items == L"time-weather" || items == L"weather";
+        next.idleShowClock = items.empty() || items == L"time-weather" || items == L"time" || items == L"name" || items == L"name-weather";
+        next.idleShowWeather = items.empty() || items == L"time-weather" || items == L"weather" || items == L"name-weather";
+        // Bunbun: your own text where the time goes.
+        if (items == L"name" || items == L"name-weather") {
+            next.idleName = GetStringSettingCopy(L"Bunbun.IdleName");
+            if (next.idleName.empty()) next.idleName = L"Bunbun";
+        }
         // Bunbun: the ring beside the clock.
         std::wstring ring = GetStringSettingCopy(L"Bunbun.StatusRing");
         for (auto& c : ring) c = towlower(c);
         next.statusRing = ring == L"off" ? 0 : ring == L"water" ? 2 : ring == L"tasks" ? 3 : ring == L"focus" ? 4 : 1;
+        // Bunbun: the edge light (edgelight_module.inc).
+        std::wstring edge = GetStringSettingCopy(L"Bunbun.EdgeLight");
+        for (auto& c : edge) c = towlower(c);
+        next.edgeLight = edge == L"off" ? 0 : edge == L"comet" ? 1 : edge == L"breathe" ? 3 : 2;
+        next.edgeLightOn = bb::edgelight::ParseOn(GetStringSettingCopy(L"Bunbun.EdgeLightOn"));
+        std::wstring edgeCol = GetStringSettingCopy(L"Bunbun.EdgeLightColor");
+        for (auto& c : edgeCol) c = towlower(c);
+        next.edgeLightColor = edgeCol == L"dynamic" || edgeCol == L"accent" ? 1 : edgeCol == L"custom" ? 2 : 0;
+        next.edgeLightCustom = ColorFromHex(GetStringSettingCopy(L"Bunbun.EdgeLightCustomColor"), D2D1::ColorF(0.353f, 0.784f, 0.98f, 1.0f));
         std::wstring eye = GetStringSettingCopy(L"Bunbun.EyeColor");
         for (auto& c : eye) c = towlower(c);
         const wchar_t* names[] = {L"mint", L"white", L"blue", L"pink", L"purple", L"yellow"};
@@ -3066,6 +3179,8 @@ void LoadSettings() {
     if (IsBottomPosition(next.position)) {
         next.notchStyle = false;
     }
+    next.baseNotch = next.notchStyle;  // Bunbun: Separate displays may change the shape per display
+    next.baseW11 = next.w11Style;
 
     // Color settings — check local theme override first, then settings YAML.
     // Palettes live in kThemePalettes at file scope so the right-click menu
@@ -3996,25 +4111,171 @@ StageLayout ComputeStageLayout(const Settings& settings, float pillW, float pill
     return s;
 }
 
+// ── Bunbun: per-display values ("2=pill;3=notch") ───────────────────────────
+// The entry for 1-based display `index` in a "n=value;n=value" list, "" when none.
+std::wstring PerDisplayValue(const std::wstring& list, int index) {
+    size_t start = 0;
+    while (start < list.size()) {
+        size_t end = list.find_first_of(L";,", start);
+        if (end == std::wstring::npos) end = list.size();
+        const std::wstring item = list.substr(start, end - start);
+        const size_t eq = item.find(L'=');
+        if (eq != std::wstring::npos && _wtoi(item.substr(0, eq).c_str()) == index) {
+            std::wstring v = item.substr(eq + 1);
+            v.erase(0, v.find_first_not_of(L" \t"));
+            v.erase(v.find_last_not_of(L" \t") + 1);
+            return v;
+        }
+        start = end + 1;
+    }
+    return {};
+}
+// Display `index`'s shape: 0 pill, 1 Windows 11, 2 notch; -1 = the island's own.
+int DisplayShape(const Settings& s, int index) {
+    const std::wstring v = PerDisplayValue(s.displayShapes, index);
+    if (EqualsNoCase(v, L"notch")) return 2;
+    if (EqualsNoCase(v, L"w11")) return 1;
+    if (EqualsNoCase(v, L"pill") || EqualsNoCase(v, L"default")) return 0;
+    return -1;
+}
+// Display `index`'s size, relative to Size scale (1 = the same).
+float DisplaySize(const Settings& s, int index) {
+    const float v = static_cast<float>(_wtof(PerDisplayValue(s.displaySizes, index).c_str()));
+    return v >= 0.5f && v <= 2.5f ? v : 1.0f;
+}
+// 1-based number of a display (0 when it isn't connected).
+int DisplayIndexOf(HMONITOR monitor) {
+    MonitorEnumData mons;
+    EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&mons));
+    for (size_t i = 0; i < mons.monitors.size(); ++i)
+        if (mons.monitors[i] == monitor) return static_cast<int>(i) + 1;
+    return 0;
+}
+
 // ── Bunbun: mirror islands on other displays ────────────────────────────────
 // With Appearance.Displays = all, every display other than the island's own gets
 // a mirror: a click-through layered window that shows the same pixels. Each
 // present copies just the pill (plus room for its shadow) out of the main
 // stage's DIB with UpdateLayeredWindowIndirect's source offset, so mirrors cost
 // one extra composite each, never a second render. A mirror can sit at a
-// different anchor (top on one screen, bottom on another). Mirrors are view-only;
-// hover and clicks belong to the main island. Render thread only.
+// different anchor (top on one screen, bottom on another). Render thread only.
+// Bunbun: Appearance.DisplayLink. Linked: a mirror works like the island itself:
+// the pointer on it opens the island (and so every mirror), and its mouse input
+// is handed to the island at the matching point. Separate: the working island
+// follows the pointer's display (GetAnchorMonitor); every other display gets its
+// own island at rest, drawn live by a second renderer in that display's shape and
+// size (RenderRestIsland), so only the one you use opens. The kept copy below is
+// only a fallback for when that renderer isn't there.
+// Bunbun: draws the island at rest for another display (shape 0 pill, 1 Windows 11,
+// 2 notch; `scale` its size scale). Defined after the Renderer; render thread only.
+bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size, RECT* pill);
 namespace Mirrors {
 
 struct Mirror {
     HWND hwnd = nullptr;
     HMONITOR monitor = nullptr;
+    int index = 0;                // 1-based display number
     Position position = Position::TopCenter;
     bool visible = false;
+    RECT shown{};                 // where its pixels are on screen (pill plus margin)
+    POINT toMain{};               // add to a point on this mirror to get the same point on the island
+    bool tracking = false;        // TrackMouseEvent is armed for its WM_MOUSELEAVE
+    int shape = -1;               // Separate: this display's shape (0 pill, 1 Windows 11, 2 notch; -1 the island's)
+    float size = 1.0f;            // Separate: this display's size, relative to Size scale
+    POINT origin{};               // where its bitmap was last put on screen
+    HDC dc = nullptr;             // its own bitmap, when it's drawn in its own shape or size
+    HBITMAP bmp = nullptr, old = nullptr;
+    SIZE dcSize{};
 };
 std::vector<Mirror> g_list;
 double g_lastSync = -100.0;
 bool g_classRegistered = false;
+HMONITOR g_lastAnchor = nullptr;
+std::atomic<bool> g_forwarding{false};  // the island is handling a mirror's mouse message
+std::atomic<bool> g_pointerOn{false};   // the pointer is on a mirror's pill (Linked)
+std::mutex g_placeMutex;                // guards the `shown` / `toMain` copy below, for the pipe thread
+struct Place { HMONITOR monitor; int index; RECT shown; POINT toMain; };
+std::vector<Place> g_places;
+
+// The island at rest, for Separate mode: the last pixels shown while it wasn't open.
+HDC g_restDc = nullptr;
+HBITMAP g_restBmp = nullptr, g_restOld = nullptr;
+SIZE g_restSize{};
+RECT g_restPill{};  // the pill within that copy
+SIZE g_lastPillSize{};   // to tell when the island has settled
+double g_pillSizeSince = 0;
+
+// A mirror's mouse messages, handed to the island as if it had been pointed at
+// directly (Linked mode).
+LRESULT CALLBACK MirrorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    Mirror* m = nullptr;
+    for (auto& x : g_list)
+        if (x.hwnd == hwnd) m = &x;
+    if (!m || !g_hwnd) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    switch (msg) {
+        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_MBUTTONUP: {
+            if (msg == WM_MOUSEMOVE && !m->tracking) {
+                TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE, hwnd, 0};
+                m->tracking = TrackMouseEvent(&tme) != FALSE;
+            }
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ClientToScreen(hwnd, &pt);
+            pt.x += m->toMain.x;
+            pt.y += m->toMain.y;
+            ScreenToClient(g_hwnd, &pt);
+            g_forwarding = true;
+            const LRESULT r = SendMessageW(g_hwnd, msg, wParam, MAKELPARAM(pt.x, pt.y));
+            g_forwarding = false;
+            return r;
+        }
+        case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL: {  // screen coordinates
+            const POINT pt{GET_X_LPARAM(lParam) + m->toMain.x, GET_Y_LPARAM(lParam) + m->toMain.y};
+            g_forwarding = true;
+            const LRESULT r = SendMessageW(g_hwnd, msg, wParam, MAKELPARAM(pt.x, pt.y));
+            g_forwarding = false;
+            return r;
+        }
+        case WM_MOUSELEAVE:
+            m->tracking = false;
+            SendMessageW(g_hwnd, WM_MOUSELEAVE, 0, 0);
+            return 0;
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// Linked: a pointer on a display with a copy of the island, moved to the matching spot
+// on the island itself (for the eyes; the copy shows the island's pixels).
+void PointerToIsland(POINT* p) {
+    if (!g_settings.displaysAll || g_settings.displaysSeparate) return;
+    const HMONITOR there = MonitorFromPoint(*p, MONITOR_DEFAULTTONULL);
+    for (const auto& m : g_list)
+        if (m.visible && m.monitor == there) {
+            p->x += m.toMain.x;
+            p->y += m.toMain.y;
+            return;
+        }
+}
+
+// Separate: the display whose island the pointer is on (with a little slack), else null.
+HMONITOR RestIslandUnder(POINT cursor) {
+    for (const auto& m : g_list) {
+        RECT r = m.shown;
+        InflateRect(&r, 10, 10);
+        if (m.visible && PtInRect(&r, cursor)) return m.monitor;
+    }
+    return nullptr;
+}
+
+// Is the pointer on a mirror's island (Linked mode)? Its rect, in screen pixels.
+bool PointerOn(POINT cursor, const Settings& s) {
+    if (!s.displaysAll || s.displaysSeparate) return false;
+    for (const auto& m : g_list)
+        if (m.visible && PtInRect(&m.shown, cursor)) return true;
+    return false;
+}
 
 // "2=bottom-center;3=top-left" -> position for 1-based display `index`.
 Position PositionFor(int index, const Settings& s) {
@@ -4035,15 +4296,30 @@ Position PositionFor(int index, const Settings& s) {
     return pos;
 }
 
+void FreeBitmap(Mirror& m) {
+    if (!m.dc) return;
+    SelectObject(m.dc, m.old);
+    DeleteObject(m.bmp);
+    DeleteDC(m.dc);
+    m.dc = nullptr;
+    m.bmp = m.old = nullptr;
+    m.dcSize = SIZE{};
+}
+
 void DestroyAll() {
-    for (auto& m : g_list)
+    for (auto& m : g_list) {
         if (m.hwnd) DestroyWindow(m.hwnd);
+        FreeBitmap(m);
+    }
     g_list.clear();
 }
 
 // Matches the mirror list to the connected displays (cheap; run every ~2 s).
 void Sync(const Settings& s, double now) {
-    if (now - g_lastSync < 2.0) return;
+    // Every ~2 s, and at once when the island moves to another display (Separate).
+    const HMONITOR anchor = GetAnchorMonitor();
+    if (now - g_lastSync < 2.0 && anchor == g_lastAnchor) return;
+    g_lastAnchor = anchor;
     g_lastSync = now;
     if (!s.displaysAll) {
         DestroyAll();
@@ -4051,8 +4327,9 @@ void Sync(const Settings& s, double now) {
     }
     if (!g_classRegistered) {
         WNDCLASSW wc{};
-        wc.lpfnWndProc = DefWindowProcW;
+        wc.lpfnWndProc = MirrorWndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.lpszClassName = L"BunbunMirror";
         g_classRegistered = RegisterClassW(&wc) != 0;
     }
@@ -4065,11 +4342,23 @@ void Sync(const Settings& s, double now) {
         if (data.monitors[i] == own) continue;
         Mirror m;
         for (auto& old : g_list)
-            if (old.monitor == data.monitors[i]) { m = old; old.hwnd = nullptr; }
+            if (old.monitor == data.monitors[i]) { m = old; old.hwnd = nullptr; old.dc = nullptr; }
         m.monitor = data.monitors[i];
-        m.position = PositionFor(static_cast<int>(i) + 1, s);
+        m.index = static_cast<int>(i) + 1;
+        // Separate mode: the configured main display keeps Appearance.Position.
+        const int mainIndex = s.targetMonitor > 0 ? s.targetMonitor : 0;
+        const bool isMain = s.targetMonitor == 0 ? MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY) == m.monitor
+                                                 : mainIndex == m.index;
+        m.position = s.displaysSeparate && isMain ? s.basePosition : PositionFor(m.index, s);
+        // Separate: each display's own shape and size (Linked mirrors are exact copies).
+        // Its own entry when there is one (the main display's too); else the island's look.
+        m.shape = s.displaysSeparate ? DisplayShape(s, m.index) : -1;
+        if (s.displaysSeparate && m.shape < 0) m.shape = s.baseNotch ? 2 : s.baseW11 ? 1 : 0;  // no entry: the island's set shape
+        m.size = s.displaysSeparate ? DisplaySize(s, m.index) : 1.0f;
+        if (IsBottomPosition(m.position) && m.shape == 2) m.shape = 0;  // a notch only hangs from the top
         if (!m.hwnd) {
-            m.hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+            // Not click-through: a Linked mirror takes the pointer (fully clear pixels still pass it on).
+            m.hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                                      L"BunbunMirror", L"Bunbun", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr,
                                      GetModuleHandleW(nullptr), nullptr);
             m.visible = false;
@@ -4080,8 +4369,150 @@ void Sync(const Settings& s, double now) {
     g_list = std::move(next);
 }
 
+// The island's outline in a given shape: pill (0), Windows 11 (1) or notch (2, with
+// its ears when `ears`), for a mirror drawn in its display's own look.
+ComPtr<ID2D1Geometry> ShapeGeometry(ID2D1Factory* f, D2D1_RECT_F r, int shape, float scale, bool ears) {
+    const float w = r.right - r.left, h = r.bottom - r.top;
+    if (shape != 2) {
+        const float radius = shape == 1 ? 8.0f * scale : std::min(h * 0.5f, 44.0f * scale);
+        ComPtr<ID2D1RoundedRectangleGeometry> g;
+        f->CreateRoundedRectangleGeometry(D2D1::RoundedRect(r, radius, radius), &g);
+        return g;
+    }
+    const float hu = h / scale;
+    const float rb = (hu <= 44.0f ? hu * 0.5f : std::min(30.0f, 22.0f + (hu - 44.0f) * 0.1f)) * scale;  // NotchBottomRadius
+    const float e = ears ? std::max(0.0f, std::min({16.0f * scale, h * 0.42f, w / 8.0f})) : 0.0f;
+    ComPtr<ID2D1PathGeometry> g;
+    ComPtr<ID2D1GeometrySink> k;
+    if (FAILED(f->CreatePathGeometry(&g)) || FAILED(g->Open(&k))) return nullptr;
+    k->BeginFigure(D2D1::Point2F(r.left - e, r.top), D2D1_FIGURE_BEGIN_FILLED);
+    k->AddLine(D2D1::Point2F(r.right + e, r.top));
+    if (e > 0) k->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right, r.top + e), D2D1::SizeF(e, e), 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    k->AddLine(D2D1::Point2F(r.right, r.bottom - rb));
+    k->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.right - rb, r.bottom), D2D1::SizeF(rb, rb), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    k->AddLine(D2D1::Point2F(r.left + rb, r.bottom));
+    k->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left, r.bottom - rb), D2D1::SizeF(rb, rb), 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    k->AddLine(D2D1::Point2F(r.left, r.top + e));
+    if (e > 0) k->AddArc(D2D1::ArcSegment(D2D1::Point2F(r.left - e, r.top), D2D1::SizeF(e, e), 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    k->EndFigure(D2D1_FIGURE_END_CLOSED);
+    k->Close();
+    return g;
+}
+
+// Draws the island at rest into mirror `m`'s own bitmap, in that display's shape and
+// size: its surface in the island's own colour, then the island's content scaled and
+// clipped into the new outline. `pill` is the island in `src`. Returns the bitmap's
+// size and where the pill sits in it.
+bool DrawOwnLook(Mirror& m, HDC src, RECT pill, int shape, float k, float scale, SIZE* outSize, POINT* pillAt) {
+    static ComPtr<ID2D1Factory> factory;
+    static ComPtr<ID2D1DCRenderTarget> rt;
+    if (!factory && FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory.GetAddressOf()))) return false;
+    if (!rt) {
+        const auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                                                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (FAILED(factory->CreateDCRenderTarget(&props, &rt))) return false;
+    }
+    const int pw = pill.right - pill.left, ph = pill.bottom - pill.top;
+    if (pw <= 2 || ph <= 2) return false;
+    // The island's pixels, top-down, for a Direct2D bitmap.
+    static HDC tmpDc = nullptr;
+    static HBITMAP tmpBmp = nullptr;
+    static void* tmpBits = nullptr;
+    static SIZE tmpSize{};
+    if (!tmpDc || tmpSize.cx != pw || tmpSize.cy != ph) {
+        if (tmpDc) { DeleteObject(tmpBmp); DeleteDC(tmpDc); }
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), pw, -ph, 1, 32, BI_RGB};
+        tmpDc = CreateCompatibleDC(src);
+        tmpBmp = CreateDIBSection(src, &bi, DIB_RGB_COLORS, &tmpBits, nullptr, 0);
+        SelectObject(tmpDc, tmpBmp);
+        tmpSize = SIZE{pw, ph};
+    }
+    BitBlt(tmpDc, 0, 0, pw, ph, src, pill.left, pill.top, SRCCOPY);
+    GdiFlush();
+    // The surface colour: a pixel just inside the island's left edge, half way down.
+    const BYTE* px = static_cast<const BYTE*>(tmpBits) + (ph / 2) * pw * 4 + std::min(4, pw - 1) * 4;
+    const float a = px[3] / 255.0f;
+    const D2D1_COLOR_F fill = a > 0.01f ? D2D1::ColorF(px[2] / 255.0f / a, px[1] / 255.0f / a, px[0] / 255.0f / a, a)
+                                        : D2D1::ColorF(0, 0, 0, 1);
+
+    const float W = pw * k, H = ph * k;
+    const int margin = static_cast<int>(std::ceil(20.0f * scale));
+    const SIZE size{static_cast<LONG>(std::ceil(W)) + 2 * margin, static_cast<LONG>(std::ceil(H)) + 2 * margin};
+    if (!m.dc || m.dcSize.cx != size.cx || m.dcSize.cy != size.cy) {
+        FreeBitmap(m);
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), size.cx, -size.cy, 1, 32, BI_RGB};
+        void* bits = nullptr;
+        m.dc = CreateCompatibleDC(src);
+        m.bmp = CreateDIBSection(src, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        m.old = static_cast<HBITMAP>(SelectObject(m.dc, m.bmp));
+        m.dcSize = size;
+    }
+    const RECT bind{0, 0, size.cx, size.cy};
+    if (FAILED(rt->BindDC(m.dc, &bind))) return false;
+    rt->BeginDraw();
+    rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+    const D2D1_RECT_F body = D2D1::RectF(static_cast<float>(margin), static_cast<float>(margin), margin + W, margin + H);
+    ComPtr<ID2D1SolidColorBrush> brush;
+    rt->CreateSolidColorBrush(fill, &brush);
+    if (ComPtr<ID2D1Geometry> outline = ShapeGeometry(factory.Get(), body, shape, scale, true); outline && brush)
+        rt->FillGeometry(outline.Get(), brush.Get());
+    ComPtr<ID2D1Bitmap> content;
+    rt->CreateBitmap(D2D1::SizeU(pw, ph), tmpBits, pw * 4,
+                     D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &content);
+    if (content) {
+        ComPtr<ID2D1Geometry> clip = ShapeGeometry(factory.Get(), body, shape, scale, false);
+        ComPtr<ID2D1Layer> layer;
+        rt->CreateLayer(&layer);
+        if (clip && layer) rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clip.Get()), layer.Get());
+        rt->DrawBitmap(content.Get(), body, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        if (clip && layer) rt->PopLayer();
+    }
+    if (FAILED(rt->EndDraw())) return false;
+    *outSize = size;
+    *pillAt = POINT{margin, margin};
+    return true;
+}
+
+// Keeps a copy of the island at rest (Separate mode shows it on the other displays
+// while the working island is open).
+void KeepRest(HDC src, RECT srcRect, RECT pill) {
+    const SIZE size{srcRect.right - srcRect.left, srcRect.bottom - srcRect.top};
+    if (size.cx <= 0 || size.cy <= 0) return;
+    if (!g_restDc || size.cx != g_restSize.cx || size.cy != g_restSize.cy) {
+        if (g_restDc) {
+            SelectObject(g_restDc, g_restOld);
+            DeleteObject(g_restBmp);
+            DeleteDC(g_restDc);
+        }
+        BITMAPINFO bi{};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), size.cx, -size.cy, 1, 32, BI_RGB};
+        void* bits = nullptr;
+        g_restDc = CreateCompatibleDC(src);
+        g_restBmp = CreateDIBSection(src, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        g_restOld = static_cast<HBITMAP>(SelectObject(g_restDc, g_restBmp));
+        g_restSize = size;
+    }
+    BitBlt(g_restDc, 0, 0, size.cx, size.cy, src, srcRect.left, srcRect.top, SRCCOPY);
+    g_restPill = RECT{pill.left - srcRect.left, pill.top - srcRect.top, pill.right - srcRect.left, pill.bottom - srcRect.top};
+}
+
+// Where display `index` (1-based) shows the island, for the settings app's preview of
+// that display: false when it's the island's own display (or has no mirror).
+bool PlaceOf(int index, RECT* shown, HMONITOR* monitor) {
+    std::lock_guard lock(g_placeMutex);
+    for (const auto& p : g_places)
+        if (p.index == index) {
+            *shown = p.shown;
+            *monitor = p.monitor;
+            return true;
+        }
+    return false;
+}
+
 // `pill` is the pill's rect in the stage's client px; `stage` the DIB's size.
-void Present(HDC src, const Settings& s, RECT pill, SIZE stage, BYTE alpha, double now) {
+void Present(HDC src, const Settings& s, RECT pill, SIZE stage, BYTE alpha, double now, bool open) {
     Sync(s, now);
     const bool show = pill.right - pill.left > 2 && pill.bottom - pill.top > 2;
     const int margin = static_cast<int>(std::ceil(26.0f * s.sizeScale));
@@ -4089,6 +4520,27 @@ void Present(HDC src, const Settings& s, RECT pill, SIZE stage, BYTE alpha, doub
                     std::min(stage.cx, pill.right + margin), std::min(stage.cy, pill.bottom + margin)};
     SIZE size = {srcRect.right - srcRect.left, srcRect.bottom - srcRect.top};
     const bool flushTop = s.notchStyle || s.borderMergedMode;
+    // Separate: the others show the island only while it is settled at rest. While it
+    // opens, closes or reacts to the pointer they keep the last settled copy: frames
+    // from the start of an opening have their content faded out (a plain black shape).
+    const bool separate = s.displaysAll && s.displaysSeparate;
+    const SIZE pillSize{pill.right - pill.left, pill.bottom - pill.top};
+    if (std::abs(pillSize.cx - g_lastPillSize.cx) > 1 || std::abs(pillSize.cy - g_lastPillSize.cy) > 1) {
+        g_lastPillSize = pillSize;
+        g_pillSizeSince = now;
+    }
+    const bool settled = !open && show && now - g_pillSizeSince > 0.35;
+    if (separate && settled) KeepRest(src, srcRect, pill);
+    if (separate && !settled && g_restDc) {
+        open = true;  // not at rest: the others show the kept copy
+        src = g_restDc;
+        srcRect = RECT{0, 0, g_restSize.cx, g_restSize.cy};
+        pill = g_restPill;
+        size = g_restSize;
+    }
+    POINT mainOrigin{0, 0};
+    if (g_hwnd) ClientToScreen(g_hwnd, &mainOrigin);
+    std::vector<Place> places;
 
     for (auto& m : g_list) {
         if (!show || size.cx <= 0 || size.cy <= 0) {
@@ -4098,24 +4550,60 @@ void Present(HDC src, const Settings& s, RECT pill, SIZE stage, BYTE alpha, doub
         MONITORINFO mi{sizeof mi};
         GetMonitorInfoW(m.monitor, &mi);
         const RECT& work = mi.rcWork;
-        const int pillW = pill.right - pill.left, pillH = pill.bottom - pill.top;
+        // Separate: this display's own shape and size, when they differ from the island's.
+        const int mainShape = s.notchStyle ? 2 : s.w11Style ? 1 : 0;
+        // This display's size against the working island's, which already has its own
+        // display's scale and size in it.
+        const float mirrorScale = s.baseSizeScale * m.size * MonitorScale(m.monitor, s.autoDpiScale, s.matchScreenSize);
+        const float k = mirrorScale / std::max(0.01f, s.sizeScale);
+        const bool ownLook = separate && ((m.shape >= 0 && m.shape != mainShape) || std::fabs(k - 1.0f) > 0.01f);
+        HDC from = src;
+        RECT fromRect = srcRect;
+        RECT fromPill = pill;
+        SIZE fromSize = size;
+        // Separate: its own island, drawn live at rest in this display's look.
+        HDC liveDc = nullptr;
+        SIZE liveSize{};
+        RECT livePill{};
+        const bool live = separate && RenderRestIsland(m.shape >= 0 ? m.shape : mainShape, mirrorScale, m.origin,
+                                                       &liveDc, &liveSize, &livePill);
+        if (live) {
+            from = liveDc;
+            fromRect = RECT{0, 0, liveSize.cx, liveSize.cy};
+            fromPill = livePill;
+            fromSize = liveSize;
+        } else if (ownLook) {
+            POINT at{};
+            if (DrawOwnLook(m, src, pill, m.shape >= 0 ? m.shape : mainShape, k, mirrorScale, &fromSize, &at)) {
+                from = m.dc;
+                fromRect = RECT{0, 0, fromSize.cx, fromSize.cy};
+                fromPill = RECT{at.x, at.y, at.x + static_cast<LONG>(std::lround((pill.right - pill.left) * k)),
+                                at.y + static_cast<LONG>(std::lround((pill.bottom - pill.top) * k))};
+            }
+        }
+        const bool flushHere = ((live || ownLook) && m.shape >= 0) ? (m.shape == 2 || s.borderMergedMode) : flushTop;
+        const int pillW = fromPill.right - fromPill.left, pillH = fromPill.bottom - fromPill.top;
 
         // Pill position on that display, mirroring ComputeStageLayout's anchors.
         int pillX = work.left + (work.right - work.left - pillW) / 2;
         if (m.position == Position::TopLeft || m.position == Position::BottomLeft) pillX = work.left + 16;
         if (m.position == Position::TopRight || m.position == Position::BottomRight) pillX = work.right - 16 - pillW;
         const int pillY = IsBottomPosition(m.position) ? work.bottom - 40 - static_cast<int>(kRenderPadY) - pillH
-                          : flushTop ? work.top
-                                     : work.top + 8 + static_cast<int>(kRenderPadY);
+                          : flushHere ? work.top
+                                      : work.top + 8 + static_cast<int>(kRenderPadY);
 
-        POINT dst = {pillX - (pill.left - srcRect.left), pillY - (pill.top - srcRect.top)};
-        POINT srcPt = {srcRect.left, srcRect.top};
+        POINT dst = {pillX - (fromPill.left - fromRect.left), pillY - (fromPill.top - fromRect.top)};
+        POINT srcPt = {fromRect.left, fromRect.top};
+        m.shown = RECT{pillX, pillY, pillX + pillW, pillY + pillH};
+        if (!(separate && open)) m.toMain = POINT{mainOrigin.x + pill.left - pillX, mainOrigin.y + pill.top - pillY};
+        m.origin = dst;  // Bunbun: where its pixels start, for its own island's eyes next frame
+        places.push_back({m.monitor, m.index, RECT{dst.x, dst.y, dst.x + fromSize.cx, dst.y + fromSize.cy}, m.toMain});
         BLENDFUNCTION blend{AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA};
         UPDATELAYEREDWINDOWINFO info{};
         info.cbSize = sizeof info;
         info.pptDst = &dst;
-        info.psize = &size;
-        info.hdcSrc = src;
+        info.psize = &fromSize;
+        info.hdcSrc = from;
         info.pptSrc = &srcPt;
         info.pblend = &blend;
         info.dwFlags = ULW_ALPHA;
@@ -4124,6 +4612,8 @@ void Present(HDC src, const Settings& s, RECT pill, SIZE stage, BYTE alpha, doub
             m.visible = true;
         }
     }
+    std::lock_guard lock(g_placeMutex);
+    g_places = std::move(places);
 }
 
 }  // namespace Mirrors
@@ -7252,6 +7742,10 @@ void ApplyVolumeReading(float level, bool muted, bool canSurface) {
         flyoutEnabled = g_settings.volume;
     }
 
+    const double now = NowSeconds();
+    const bool suppressed = g_studioVolumeDrag.load(std::memory_order_relaxed) ||
+                           (now < g_suppressVolumeNotificationUntil.load(std::memory_order_relaxed));
+
     bool surfaced = false;
     {
         std::lock_guard lock(g_stateMutex);
@@ -7261,13 +7755,15 @@ void ApplyVolumeReading(float level, bool muted, bool canSurface) {
         g_state.system.volumeMuted = muted;
         g_state.muted = muted;
 
-        if (canSurface && changed && flyoutEnabled) {
+        if (suppressed) {
+            g_state.volume.active = false;
+        } else if (canSurface && changed && flyoutEnabled) {
             surfaced = !g_state.volume.active;
             g_state.volume.active = true;
             g_state.volume.percent = percent;
             g_state.volume.muted = muted;
             g_state.volume.deviceName = L"System audio";
-            g_state.volume.expiresAt = NowSeconds() + 1.8;
+            g_state.volume.expiresAt = now + 1.8;
         }
     }
 
@@ -7407,6 +7903,18 @@ void BindVolumeEndpoint() {
     ComPtr<IMMDevice> device;
     HRESULT hr = g_volumeEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
     UpdateDefaultOutputBluetoothFlag(SUCCEEDED(hr) ? device.Get() : nullptr);
+    if (SUCCEEDED(hr) && device) {
+        ComPtr<IPropertyStore> store;
+        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store)) && store) {
+            PROPVARIANT v;
+            PropVariantInit(&v);
+            if (SUCCEEDED(store->GetValue(PKEY_DeviceInterface_FriendlyName, &v)) && v.vt == VT_LPWSTR && v.pwszVal) {
+                std::lock_guard lock(g_stateMutex);
+                g_state.system.audioDeviceName = v.pwszVal;
+            }
+            PropVariantClear(&v);
+        }
+    }
     if (SUCCEEDED(hr)) {
         hr = device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
                               reinterpret_cast<void**>(g_endpointVolume.GetAddressOf()));
@@ -8059,6 +8567,9 @@ void CaptureShellNotification(HWND hwnd) {
     }).detach();
 }
 
+void RememberClipboardText(const std::wstring& raw, const std::wstring& appName = L"", PixelsRef appIcon = PixelsRef());
+void RememberClipboardImage(BitmapPixels&& image, const std::wstring& appName = L"", PixelsRef appIcon = PixelsRef());
+
 void CaptureClipboard(HWND hwnd) {
     ClipboardSnapshot clip;
     clip.expiresAt = NowSeconds() + 2.5;
@@ -8089,8 +8600,10 @@ void CaptureClipboard(HWND hwnd) {
         }
     }
 
-    std::wstring text = ReadClipboardText(hwnd);
-    if (!text.empty()) {
+    std::wstring rawText = ReadClipboardText(hwnd);
+    if (!rawText.empty()) {
+        RememberClipboardText(rawText, clip.appName, clip.appIcon);
+        std::wstring text = rawText;
         constexpr size_t maxChars = 96;
         std::replace(text.begin(), text.end(), L'\r', L' ');
         std::replace(text.begin(), text.end(), L'\n', L' ');
@@ -8103,11 +8616,12 @@ void CaptureClipboard(HWND hwnd) {
         clip.active = true;
     } else {
         BitmapPixels imagePixels;
-        if (ReadClipboardImagePixels(hwnd, &imagePixels, kClipboardImageThumbMaxDim)) {
+        if (ReadClipboardImagePixels(hwnd, &imagePixels, 1200)) {
             clip.text = L"Image copied";
             clip.image = true;
             clip.active = true;
-            clip.imagePreview = PixelsRef(std::move(imagePixels));
+            clip.imagePreview = PixelsRef(BitmapPixels(imagePixels));
+            RememberClipboardImage(std::move(imagePixels), clip.appName, clip.appIcon);
         }
     }
 
@@ -8411,18 +8925,28 @@ void HandleStatusClickAtPoint(HWND hwnd, LPARAM lParam) {
     }
 }
 
-void StartFocusTimer(int minutes, bool isBreak) {
+// Bunbun: in seconds (the Timers page's countdown); a plain timer until the
+// Timers page labels it.
+void StartTimerSeconds(int seconds, bool isBreak) {
+    seconds = std::max(1, seconds);
     {
         std::lock_guard lock(g_stateMutex);
         g_state.timer.active = true;
         g_state.timer.running = true;
         g_state.timer.isBreak = isBreak;
-        g_state.timer.totalSeconds = minutes * 60;
-        g_state.timer.endsAt = NowSeconds() + minutes * 60;
+        g_state.timer.totalSeconds = seconds;
+        g_state.timer.endsAt = NowSeconds() + seconds;
         g_state.timer.remainingAtPause = 0.0;
         g_state.timer.justFinished = false;
+        g_state.timer.kind = kTimerKindTimer;
+        g_state.timer.label.clear();
+        g_state.timer.doneLabel.clear();
     }
     TriggerNudge();
+}
+
+void StartFocusTimer(int minutes, bool isBreak) {
+    StartTimerSeconds(minutes * 60, isBreak);
 }
 
 void ToggleTimerPause() {
@@ -8476,6 +9000,8 @@ void ToggleEndpointMute() {
         volume->SetMute(!muted, nullptr);
         std::lock_guard lock(g_stateMutex);
         g_state.muted = !muted;
+        g_state.system.volumeMuted = !muted;
+        g_state.volume.active = false;
     }
 }
 
@@ -8991,6 +9517,12 @@ std::vector<MediaSourceMenuItem> AppendMediaSourceItems(HMENU menu) {
 #include "modules/sounds_module.inc"  // Bunbun: little UI chimes
 #include "modules/mirror_module.inc"  // Bunbun: camera preview page
 #include "modules/color_picker_module.inc"  // Bunbun: pick a colour anywhere on screen
+int FocusPickerMinutes();                                  // Bunbun: studio_module.inc
+void AddFocusMinutes(int minutes);                         // Bunbun: studio_module.inc
+void WriteBunbunSetting(const wchar_t* key, const wchar_t* value);  // Bunbun: studio_module.inc
+#include "modules/screentime_module.inc"
+#include "modules/timers_module.inc"  // Bunbun: the Timers page (Pomodoro, countdown, stopwatch, water)
+#include "modules/edgelight_module.inc"  // Bunbun: the light along the island's outline
 #include "modules/studio_module.inc"  // Bunbun: Studio layout, extra pages, tuck away
 
 // ── Bunbun: Bun's local assistant ───────────────────────────────────────────
@@ -10039,6 +10571,7 @@ class Renderer {
         const float hoverScale = (settings.expandOnHover && ((hover && !gameMetricsPresent) || pinned)) ? 1.025f : 1.0f;
         const float scale = hoverScale;
         hoverScale_ = scale;
+        EdgeLight::Note(state, settings, hover, hover || pinned, primary.kind, now);  // Bunbun: plays on the chosen triggers
 
 
         if (width >= 2.0f && height >= 2.0f) {
@@ -10076,17 +10609,25 @@ class Renderer {
                                   primary.kind, settings);
                 // Bunbun: with nothing beside it (Bunbun.IdleStripItems = nothing), the
                 // face sits in the middle of the island, like a creature in the notch.
+                // Bunbun: with a status ring, the face stays in the middle too, the
+                // ring on its right and the time (or what's chosen) on its left.
+                const bool centred = primary.kind == IslandKind::Idle && FaceCentred(state, settings, now);
                 const bool faceOnly = primary.kind == IslandKind::Idle && !settings.idleShowClock &&
                                       !(settings.weather && settings.idleShowWeather);
-                const float slotLeft = faceOnly ? left + (width - g_bunSlotWidth) * 0.5f : left;
+                const float slotLeft = (faceOnly || centred) ? left + (width - g_bunSlotWidth) * 0.5f : left;
                 DrawBunSlot(state, settings, primary, D2D1::RectF(slotLeft, top, slotLeft + g_bunSlotWidth, top + height), now);
+                faceGapOn_ = centred;
+                faceGapL_ = slotLeft;
+                faceGapR_ = slotLeft + g_bunSlotWidth;
                 DrawPill(state, settings, primary,
-                         D2D1::RectF(left + g_bunSlotWidth * 0.82f, top, left + width, top + height), scale, now, false);
+                         D2D1::RectF(centred ? left : left + g_bunSlotWidth * 0.82f, top, left + width, top + height), scale, now, false);
+                faceGapOn_ = false;
             } else {
                 DrawPill(state, settings, primary,
                          D2D1::RectF(left, top, left + width, top + height), scale, now);
             }
         }
+        DrawEdgeLight(settings, now);  // Bunbun: over the content, along the outline
 
         target_->PopAxisAlignedClip();
         hr = target_->EndDraw();
@@ -10128,7 +10669,7 @@ class Renderer {
             Mirrors::Present(memDc_, settings,
                              RECT{static_cast<LONG>(std::floor(left)), static_cast<LONG>(std::floor(top)),
                                   static_cast<LONG>(std::ceil(left + width)), static_cast<LONG>(std::ceil(top + height))},
-                             size, alpha, now);
+                             size, alpha, now, height > 60.0f * settings.sizeScale);
         } else {
             stageValid_ = false;
         }
@@ -10139,6 +10680,58 @@ class Renderer {
                               settings.backdropTint);
         }
         return presented;
+    }
+
+    // Bunbun: Separate displays. Draws an island at rest into this renderer's own
+    // bitmap, for another display: no window, no click geometry, no shared tab state
+    // (offscreen_). `rest` is in pixels at settings.sizeScale; `bunSlot` the mascot's
+    // slot. Returns the bitmap and where the pill is in it.
+    bool offscreen_ = false;
+    bool RenderOffscreen(const SharedState& state, const Settings& settings, const Activity& rest, float bunSlot,
+                         double now, HDC* dc, SIZE* size, RECT* pill) {
+        offscreen_ = true;
+        EnsureTextFormats(settings.sizeScale, settings.fontFamily, settings.textScale);
+        const float width = rest.width + bunSlot, height = rest.height;
+        if (width < 2.0f || height < 2.0f) return false;
+        const float pad = std::ceil(26.0f * settings.sizeScale);
+        const int w = static_cast<int>(std::ceil(width + pad * 2)), h = static_cast<int>(std::ceil(height + pad * 2));
+        if (!CreateBackingBitmap(w, h)) return false;
+        const RECT rc{0, 0, w, h};
+        if (FAILED(target_->BindDC(memDc_, &rc))) return false;
+        target_->BeginDraw();
+        target_->SetTransform(D2D1::Matrix3x2F::Identity());
+        bindOffset_ = D2D1::Point2F(0, 0);
+        target_->Clear(D2D1::ColorF(0, 0.0f));
+        BeginFrameResources();
+        EnsureBrushes(settings, state, now);
+        settingsOpacity_ = settings.pillOpacity;
+        islandHiding_ = false;
+        hoverScale_ = 1.0f;
+        const float left = pad, top = pad;
+        const float savedSlot = g_bunSlotWidth;  // read by the drawing below
+        g_bunSlotWidth = bunSlot;
+        if (bunSlot > 0.5f && width > bunSlot + 40.0f) {
+            DrawIslandSurface(D2D1::RectF(left, top, left + width, top + height), rest.kind, settings);
+            const bool centred = rest.kind == IslandKind::Idle && FaceCentred(state, settings, now);
+            const bool faceOnly = rest.kind == IslandKind::Idle && !settings.idleShowClock &&
+                                  !(settings.weather && settings.idleShowWeather);
+            const float slotLeft = (faceOnly || centred) ? left + (width - bunSlot) * 0.5f : left;
+            DrawBunSlot(state, settings, rest, D2D1::RectF(slotLeft, top, slotLeft + bunSlot, top + height), now);
+            faceGapOn_ = centred;
+            faceGapL_ = slotLeft;
+            faceGapR_ = slotLeft + bunSlot;
+            DrawPill(state, settings, rest, D2D1::RectF(centred ? left : left + bunSlot * 0.82f, top, left + width, top + height), 1.0f, now, false);
+            faceGapOn_ = false;
+        } else {
+            DrawPill(state, settings, rest, D2D1::RectF(left, top, left + width, top + height), 1.0f, now);
+        }
+        g_bunSlotWidth = savedSlot;
+        if (FAILED(target_->EndDraw())) return false;
+        *dc = memDc_;
+        *size = SIZE{w, h};
+        *pill = RECT{static_cast<LONG>(left), static_cast<LONG>(top),
+                     static_cast<LONG>(std::lround(left + width)), static_cast<LONG>(std::lround(top + height))};
+        return true;
     }
 
     void Shutdown() {
@@ -10224,8 +10817,18 @@ class Renderer {
     // Bunbun: the status ring beside the clock (Bunbun.StatusRing). Its fill (0..1)
     // and colour, or false for no ring: the focus timer (left of the session), today's
     // water against the goal, or the to-dos ticked off. Auto: focus while a timer
-    // runs, else water when its reminders are on.
+    // runs, else water when it's tracked (Water in Timers, or its reminders).
     static constexpr float kStatusRingSize = 15.0f, kStatusRingGap = 8.0f;
+    // Bunbun: the face in the middle of the small island (a status ring is showing and
+    // the mascot sits on the island). While DrawPill draws the strip around it, the
+    // face's slot is faceGapL_..faceGapR_.
+    bool faceGapOn_ = false;
+    float faceGapL_ = 0.0f, faceGapR_ = 0.0f;
+    bool FaceCentred(const SharedState& state, const Settings& settings, double now) {
+        float f = 0.0f;
+        D2D1_COLOR_F c{};
+        return settings.bunbunMascot && settings.bunbunMascotOnIsland && StatusRing(state, settings, now, &f, &c);
+    }
     bool StatusRing(const SharedState& state, const Settings& settings, double now, float* frac, D2D1_COLOR_F* col) {
         const int mode = settings.statusRing;
         if (mode == 0) return false;
@@ -10236,7 +10839,7 @@ class Renderer {
             *col = tm.isBreak ? D2D1::ColorF(0x30d158) : material_.accent;
             return true;
         }
-        if ((mode == 1 && settings.water.reminders) || mode == 2) {
+        if ((mode == 1 && (settings.waterPage || settings.water.reminders)) || mode == 2) {
             const WaterSnapshot& w = state.water;
             if (w.goalMl <= 0) return false;
             *frac = Clamp(static_cast<float>(w.takenMl) / w.goalMl, 0.0f, 1.0f);
@@ -10269,7 +10872,7 @@ class Renderer {
                                                     settings.use24HourClock, settings.showSeconds);
         // Bunbun: Bunbun.IdleStripItems can leave out the time and/or the weather.
         metrics.clockWidth = settings.idleShowClock
-            ? MeasureTextWidthCached(WidestDigitForm(clock), fmt, idleClockWidthCache_) : 0.0f;
+            ? MeasureTextWidthCached(settings.idleName.empty() ? WidestDigitForm(clock) : settings.idleName, fmt, idleClockWidthCache_) : 0.0f;
 
         metrics.hasWeather = settings.weather && settings.idleShowWeather;
         if (metrics.hasWeather) {
@@ -10302,6 +10905,14 @@ class Renderer {
             total += metrics.clockWidth > 0.0f  // Bunbun: no divider without a clock
                 ? IdleStripLayout::kSlotGap * 2.0f + IdleStripLayout::kDividerWidth + metrics.weatherWidth
                 : metrics.weatherWidth;
+        }
+        // Bunbun: with a ring, the face sits in the middle: the time (or weather, or
+        // your text) on its left, the ring on its right, both sides as wide as the
+        // wider one so the face stays centred. The render loop adds the face's slot.
+        if (metrics.ringWidth > 0.0f && FaceCentred(state, settings, now)) {
+            const float leftSide = total - IdleStripLayout::kPadX * 2.0f - metrics.ringWidth;
+            const float side = std::max(leftSide, kStatusRingSize) + kStatusRingGap;
+            total = IdleStripLayout::kPadX * 2.0f + side * 2.0f;
         }
         total += metrics.privacyReserve;
 
@@ -10989,6 +11600,9 @@ class Renderer {
         }
         DrawSoftShadow(rect, radius);
         DrawPillSurface(rect, radius, kind, settings);
+        edgeRect_ = rect;  // Bunbun: the edge light follows this outline
+        edgeRadius_ = radius;
+        edgeValid_ = true;
         return radius;
     }
 
@@ -11291,7 +11905,9 @@ class Renderer {
         if (mic) dot(settings.privacyDotsMicHex);
     }
 
-    ComPtr<ID2D1PathGeometry> CreateNotchGeometry(D2D1_RECT_F rect, float radius) {
+    // Bunbun: `open` leaves out the top edge (the screen's edge) and starts at the
+    // right ear's tip, for the edge light to run along.
+    ComPtr<ID2D1PathGeometry> CreateNotchGeometry(D2D1_RECT_F rect, float radius, bool open = false) {
         ComPtr<ID2D1PathGeometry> geom;
         if (FAILED(d2dFactory_->CreatePathGeometry(&geom))) return nullptr;
 
@@ -11302,18 +11918,24 @@ class Renderer {
         if (r < 0.0f) r = 0.0f;
 
         // Bunbun: concave "ears" where the notch meets the screen edge, so it
-        // flows out of the bezel instead of starting with a hard corner. They sit
-        // just outside the body: a quadratic curve from the top edge, past the
-        // body's corner (the control point), down onto its side.
+        // flows out of the bezel instead of starting with a hard corner (the look
+        // of Vayli's notch, drawn our own way). Each is a quarter circle just
+        // outside the body, from the top edge down onto its side: 16 px, within
+        // the window's side padding.
         const float w = rect.right - rect.left, h = rect.bottom - rect.top;
-        const float ear = std::max(0.0f, std::min({10.0f * g_settings.sizeScale, h / 3.0f, w / 8.0f}));
+        const float ear = std::max(0.0f, std::min({16.0f * g_settings.sizeScale, kRenderPadX - 4.0f, h * 0.42f, w / 8.0f}));
+        auto earArc = [&](float x, float y) {
+            sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(x, y), D2D1::SizeF(ear, ear), 0.0f,
+                                          D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+        };
 
-        sink->BeginFigure(D2D1::Point2F(rect.left - ear, rect.top), D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddLine(D2D1::Point2F(rect.right + ear, rect.top));
-        if (ear > 0.0f) {
-            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(rect.right, rect.top),
-                                                                 D2D1::Point2F(rect.right, rect.top + ear)));
+        if (open) {
+            sink->BeginFigure(D2D1::Point2F(rect.right + ear, rect.top), D2D1_FIGURE_BEGIN_HOLLOW);
+        } else {
+            sink->BeginFigure(D2D1::Point2F(rect.left - ear, rect.top), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(rect.right + ear, rect.top));
         }
+        if (ear > 0.0f) earArc(rect.right, rect.top + ear);
         sink->AddLine(D2D1::Point2F(rect.right, rect.bottom - r));
         if (r > 0.0f) {
             sink->AddArc(D2D1::ArcSegment(
@@ -11330,10 +11952,9 @@ class Renderer {
         }
         if (ear > 0.0f) {  // Bunbun: the left ear, mirrored
             sink->AddLine(D2D1::Point2F(rect.left, rect.top + ear));
-            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(rect.left, rect.top),
-                                                                 D2D1::Point2F(rect.left - ear, rect.top)));
+            earArc(rect.left - ear, rect.top);
         }
-        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->EndFigure(open ? D2D1_FIGURE_END_OPEN : D2D1_FIGURE_END_CLOSED);
         sink->Close();
 
         return geom;
@@ -12233,6 +12854,11 @@ class Renderer {
     }
 
     void DrawWeatherDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now, float scale, bool hasWeather, const std::wstring& wIcon, const std::wstring& wText) {
+        if (settings.studioLayout) {
+            DrawStudioWeatherPage(state, rect, settings, now);
+            return;
+        }
+
         wchar_t wTemp[32] = {};
         if (hasWeather) swprintf_s(wTemp, L"%.0f\x00B0", state.weather.temperature);
         else wcscpy_s(wTemp, L"--\x00B0");
@@ -12761,6 +13387,11 @@ class Renderer {
     }
 
     void DrawHardwareMonitorDashboard(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, float scale) {
+        if (settings.studioLayout) {
+            DrawStudioSystemPage(state, rect, settings, NowSeconds());
+            return;
+        }
+
         (void)settings;
 
         const float padX = 24.0f * scale;
@@ -12905,6 +13536,7 @@ class Renderer {
     // Bunbun: the To-do tab and the reminder pill.
 #include "modules/todos_draw.inc"
 #include "modules/studio_draw.inc"  // Bunbun: Studio frame, Home tiles, Agent / Clipboard / Note pages
+#include "modules/edgelight_draw.inc"  // Bunbun: drawing the edge light
 
         // Karaoke effect: a soft wave rides the wipe boundary across the active line.
     // The layout and per-cluster rects are cached (karaokeCache_) and only rebuilt
@@ -13700,7 +14332,8 @@ class Renderer {
 
         SYSTEMTIME local = {};
         GetLocalTime(&local);
-        const std::wstring collapsedTime = FormatIslandTime(local, settings.clockFollowSystem,
+        const std::wstring collapsedTime = !settings.idleName.empty() ? settings.idleName  // Bunbun: your text
+                                         : FormatIslandTime(local, settings.clockFollowSystem,
                                                             settings.use24HourClock,
                                                             settings.showSeconds);
         const wchar_t* timeBuf = collapsedTime.c_str();
@@ -13775,6 +14408,11 @@ class Renderer {
             // the slack at zero stops the slots from inverting when it is narrower.
             const float slack = std::max(0.0f, (innerRight - innerLeft) - blockWidth);
             float slotX = innerLeft + slack * 0.5f;
+            // Bunbun: the face in the middle: the time and weather centred on its left.
+            if (faceGapOn_) {
+                const float leftBlock = blockWidth - idleMetrics.ringWidth * scale;
+                slotX = innerLeft + std::max(0.0f, (faceGapL_ - innerLeft) - leftBlock) * 0.5f;
+            }
 
             // Each slot is exactly its measured width, and the measurement used the
             // widest-digit form, so the live string is centred inside a box it is
@@ -13794,10 +14432,11 @@ class Renderer {
                 if (StatusRing(state, settings, now, &ringFrac, &ringCol)) {
                     EnsureRoundStroke();
                     const float d = kStatusRingSize * scale;
-                    const D2D1_POINT_2F c = D2D1::Point2F(slotX + (idleMetrics.clockWidth > 0.0f ? kStatusRingGap * scale : 0.0f) + d * 0.5f, (rect.top + rect.bottom) * 0.5f);
+                    D2D1_POINT_2F c = D2D1::Point2F(slotX + (idleMetrics.clockWidth > 0.0f ? kStatusRingGap * scale : 0.0f) + d * 0.5f, (rect.top + rect.bottom) * 0.5f);
+                    if (faceGapOn_) c.x = (faceGapR_ + innerRight) * 0.5f;  // Bunbun: right of the face
                     bb::studio::Ring(SPen(), c, d * 0.5f - 1.2f * scale, 2.4f * scale, ringFrac, ringCol, settingsOpacity_);
                 }
-                slotX += idleMetrics.ringWidth * scale;
+                if (!faceGapOn_) slotX += idleMetrics.ringWidth * scale;
             }
 
             if (idleMetrics.hasWeather && !idleDivider) {
@@ -13885,7 +14524,7 @@ class Renderer {
             }
         }
 
-        if (expandedAlpha <= 0.01f && !g_trayDragOver.load(std::memory_order_relaxed)) {
+        if (expandedAlpha <= 0.01f && !g_trayDragOver.load(std::memory_order_relaxed) && !offscreen_) {  // Bunbun: not for another display's island
             g_idleTab = 0;
             ResetTabTransition();
         }
@@ -14261,6 +14900,7 @@ class Renderer {
     // the pill is centered in the client area. Seqlock write: bump to odd,
     // store, bump to even, so a reader can never mix two frames.
     void PublishContentGeometry(D2D1_RECT_F rect, float rightTrim = 0.0f) {
+        if (offscreen_) return;  // Bunbun: another display's island; clicks map to the real one
         const unsigned seq = g_mediaHitSeq.load(std::memory_order_relaxed);
         g_mediaHitSeq.store(seq + 1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
@@ -14708,8 +15348,10 @@ class Renderer {
 
         // Collapsed UI
         if (collapsedAlpha > 0.01f && mask && layer && !g_trayDragOver.load(std::memory_order_relaxed)) {
-            g_idleTab = 0;
-            ResetTabTransition();
+            if (!offscreen_) {  // Bunbun: not for another display's island
+                g_idleTab = 0;
+                ResetTabTransition();
+            }
             target_->PushLayer(D2D1::LayerParameters(rect, mask.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), collapsedAlpha, nullptr, D2D1_LAYER_OPTIONS_NONE), layer);;
 
             const float cy = (rect.top + rect.bottom) * 0.5f;
@@ -15660,7 +16302,8 @@ class Renderer {
             // content units like the pill width.
             const float scale = std::max(0.1f, g_settings.sizeScale);
             const float chrome = pillW / scale - availW / scale;
-            g_collapsedLyricsWidth.store(Clamp(widest / scale + chrome + 6.0f, 280.0f, 380.0f), std::memory_order_relaxed);
+            if (!offscreen_)  // Bunbun: the real island's width only
+                g_collapsedLyricsWidth.store(Clamp(widest / scale + chrome + 6.0f, 280.0f, 380.0f), std::memory_order_relaxed);
         } else if (!lyricsUsable && !collapsedLyricWidthTitle_.empty()) {
             collapsedLyricWidthTitle_.clear();
             collapsedLyricWidthArtist_.clear();
@@ -18119,9 +18762,22 @@ class Renderer {
 
     // ── Bunbun: agent pill and approval card ─────────────────────────────────
     // Gaze toward the cursor, so Bun watches you reach for the buttons.
+    // Bunbun: on every display. Another display's own island (offscreen_) looks from
+    // where it sits there (screenOrigin_); with Linked copies, a pointer on another
+    // display counts from the matching spot on the island, so the copy there looks at it.
+   public:
+    POINT screenOrigin_{};
+   private:
     D2D1_POINT_2F MascotLook(D2D1_POINT_2F mascotCenter) {
         POINT p{};
-        if (!GetCursorPos(&p) || !ScreenToClient(hwnd_, &p)) return D2D1::Point2F(0, 0);
+        if (!GetCursorPos(&p)) return D2D1::Point2F(0, 0);
+        if (offscreen_) {
+            p.x -= screenOrigin_.x;
+            p.y -= screenOrigin_.y;
+        } else {
+            Mirrors::PointerToIsland(&p);
+            if (!ScreenToClient(hwnd_, &p)) return D2D1::Point2F(0, 0);
+        }
         return D2D1::Point2F(Clamp((p.x - mascotCenter.x) / 160.0f, -1.0f, 1.0f),
                              Clamp((p.y - mascotCenter.y) / 90.0f, -1.0f, 1.0f));
     }
@@ -18179,6 +18835,29 @@ class Renderer {
             }
         }
 
+        // Bunbun: a coding agent at work shows on the mascot even with the agent pill
+        // off (Bunbun.AgentPill): working, thinking, waiting for you, done or failed.
+        {
+            static bb::AgentPhase s_agentPhase = bb::AgentPhase::None;
+            const bb::AgentPhase phase = settings.bunbunAgents ? state.agent.phase : bb::AgentPhase::None;
+            if (phase != bb::AgentPhase::None) {
+                if (phase != s_agentPhase) s_moodSince = now;
+                mood = AgentMood(phase);
+                g_layoutDirty = true;  // its animation keeps going
+            }
+            s_agentPhase = phase;
+        }
+        // Bunbun: a glass of water logged: Bun drinks it, and cheers the one that
+        // reaches the day's goal. Pokes below still win.
+        {
+            double since = 0.0;
+            bb::mascot::Mood water = mood;
+            if (WaterMood(now, &water, &since)) {
+                mood = water;
+                s_moodSince = since;
+                g_layoutDirty = true;  // keep frames coming while it plays
+            }
+        }
         // Bunbun: poke reactions win over everything (cross, then dizzy), and the
         // mascot says hello for a moment after Bunbun starts.
         if (settings.pokeReactions) {
@@ -18650,12 +19329,16 @@ class Renderer {
     void DrawTimer(const SharedState& state, D2D1_RECT_F rect) {
         if (rect.bottom - rect.top < 24.0f || rect.right - rect.left < 140.0f) return;
         const double now = NowSeconds();
+        // Bunbun: a running stopwatch with no other timer: the ring sweeps once a minute.
+        const bool stopwatch = !state.timer.active && !state.timer.justFinished && state.stopwatch.running;
+        const double elapsed = stopwatch ? Timers::StopwatchElapsed(state.stopwatch, now) : 0.0;
         double remaining = state.timer.justFinished
             ? 0.0
             : (state.timer.running ? std::max(0.0, state.timer.endsAt - now)
                                     : state.timer.remainingAtPause);
         const int totalSec = state.timer.totalSeconds > 0 ? state.timer.totalSeconds : 1;
-        const float progress = state.timer.justFinished
+        const float progress = stopwatch ? static_cast<float>(std::fmod(elapsed, 60.0) / 60.0)
+            : state.timer.justFinished
             ? 1.0f
             : Clamp(1.0f - static_cast<float>(remaining / totalSec), 0.0f, 1.0f);
 
@@ -18721,6 +19404,10 @@ class Renderer {
         std::wstring label = state.timer.justFinished
             ? (state.timer.isBreak ? L"Break Complete" : L"Focus Complete")
             : (state.timer.isBreak ? L"Break Timer" : L"Focus Timer");
+        // Bunbun: the Timers page names its timers ("Focus 1 of 4", "Timer") and their end.
+        if (stopwatch) label = L"Stopwatch";
+        else if (state.timer.justFinished && !state.timer.doneLabel.empty()) label = state.timer.doneLabel;
+        else if (!state.timer.justFinished && !state.timer.label.empty()) label = state.timer.label;
         D2D1_RECT_F labelRect = D2D1::RectF(tx, cy - 16.0f, rect.right - 14.0f, cy - 1.0f);
         target_->DrawTextW(label.c_str(), static_cast<UINT32>(label.size()),
                            smallTextFormat_.Get(), labelRect, mutedBrush_.Get(),
@@ -18728,7 +19415,9 @@ class Renderer {
 
         wchar_t value[32] = {};
         int rem = static_cast<int>(std::ceil(remaining));
-        swprintf_s(value, L"%d:%02d", rem / 60, rem % 60);
+        if (stopwatch) rem = static_cast<int>(elapsed);  // Bunbun: counts up
+        if (rem >= 3600) swprintf_s(value, L"%d:%02d:%02d", rem / 3600, rem / 60 % 60, rem % 60);  // Bunbun
+        else swprintf_s(value, L"%d:%02d", rem / 60, rem % 60);
         D2D1_RECT_F valueRect = D2D1::RectF(tx, cy - 1.0f, rect.right - 14.0f, cy + 16.0f);
         textBrush_->SetOpacity(0.95f);
         target_->DrawTextW(value, static_cast<UINT32>(wcslen(value)), textFormat_.Get(),
@@ -20135,6 +20824,46 @@ class Renderer {
     uint64_t shapeClock_ = 0;
 };
 
+Activity ActivityForKind(IslandKind kind, const Settings& settings, const SharedState& state);
+// Bunbun: Separate displays. Another display's island at rest, drawn live by the
+// second renderer: the island's last resting activity, in that display's shape and
+// size. Shape and size go through g_settings too, because parts of the drawing read
+// them there; they are put back at once (unless a settings reload replaced them).
+bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size, RECT* pill) {
+    if (!g_restRenderer || !g_restState || !g_restLook.valid) return false;
+    Settings s = GetSettingsCopy();
+    const bool notch = shape == 2, w11 = shape == 1;
+    s.notchStyle = notch;
+    s.w11Style = w11;
+    s.sizeScale = scale;
+    Activity rest = ActivityForKind(static_cast<IslandKind>(g_restLook.kind), s, *g_restState);
+    rest.width = (g_restLook.width + (notch ? kNotchExtraContent : 0.0f)) * scale;
+    rest.height = g_restLook.height * scale;
+    bool wasNotch, wasW11;
+    float wasScale;
+    {
+        std::lock_guard lock(g_settingsMutex);
+        wasNotch = g_settings.notchStyle;
+        wasW11 = g_settings.w11Style;
+        wasScale = g_settings.sizeScale;
+        g_settings.notchStyle = notch;
+        g_settings.w11Style = w11;
+        g_settings.sizeScale = scale;
+    }
+    g_restRenderer->screenOrigin_ = origin;  // for the eyes
+    const bool ok = g_restRenderer->RenderOffscreen(*g_restState, s, rest, g_restLook.bunSlot * scale, NowSeconds(),
+                                                    dc, size, pill);
+    {
+        std::lock_guard lock(g_settingsMutex);
+        if (g_settings.notchStyle == notch && g_settings.w11Style == w11 && g_settings.sizeScale == scale) {
+            g_settings.notchStyle = wasNotch;
+            g_settings.w11Style = wasW11;
+            g_settings.sizeScale = wasScale;
+        }
+    }
+    return ok;
+}
+
 Activity ActivityForKind(IslandKind kind, const Settings& settings, const SharedState& state) {
     Activity activity;
     activity.kind = kind;
@@ -20332,7 +21061,7 @@ std::vector<IslandKind> ChooseActivities(const SharedState& state, const Setting
     }
     if (settings.timerEnabled &&
         ((state.timer.justFinished && now < state.timer.finishedExpiresAt) ||
-         state.timer.active)) {
+         state.timer.active || state.stopwatch.running)) {  // Bunbun: and a running stopwatch
         activities.push_back(IslandKind::Timer);
     }
     // Bunbun: a meeting about to start, and a browser download.
@@ -21420,10 +22149,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_CLIPBOARDUPDATE:
-            if (g_settings.clipboardHistory) {
-                RememberClipboardText(ReadClipboardText(hwnd));  // Bunbun: the Clipboard page
-            }
-            if (g_settings.clipboard) {
+            if (g_settings.clipboardHistory || g_settings.clipboard) {
                 CaptureClipboard(hwnd);
             }
             return 0;
@@ -21623,11 +22349,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
 
         case WM_MOUSEMOVE: {
-            TRACKMOUSEEVENT tme = {};
-            tme.cbSize = sizeof(TRACKMOUSEEVENT);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = hwnd;
-            TrackMouseEvent(&tme);
+            // Bunbun: a move handed over by a Linked mirror: the mirror tracks the leave.
+            if (!Mirrors::g_forwarding.load()) {
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(TRACKMOUSEEVENT);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+            }
 
             const int xPos = GET_X_LPARAM(lParam);
             const int yPos = GET_Y_LPARAM(lParam);
@@ -21789,7 +22518,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_LBUTTONUP:
             {
-                if (g_studioVolumeDrag) {  // Bunbun: end of a volume slider drag
+                if (g_studioVolumeDrag || Timers::g_ringDrag) {  // Bunbun: end of a volume slider / timer ring drag
                     HandleStudioClick(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
                     return 0;
                 }
@@ -22392,6 +23121,12 @@ DWORD WINAPI RenderThreadProc(void*) {
             g_snapshotRenderer = nullptr;
         }
     } snapshotRendererGuard;
+    // Bunbun: the other displays' islands at rest (Separate mode), drawn off screen.
+    Renderer restRenderer;
+    if (restRenderer.Initialize(nullptr)) g_restRenderer = &restRenderer;
+    struct RestRendererGuard {
+        ~RestRendererGuard() { g_restRenderer = nullptr; g_restState = nullptr; }
+    } restRendererGuard;
     if (!renderer.Initialize(hwnd)) {
         DestroyWindow(hwnd);
         g_hwnd = nullptr;
@@ -22601,6 +23336,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         BrainIdleCheck(g_settings);  // Bunbun: free the local AI's memory when idle
 
         bool timerJustCompleted = false;
+        int finishedKind = 0;              // Bunbun: the Timers page
+        std::wstring finishedLabel;
         SharedState snapshot;
         {
             std::lock_guard lock(g_stateMutex);
@@ -22611,6 +23348,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 g_state.timer.justFinished = true;
                 g_state.timer.finishedExpiresAt = now + 6.0;
                 timerJustCompleted = true;
+                finishedKind = g_state.timer.kind;  // Bunbun
+                finishedLabel = g_state.timer.label;
             }
             if (g_state.timer.justFinished && now >= g_state.timer.finishedExpiresAt) {
                 g_state.timer.justFinished = false;
@@ -22649,6 +23388,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                 TriggerNudge();
         }
         UpdateFocus(timerJustCompleted, snapshot.timer.active);  // Bunbun: ends Focus mode with its summary
+        if (timerJustCompleted) Timers::OnTimerFinished(finishedKind, finishedLabel, g_settings, now);  // Bunbun
+        Timers::Tick(g_settings, now);  // Bunbun: the next Pomodoro phase starts by itself
 
         // Quick Lookup: hand keyboard focus back once the panel has timed out or the
         // module was switched off in settings.
@@ -22740,6 +23481,45 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
         previousPrimary = primary.kind;
 
+        // Bunbun: islands on all displays, working separately: the island moves to the
+        // display whose island the pointer reaches, while it is at rest, and sits where
+        // that display's island is set to.
+        if (g_settings.displaysAll && g_settings.displaysSeparate) {
+            POINT pointer{};
+            GetCursorPos(&pointer);
+            const bool resting = !pinned && !g_clickExpanded.load() &&
+                                 heightSpring.value < 64.0f * g_settings.sizeScale;
+            if (resting)
+                if (const HMONITOR there = Mirrors::RestIslandUnder(pointer)) g_separateAnchor.store(there, std::memory_order_relaxed);
+            const HMONITOR anchor = GetAnchorMonitor();
+            MonitorEnumData mons;
+            EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&mons));
+            int index = 0;
+            for (size_t i = 0; i < mons.monitors.size(); ++i)
+                if (mons.monitors[i] == anchor) index = static_cast<int>(i) + 1;
+            const bool isMain = g_settings.targetMonitor > 0 ? index == g_settings.targetMonitor
+                                                            : anchor == MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+            const Position want = isMain || index == 0 ? g_settings.basePosition : Mirrors::PositionFor(index, g_settings);
+            // ...and that display's shape (Appearance.DisplayShapes), else the island's own.
+            const int shape = index == 0 ? -1 : DisplayShape(g_settings, index);
+            bool notch = shape < 0 ? g_settings.baseNotch : shape == 2, w11 = shape < 0 ? g_settings.baseW11 : shape == 1;
+            if (IsBottomPosition(want)) notch = false;
+            if (want != g_settings.position || notch != g_settings.notchStyle || w11 != g_settings.w11Style) {
+                std::lock_guard lock(g_settingsMutex);
+                g_settings.position = want;
+                g_settings.notchStyle = notch;
+                g_settings.w11Style = w11;
+                g_layoutDirty = true;
+            }
+        } else if (g_settings.position != g_settings.basePosition || g_settings.notchStyle != g_settings.baseNotch ||
+                   g_settings.w11Style != g_settings.baseW11) {
+            std::lock_guard lock(g_settingsMutex);
+            g_settings.position = g_settings.basePosition;
+            g_settings.notchStyle = g_settings.baseNotch;
+            g_settings.w11Style = g_settings.baseW11;
+            g_layoutDirty = true;
+        }
+
         POINT cursor = {};
         GetCursorPos(&cursor);
 
@@ -22760,10 +23540,18 @@ DWORD WINAPI RenderThreadProc(void*) {
         bool hover = false;
         const auto noteRingHover = [&](bool h) { if (h) s_lastRingHover = now; };
         if (widthSpring.value > 1.0f && heightSpring.value > 1.0f) {
-            hover = PtInRect(&pillRect, cursor) != FALSE;
+            hover = PtInRect(&pillRect, cursor) != FALSE ||
+                    Mirrors::PointerOn(cursor, g_settings);  // Bunbun: Linked islands on other displays
         } else if (g_settings.unhideOnHover) {
             RECT dockRect = GetIslandDockRect();
             hover = PtInRect(&dockRect, cursor) != FALSE;
+        }
+        if (g_hoverSuppressed.load(std::memory_order_relaxed)) {
+            if (!hover) {
+                g_hoverSuppressed.store(false, std::memory_order_relaxed);
+            } else {
+                hover = false;
+            }
         }
 
         // A file drag hovering over the island counts as hover, so it expands onto
@@ -22849,8 +23637,6 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (open != s_wasOpen) PlayChime(open ? Chime::Open : Chime::Close);
             s_wasOpen = open;
             g_dashboardOpen.store(open && !currentlyHidden, std::memory_order_relaxed);
-            static const bool s_pictures = (StartPassivePagePictures(), true);
-            (void)s_pictures;
         }
         if (currentlyHidden && !g_settings.unhideOnHover) {
             isHoverExpanded = false;
@@ -22957,6 +23743,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             if (!g_endpointVolume) {
                 g_volumeEndpointStale = true;  // no audio device yet, or binding failed
             }
+            screentime::Tick(now);
             nextSystemPoll = now + (g_powerSaving && !systemMetricsVisible ? 2.0 : 1.0);  // Bunbun: battery saver
         }
 
@@ -23149,6 +23936,18 @@ DWORD WINAPI RenderThreadProc(void*) {
             bb::mascot::SetMusicEnergy(Clamp(energy / kSpectrumBands * 2.2f, 0.0f, 1.0f));
         }
 
+        // Bunbun: Separate displays. What the island looks like at rest, for the other
+        // displays' islands (RenderRestIsland): kept while it rests, not while it opens.
+        if (collapsedLook && !secondary && !hover && !pinned && !isHoverExpanded &&
+            (primary.kind == IslandKind::Idle || primary.kind == IslandKind::Media) && !g_tucked.load(std::memory_order_relaxed)) {
+            const float k = std::max(0.01f, g_settings.sizeScale);
+            g_restLook.valid = true;
+            g_restLook.kind = static_cast<int>(primary.kind);
+            g_restLook.width = primary.width / k - (g_settings.notchStyle ? kNotchExtraContent : 0.0f);
+            g_restLook.height = primary.height / k;
+            g_restLook.bunSlot = g_bunSlotWidth / k;
+        }
+
         float targetWidth = primary.width + g_bunSlotWidth;
         float targetHeight = primary.height;
         if (secondary) {
@@ -23271,15 +24070,29 @@ DWORD WINAPI RenderThreadProc(void*) {
             // Bunbun: the monitor's scale (Match screen size or Auto DPI), so a new
             // monitor, DPI or resolution re-sizes the island.
             bool autoDpi = true, matchScreen = false;
+            float displaySize = 1.0f;  // Bunbun: Separate displays: this display's own size
             {
                 std::lock_guard lock(g_settingsMutex);
                 autoDpi = g_settings.autoDpiScale;
                 matchScreen = g_settings.matchScreenSize;
+                if (g_settings.displaysAll && g_settings.displaysSeparate) {
+                    const int index = DisplayIndexOf(currentAnchor);
+                    const bool isMain = g_settings.targetMonitor > 0 ? index == g_settings.targetMonitor
+                                                                    : currentAnchor == MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+                    (void)isMain;
+                    displaySize = DisplaySize(g_settings, index);  // the main display's own entry too
+                }
             }
-            const float currentScale = MonitorScale(currentAnchor, autoDpi, matchScreen);
+            const float currentScale = MonitorScale(currentAnchor, autoDpi, matchScreen) * displaySize;
             static HMONITOR s_lastAnchorMon = nullptr;
             static float s_lastScale = 0.0f;
-            if (currentAnchor != s_lastAnchorMon || currentScale != s_lastScale) {
+            // Bunbun: also when a settings reload put the size back without this display's factor.
+            float applied = 0.0f;
+            {
+                std::lock_guard lock(g_settingsMutex);
+                applied = g_settings.sizeScale / std::max(0.01f, g_settings.baseSizeScale);
+            }
+            if (currentAnchor != s_lastAnchorMon || currentScale != s_lastScale || std::fabs(applied - currentScale) > 0.001f) {
                 s_lastAnchorMon = currentAnchor;
                 s_lastScale = currentScale;
                 std::lock_guard lock(g_settingsMutex);
@@ -23410,7 +24223,8 @@ DWORD WINAPI RenderThreadProc(void*) {
             (secondary && isTransientPill(secondary->kind)) ||
             (countdownBarsOn && (hasCountdownBar(primary.kind) ||
                                  (secondary && hasCountdownBar(secondary->kind)))) ||
-            agentFast;
+            agentFast ||
+            (!isHidden && !g_tucked.load(std::memory_order_relaxed) && EdgeLight::Lit(g_settings, now));  // Bunbun
         if (continuousAnimation) {
             needsRender = true;
         }
@@ -23455,6 +24269,8 @@ DWORD WINAPI RenderThreadProc(void*) {
                                (secondary && secondary->kind == IslandKind::Timer);
         if (timerShown && snapshot.timer.running) {
             shownSecond = static_cast<int>(std::ceil(snapshot.timer.endsAt - now));
+        } else if (timerShown && snapshot.stopwatch.running) {  // Bunbun: the stopwatch counts up
+            shownSecond = static_cast<int>(now - snapshot.stopwatch.startedAt);
         } else if (clockOnScreen && g_settings.showSeconds && !isHidden) {
             SYSTEMTIME st = {};
             GetLocalTime(&st);
@@ -23552,6 +24368,7 @@ DWORD WINAPI RenderThreadProc(void*) {
             }
             std::lock_guard frameLock(g_frameMutex);  // Bunbun: see IslandSnapshotPng
             const double renderStart = QpcMs();
+            g_restState = &snapshot;  // Bunbun: for the other displays' islands (Separate)
             renderer.Render(snapshot, renderSettings, primary, secondary,
                             widthSpring.value, heightSpring.value, nudgeSpring.value,
                             hover, pinned, now);
@@ -23796,6 +24613,7 @@ void StopThreads() {
     if (g_stopEvent) {
         SetEvent(g_stopEvent);
     }
+    screentime::Save();  // Bunbun: today's Screen Time
 
     HANDLE handles[] = {g_renderThread, g_mediaThread, g_audioThread, g_weatherThread, g_lyricsThread, g_notificationThread, g_keyboardThread, g_mouseThread, g_bluetoothThread, g_connectivityThread,
                        g_calendarThread, g_downloadsThread, g_privacyThread, g_todoThread, g_waterThread};
@@ -23922,7 +24740,7 @@ void IslandSetAgentView(const bb::AgentView& view, bool nudge) {
                   cur.jobsToday != view.jobsToday || cur.history.size() != view.history.size() ||
                   (!view.history.empty() && cur.history.front().finishedAt != view.history.front().finishedAt) ||
                   cur.usage5h != view.usage5h || cur.usage7d != view.usage7d || cur.contextPct != view.contextPct ||
-                  cur.usage5hResets != view.usage5hResets ||
+                  cur.usage5hResets != view.usage5hResets || cur.usage7dResets != view.usage7dResets ||
                   cur.plan != view.plan || cur.questions.size() != view.questions.size() ||
                   cur.replyId != view.replyId;
         if (changed) g_state.agent = view;
@@ -23967,6 +24785,24 @@ bool IslandAskHotkeyActive() {
 // Bunbun: the island as it is on screen right now, as PNG bytes with its screen
 // rect, plus the rect and work area of the display it is on. Used by the
 // settings app's live preview (via the agent pipe). Any thread.
+// Bunbun: where display `index` (1-based) shows the island: its mirror's place, so
+// the settings app can preview each display. False for the island's own display.
+bool IslandDisplayPlace(int index, RECT* screen, RECT* monitor, RECT* work) {
+    HMONITOR mon = nullptr;
+    RECT shown{};
+    if (index <= 0 || !Mirrors::PlaceOf(index, &shown, &mon)) return false;
+    MONITORINFO mi = {sizeof(mi)};
+    if (!GetMonitorInfoW(mon, &mi)) return false;
+    // The snapshot is the island plus a margin; keep its size, centred on the mirror's place.
+    const LONG w = screen->right - screen->left, h = screen->bottom - screen->top;
+    const LONG cx = (shown.left + shown.right) / 2, top = shown.top;
+    const LONG dy = top - screen->top;
+    *screen = RECT{cx - w / 2, screen->top + dy, cx - w / 2 + w, screen->top + dy + h};
+    *monitor = mi.rcMonitor;
+    *work = mi.rcWork;
+    return true;
+}
+
 bool IslandSnapshotPng(std::string* png, RECT* screen, RECT* monitor, RECT* work) {
     std::vector<uint8_t> bgra;
     int w = 0, h = 0;
@@ -24005,13 +24841,15 @@ bool IslandSnapshotPng(std::string* png, RECT* screen, RECT* monitor, RECT* work
     return true;
 }
 
-// Bunbun: real pictures of every page for the settings app's Island pages screen.
+// Bunbun: pictures of every page, taken only when asked (the `capture_pages` pipe
+// command), to make the pictures bundled with the settings app. The app no
+// longer asks for them, and the island never takes them by itself.
 // Holds the island open ("Keep open"), shows each tab in turn, snapshots it and
 // puts the tab and Keep open back. About half a second per page, on its own
 // thread so neither the pipe nor the render loop waits.
 namespace {
 const wchar_t* const kPageKeys[] = {L"home", L"music", L"calendar", L"weather", L"system", L"toggles", L"tray", L"todo",
-                                    L"lyrics", L"agent", L"clipboard", L"note", L"focus", L"apps", L"mirror", L"water"};
+                                    L"lyrics", L"agent", L"clipboard", L"note", L"focus", L"apps", L"mirror", L"water", L"screentime"};
 
 std::wstring PagePicturesDir() {
     std::wstring dir = bb::StatePath();
@@ -24036,43 +24874,13 @@ bool SavePagePicture(const std::wstring& dir, StudioPage page) {
     return ok && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
-// Bunbun: pictures without asking. Whenever the dashboard is open and one page has
-// stayed put for 1.5 s, its picture is saved (at most every 15 s per page), so the
-// settings app's Island pages screen keeps up with the real island on its own.
-void StartPassivePagePictures() {
-    std::thread([] {
-        const std::wstring dir = PagePicturesDir();
-        double lastSaved[std::size(kPageKeys)] = {};
-        int stablePage = -1;
-        double stableSince = 0.0;
-        for (;;) {
-            Sleep(500);
-            const double now = NowSeconds();
-            if (!g_dashboardOpen.load(std::memory_order_relaxed) || g_capturingPages.load(std::memory_order_relaxed)) {
-                stablePage = -1;
-                continue;
-            }
-            const int id = CurrentDashboardTabId();
-            const int page = id < 0 ? -1 : static_cast<int>(StudioPageFor(g_dashboardContext.load(std::memory_order_relaxed), id));
-            if (page != stablePage) {
-                stablePage = page;
-                stableSince = now;
-                continue;
-            }
-            if (page < 0 || page >= static_cast<int>(std::size(kPageKeys)) || now - stableSince < 1.5) continue;
-            if (lastSaved[page] > 0.0 && now - lastSaved[page] < 15.0) continue;
-            if (SavePagePicture(dir, static_cast<StudioPage>(page))) lastSaved[page] = now;
-        }
-    }).detach();
-}
 }  // namespace
 
 int IslandCapturePages() {
     if (g_capturingPages.exchange(true)) return 0;
     const Settings s = GetSettingsCopy();
-    const int context = g_dashboardContext.load(std::memory_order_relaxed);
-    const std::vector<int> ids = DashboardTabIds(context, s);
-    std::thread([context, ids] {
+    const int count = static_cast<int>(DashboardTabIds(g_dashboardContext.load(std::memory_order_relaxed), s).size());
+    std::thread([s] {
         const std::wstring dir = PagePicturesDir();
         auto repaint = [] {
             g_layoutDirty = true;
@@ -24088,6 +24896,10 @@ int IslandCapturePages() {
         const int oldTab = g_idleTab.load();
         const bool oldPinned = g_pinnedExpanded.exchange(true);
         settle(800);  // the island opens
+        // Bunbun: the page list of the view it opened in (media or idle), read only now:
+        // read before, a media view's extra Music page put every later picture one file off.
+        const int context = g_dashboardContext.load(std::memory_order_relaxed);
+        const std::vector<int> ids = DashboardTabIds(context, s);
         for (size_t i = 0; i < ids.size(); ++i) {
             g_idleTab = static_cast<int>(i);
             settle(650);  // the tab slides in and settles
@@ -24098,5 +24910,5 @@ int IslandCapturePages() {
         repaint();
         g_capturingPages = false;
     }).detach();
-    return static_cast<int>(ids.size());
+    return count;
 }

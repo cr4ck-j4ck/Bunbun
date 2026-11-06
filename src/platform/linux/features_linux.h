@@ -71,7 +71,8 @@ struct Feat {
     bool eyes = false;        // IdleFace = eyes
     int eyeColor = 0;         // mint, white, blue, pink, purple, yellow
     bool eyeStatus = false;
-    int strip = 0;            // IdleStripItems: 0 time-weather, 1 time, 2 weather, 3 nothing
+    int strip = 0;            // IdleStripItems: 0 time-weather, 1 time, 2 weather, 3 nothing, 4 name, 5 name-weather
+    std::string name;         // Bunbun.IdleName, for 4 and 5 (UTF-8)
     bool mascotDnd = false;
     bool dndFollowSystem = false;  // Bunbun.DndFollowSystem: the desktop's DND puts the mascot in DND
     int afkMinutes = 3;            // Bunbun.AfkMinutes: AFK after this long without input (0 = off)
@@ -95,6 +96,10 @@ void Start(std::function<void(const std::string&, const std::string&, double, do
 // ── Placement ───────────────────────────────────────────────────────────────
 // The monitor the island belongs on (TargetMonitor), or null for the default.
 struct _GdkMonitor* TargetMonitor(struct _GdkDisplay* display);
+// Appearance.DisplayLink = separate (with the island on all displays): it follows the pointer.
+bool SeparateDisplays();
+// The island's side and edge on the display it's on now (Separate mode: each display's own).
+void SetPlacement(int align, bool bottom);
 
 // ── Hiding ──────────────────────────────────────────────────────────────────
 bool FullscreenAppActive();   // X11: the active window is full screen and the island tucks or hides
@@ -146,6 +151,12 @@ void DrawEyes(cairo_t* cr, double cx, double cy, double height, bb::mascot::Mood
               double now, double moodSince, double pointerX, double pointerY);
 
 // ── Lyrics ──────────────────────────────────────────────────────────────────
-bool BluetoothAudio();  // the default sound output is a Bluetooth device
+bool BluetoothAudio();
+// The default sound output (pactl): volume 0-100+ and mute, read at most every 2 s;
+// false without PulseAudio / PipeWire tools.
+bool VolumeNow(int* pct, bool* mute);
+void SetVolume(int pct);
+void ToggleMute();
+std::string AudioOutputName();  // its description ("Built-in Audio", a headset's name), "" unknown  // the default sound output is a Bluetooth device
 
 }  // namespace bb::lfeat

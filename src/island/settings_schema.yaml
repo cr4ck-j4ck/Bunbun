@@ -28,12 +28,24 @@
     $options:
       - single: One display
       - all: All displays
+  - DisplayLink: linked
+    $name: Islands on several displays
+    $description: "With the island on all displays. Linked: every island works; pointing at any of them opens them all together, and clicks and scrolling work on each. Separate: the island you point at opens on its own, using that display's position; the others stay as they are."
+    $options:
+      - linked: Linked (open together)
+      - separate: Separate (each on its own)
   - MirrorPosition: same
     $name: Mirror position
     $description: Where mirrors sit on the other displays (same = like the main island).
   - DisplayPositions: ""
     $name: Per-display positions
     $description: 'Optional overrides by display number, e.g. 2=bottom-center;3=top-left'
+  - DisplayShapes: ""
+    $name: Per-display shapes
+    $description: 'With separate islands on several displays: a shape by display number (pill, w11 or notch), e.g. 2=pill;3=notch. Others use Island Shape Style.'
+  - DisplaySizes: ""
+    $name: Per-display sizes
+    $description: 'With separate islands on several displays: a size by display number, relative to Size scale, e.g. 2=1.2;3=0.9.'
   - OffsetX: 0
     $name: Offset X
     $description: Adjust the horizontal position (in pixels). Positive values move it right, negative values move it left.
@@ -686,21 +698,47 @@
     $description: When on, the eyes turn orange and pulse while a coding agent works, go green when it's done and red on an error, and change shape with it. Off keeps them your chosen colour.
   - IdleStripItems: time-weather
     $name: Beside the face
-    $description: What the small idle island shows next to the mascot or eyes. Nothing leaves just the face, like a little creature living in the notch.
+    $description: What the small idle island shows next to the mascot or eyes. With a status ring showing, the face sits in the middle, this on its left and the ring on its right. Nothing leaves just the face, like a little creature living in the notch.
     $options:
       - time-weather: Time and weather
       - time: Time only
       - weather: Weather only
+      - name: Your text
+      - name-weather: Your text and weather
       - nothing: Nothing (just the face)
+  - IdleName: ""
+    $name: Your text
+    $description: What the small island shows in the time's place when "Beside the face" is set to your text. A name, a word, an emoji.
   - StatusRing: auto
     $name: Status ring
-    $description: A thin ring beside the clock on the small island, filling up as you go. Auto shows the focus timer while one runs, else today's water when water reminders are on.
+    $description: A thin ring on the small island, filling up as you go (right of the face when the mascot is on the island). Auto shows the focus timer while one runs, else today's water when you track it (Water in Timers or water reminders).
     $options:
       - auto: Auto
       - water: Water today
       - tasks: Tasks done
       - focus: Focus timer
       - off: Off
+  - EdgeLight: twin
+    $name: Edge light
+    $description: A light that runs along the island's outline. Twin comets start at both top corners, meet at the bottom and go back; Comet is a single light; Breathe makes the whole outline glow softly.
+    $options:
+      - twin: Twin comets
+      - comet: Comet
+      - breathe: Breathe
+      - off: Off
+  - EdgeLightOn: "open,notification,agent"
+    $name: When the edge light plays
+    $description: "Any mix of: hover, open, close, track (the song changes), notification (notifications, reminders, meetings, downloads, copies), agent (a coding agent shows up or asks you), system (volume, brightness, battery, Bluetooth, Caps Lock, timers), always. Comma-separated. Each plays the light for a few seconds; always keeps it running, which costs a little more power."
+  - EdgeLightColor: default
+    $name: Edge light colour
+    $description: Default is white; Dynamic follows the island's accent (the album art's, or yours); Custom uses the colour below.
+    $options:
+      - default: Default (white)
+      - dynamic: Dynamic
+      - custom: Custom
+  - EdgeLightCustomColor: "#5AC8FA"
+    $name: Edge light custom colour
+    $description: The light's colour when Edge light colour is Custom.
   - HomeTile1: auto
     $name: First Home tile
     $description: Automatic shows your main agent, or the weather when no agent is on. Pick it in Settings, Island pages.
@@ -761,9 +799,15 @@
   - MirrorPage: false
     $name: Mirror page
     $description: A camera preview page for a quick look before a call. The camera only turns on when you press Turn on camera, and off when you leave the page. Nothing is saved.
+  - ScreenTime: true
+    $name: Screen Time page
+    $description: How long each app has been in front today and over the last week, with each app's own name and icon. Counts while you're at the PC (not when it's locked or you've been away two minutes, unless the app is full screen). Kept on this PC only, in screentime.tsv next to settings.ini.
+  - ScreenTimeLimit: 0
+    $name: Daily screen time limit (hours)
+    $description: 0 for none. With a limit, the Screen Time page shows what's left of it today; without one, your daily average. Click the number on the page to step through 2 to 12 hours.
   - WaterPage: true
-    $name: Water page
-    $description: A Water page in the scroll loop with today's progress, a + glass button, when the next reminder is due and the last week.
+    $name: Water in Timers
+    $description: The Timers page's Water mode, with today's glass, a + glass button, when the next reminder is due and the last week. Water reminders work either way.
   - WaterReminders: false
     $name: Water reminders
     $description: Reminds you to drink, spread across your active hours. A reminder comes when you've fallen a glass behind your goal's pace, at least 20 minutes after the last one. Drank logs a glass; Later snoozes 15 minutes.
@@ -783,8 +827,26 @@
     $name: Active until (hour)
     $description: And stop at this hour (1 to 24). The goal is paced across these hours.
   - FocusPage: true
-    $name: Focus page
-    $description: A Focus page in the scroll loop with an hours and minutes picker (scroll or click the numbers), 5 / 15 / 25 / 50 minute chips, +5 min, pause and stop.
+    $name: Timers page
+    $description: One page for your timers, around a big ring. Focus runs Pomodoro sessions with short and long breaks; Timer is a countdown you set by dragging the ring or scrolling over it (hold Shift for seconds), with your own presets; Stopwatch keeps laps and marks the fastest and slowest; Water tracks today's glasses.
+  - PomodoroFocus: 25
+    $name: Focus session (minutes)
+    $description: How long each Pomodoro focus session lasts.
+  - PomodoroShortBreak: 5
+    $name: Short break (minutes)
+    $description: The break after each focus session.
+  - PomodoroLongBreak: 15
+    $name: Long break (minutes)
+    $description: The break after the last focus session of a cycle.
+  - PomodoroCycles: 4
+    $name: Sessions before a long break
+    $description: How many focus sessions make a cycle.
+  - PomodoroAutoStart: true
+    $name: Start the next phase by itself
+    $description: When a focus session or a break ends, the next one starts a few seconds later. Off, it waits for Start.
+  - TimerPresets: "5, 10, 15, 25, 45"
+    $name: Timer presets
+    $description: The countdown durations shown as chips on the Timers page, in minutes (or minutes:seconds), separated by commas. Save current on the page adds the time on the ring. Up to six.
   - FocusGuard: false
     $name: Focus guard
     $description: While a focus timer runs, a gentle note on the island when one of your distracting apps or sites comes to the front.

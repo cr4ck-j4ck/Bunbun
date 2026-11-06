@@ -4,7 +4,7 @@ import { CSSProperties, ReactNode } from "react";
 
 export type PageKey =
   | "home" | "music" | "calendar" | "weather" | "system" | "toggles" | "tray" | "todo"
-  | "lyrics" | "agent" | "clipboard" | "note" | "focus" | "mirror" | "apps" | "water";
+  | "lyrics" | "agent" | "clipboard" | "note" | "focus" | "mirror" | "apps" | "water" | "screentime";
 
 const box = (s: CSSProperties): CSSProperties => ({ position: "absolute", ...s });
 const line = (left: number, top: number, width: number, o = 0.35, h = 5): ReactNode => (
@@ -87,6 +87,17 @@ function Body({ page, accent }: { page: PageKey; accent: string }) {
           background: `conic-gradient(${a} 70%, rgba(255,255,255,.1) 0)`,
           WebkitMask: "radial-gradient(circle, transparent 20px, #000 21px)", mask: "radial-gradient(circle, transparent 20px, #000 21px)" })} />
         <b style={box({ left: 0, right: 0, top: 22, textAlign: "center", fontSize: 11, fontWeight: 650, color: "#fff" })}>25:00</b>
+      </>;
+    case "screentime":
+      return <>
+        <b style={box({ left: 10, top: 6, fontSize: 15, fontWeight: 700, color: "#fff" })}>2h 5m</b>
+        {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+          <i key={i} style={box({ left: 12 + i * 9, top: 34 + (i * 5) % 14, width: 5, height: 22 - (i * 5) % 14, borderRadius: 3,
+            background: i === 6 ? a : "rgba(255,255,255,.25)" })} />
+        ))}
+        {[0, 1, 2].map((i) => <i key={`r${i}`} style={box({ left: 84, top: 8 + i * 17, width: 11, height: 11, borderRadius: 3,
+          background: ["#4285f4", "#d97757", "#34c759"][i] })} />)}
+        {[0, 1, 2].map((i) => <span key={`l${i}`}>{line(100, 11 + i * 17, 46 - i * 12, i === 0 ? 0.8 : 0.35)}</span>)}
       </>;
     case "water":
       return <>

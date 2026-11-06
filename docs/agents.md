@@ -24,14 +24,20 @@ Bunbun's entries next to your own.
 
 For Claude Code, connecting also sets a `statusLine` (`bunbun-hook.exe --statusline`). It prints
 the model and your 5-hour, weekly and context use under Claude Code's prompt, and sends the same
-numbers to the island's Agent page and usage ring. If you already have a statusLine, Bunbun leaves
-it alone and the usage stays empty. Hide the numbers with **Show Claude Code usage limits** in
-Settings → Assistant & agents.
+numbers to the island's Agent page and usage ring: the 5-hour and weekly limits, each with when it
+resets, and the context window. A limit past its reset time counts as empty again, even before
+Claude Code sends new numbers. If you already have a statusLine, Bunbun leaves it alone and the
+usage stays empty. Hide the numbers with **Show Claude Code usage limits** in Settings → Assistant &
+agents.
 
 For Antigravity, Bunbun reads the model quota Antigravity itself caches on your PC (in its
-`state.vscdb`), read-only and once a minute. It shows the model with the least quota left and its
-reset time. Turn it off with **Show Antigravity quota**. Cursor keeps no usage numbers on your PC,
-so Bunbun can't show its limits.
+`state.vscdb`), read-only and once a minute. Antigravity shares one quota between several models
+(the Gemini Flash variants, or its Claude and GPT-OSS models), so the Agent page shows a bar per
+pool with what's used and when it resets. The cache only changes while Antigravity runs: a pool
+whose reset time has passed counts as refilled. Turn it off with **Show Antigravity quota**.
+
+Cursor keeps no usage numbers on your PC (only your plan), and Bunbun doesn't sign in anywhere, so
+the Agent page shows Cursor's plan and says its usage isn't available.
 
 Each agent has an **On island** switch beside its Connect button. Switched off, Bunbun ignores it
 completely: no pill, no cards (it asks in its own window), and no usage. With every agent off, the

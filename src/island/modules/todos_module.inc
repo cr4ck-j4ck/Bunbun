@@ -415,6 +415,11 @@ void ReminderPillAction(int which) {
             return;
         }
     }
+    // Bunbun: answered, the island goes back to its small pill (where the mascot drinks
+    // a Drank) instead of opening under the pointer; it opens again once the pointer
+    // has left and come back.
+    g_clickExpanded.store(false);
+    g_hoverSuppressed.store(true);
     if (IsWaterReminderId(id)) {
         if (which == 1) WaterReminderDone(id);
         else WaterReminderLater();

@@ -5,6 +5,120 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Timers page** (it replaces the Focus page). One page, four modes around a big ring:
+  **Focus** runs Pomodoro sessions ("Focus 1 of 4") with short and long breaks, Skip, Reset, a count
+  of today's sessions and, if you like, the next phase starting by itself; **Timer** is a countdown
+  you set by dragging the ring or scrolling over it (hold Shift for seconds), with +1 / +5 min and
+  your own presets (+ Save adds the time on the ring); **Stopwatch** keeps laps with the fastest in
+  green and the slowest in red, and copies them; **Water** is the Water page. A running timer or
+  stopwatch shows on the small island. Lengths and presets are in Settings → Productivity → Timers.
+  With the Timers page off, Water stays a page of its own. Focus also has chips for the session
+  length (15, 25, 50 or 90 min). Windows.
+- **Screen Time page.** How long you've used the PC today, the last seven days as bars, and a list of
+  apps with each app's real name and icon (Store apps included), the time and share of each. It
+  counts the app in front while you're at the PC (not when it's locked or you've been away two
+  minutes, unless the app is full screen). Set a daily limit in Settings → System & tools → Page
+  options (or click the number on the page) to see what's left of it. Kept on your PC only, in
+  `screentime.tsv` beside `settings.ini`. Windows.
+- **System and Weather pages, redone.** System puts battery, network, CPU, memory and GPU, volume and
+  Bluetooth on one page (in Studio it holds the Wi-Fi & Bluetooth toggles too). Weather shows now, the
+  next hours as a curve, five days, humidity, wind and UV, with a °C / °F switch and Change City in
+  its header. Windows.
+
+- **Edge light.** A light runs along the island's outline for a few seconds, then fades: **Twin
+  comets** (the default) set off from both top corners and meet at the bottom, **Comet** is a single
+  light, **Breathe** makes the whole outline glow; each style has a live preview in Settings →
+  Appearance → Edge light. Choose any mix of what plays it: hover, opening, closing, a track change,
+  notifications, agents, system pop-ups, or always (a little more power). Its colour is **Default**
+  (white), **Dynamic** (the album art's, or your accent) or **Custom**, from a palette or any hex.
+  Windows.
+- **Wi-Fi and Bluetooth switches on the System page.** In Studio, the Network card has a Wi-Fi and a
+  Bluetooth chip: a click turns the radio on or off (a radio Windows can't use shows dimmed and opens
+  its settings). Click the network name, or the connected Bluetooth device, to pick another in
+  Windows settings. Windows.
+- **Bun drinks along.** Logging a glass of water (Drank, + glass) shows the mascot sipping from a
+  glass for a moment (Drank on a reminder puts the island back to its small pill for it, instead of
+  opening it under the pointer), and the glass that reaches the day's goal gets a celebration. Every built-in
+  character; a skin pack can add `drinking.png` (else its snack picture). Windows and Linux.
+- **Your own text on the small island.** Settings → Mascot → Beside the face can show your text (a
+  name, a word, an emoji) in the time's place, with or without the weather.
+- **Clear on the Clipboard page.** Empties the history; pinned items stay.
+
+### Changed
+- **The face sits in the middle when a status ring shows.** The ring is on its right and the time
+  (or weather, or your text) on its left. Auto's water ring now shows whenever you track water (Water
+  in Timers), not only with water reminders on. Windows and Linux.
+- **The mascot shows what your agents are doing** (working, thinking, waiting for you, done) even
+  with the agent pill turned off. Windows and Linux.
+- **Separate displays: every display has its own live island.** The island on each other display is
+  drawn live at rest in that display's shape and size (clock, mascot, ring and all), instead of a
+  picture of the main one. The island moves to another display only when you point at that display's
+  island, never while it's open. The mascot's eyes follow the pointer on every display.
+- **Islands on every display, working.** With the island on all displays, Settings → Position &
+  motion → **How they work** chooses **Linked** (the default: point at the island on any screen and
+  they all open together; clicks, scrolling and hover work on each one) or **Separate** (the island
+  you point at opens on its own, at that display's position, while the others stay at rest). Each
+  display keeps its own position, and the live preview can show any display's island. Before, the
+  islands on other screens were pictures only. In Separate mode each display can also have its own
+  **shape** (pill, notch, Windows 11) and **size** (80 % to 150 %): the island at rest there is drawn
+  that way, and the island takes that look when it opens there. Windows and Linux.
+- **Agent limits, per agent.** The Agent page shows the limits of the agent on it: Claude Code's
+  5-hour and weekly windows (each with when it resets) and its context; Antigravity's quota pool by
+  pool (the Gemini Flash models, its Claude and GPT-OSS models) with their resets; Cursor's plan,
+  with a note that Cursor doesn't keep its usage on your PC. A limit or pool past its reset time now
+  counts as refilled, so the header ring no longer shows an old number (Antigravity's cache only
+  changes while it runs). Windows and Linux.
+- **Linux matches Windows.** The Studio header (mascot and page name on the left, date, time,
+  battery and close on the right), the round notch ears and the edge light with all its triggers
+  and colours, the Timers page (Focus, Timer, Stopwatch, Water), the new System, Weather and
+  Clipboard pages, and the **Screen Time** page (X11; Wayland doesn't say which app is in front)
+  now work on Linux too. Water is a Timers mode there as well, and Island pages no longer
+  photographs the Linux island by itself either.
+- **Position & motion.** The settings app's Position & displays and Motion & behaviour pages are one
+  page now: the screen and where the island sits, then its motion style, speed and when it shows up.
+- **Island pages no longer photographs your island by itself.** It used to flip through the
+  island's pages whenever you opened it or changed something, and the island saved a picture each
+  time you looked at a page. Now it shows example pictures that come with the app (taken fresh for
+  this release). **Take pictures of my island** captures yours when you ask, and you can switch
+  between the examples and your own. Windows.
+- **Water lives in Timers.** On Windows, Water is a mode of the Timers page and no longer a page of
+  its own, even with Timers off; its switch is Productivity › Timers › Water in Timers. Island pages
+  no longer lists Water, nor Wi-Fi & Bluetooth in Studio (those toggles are part of System).
+- **A calmer settings app.** Each page in the sidebar has its icon on a small coloured tile,
+  greys are neutral instead of purple-tinted, switches and selected items use your flat accent colour
+  (no gradient), rows have more room, and long descriptions stop at two lines (hover a row for the
+  whole text). Windows and Linux.
+- **Notch ears.** The notch's curves into the top of the screen are larger and perfectly round
+  (16 px), so it flows out of the screen edge. Windows.
+- **Studio header.** Every page now has the mascot and the page's name at the top left; the date and
+  time sit on the right beside the agent usage, battery and buttons (they make way when a page needs
+  the room, as Weather does).
+
+### Fixed
+- **Separate displays:** opening the island on one display no longer turns the others into a plain
+  black shape, and moving the pointer between displays no longer makes the islands jump and flicker.
+- **Settings rows no longer run off the right edge** in a narrow window: wide controls (the per-display
+  shape and size, for one) drop under their label.
+- **The Clipboard page's pin** is a proper pin icon (filled when pinned), and the delete button a bin.
+- Settings → Island pages showed each page's picture one page late while music was around.
+- **The display map** in Position & motion fits your screens inside its box, centred, instead of
+  running past the right edge; each display's number sits beside its name rather than under the
+  position grid; and while the island follows the mouse, displays are no longer all marked "Mirror".
+- **The Weather page made up values it didn't have** ("Clear Sky", "Feels like 25", sunrise at 6:39,
+  wind 5, UV "2 Low", and invented hours and days); it now leaves out what the service didn't send.
+  The System page's performance waves started from invented samples and GPU showed "--%" without a
+  reading: the waves now start flat at the real value, and GPU appears only when it's reported.
+  Windows.
+- **The System page showed made-up values:** "USB Audio Device" when Windows gave no output device
+  name, "Ethernet · 1 Gbps" whatever the link, and moving speed lines before any data. It now shows
+  only what Windows reports. Windows.
+- **The Clipboard page showed made-up items** (sample images and text) until you copied something; it
+  now shows only what you copied, and "Nothing copied yet" before that. Windows.
+- **Classic layout:** the Screen Time page's By app list no longer gets squeezed until icons overlap
+  the times, and the Timers page's ring no longer sits under its mode bar, with all its buttons and
+  length chips fitting. Windows.
+
 ## [0.3.7]
 
 ### Added

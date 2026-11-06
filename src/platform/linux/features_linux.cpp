@@ -74,10 +74,13 @@ void SpringFor(const std::wstring& style, const std::wstring& speed, double* k, 
 
 }  // namespace
 
+bool g_separateDisplays = false;  // Appearance.DisplayLink = separate, with the island on all displays
+
 void LoadSettings() {
     namespace s = bb::settings;
     Feat f;
     const std::wstring pos = s::Get(L"Appearance.Position");
+    g_separateDisplays = s::Get(L"Appearance.Displays") == L"all" && s::Get(L"Appearance.DisplayLink") == L"separate";
     f.bottom = pos.rfind(L"bottom", 0) == 0;
     f.align = pos.find(L"left") != std::wstring::npos ? 0 : pos.find(L"right") != std::wstring::npos ? 2 : 1;
     f.offsetX = std::clamp(s::GetInt(L"Appearance.OffsetX"), -2000, 2000);
@@ -171,7 +174,13 @@ void LoadSettings() {
         if (eye == names[i]) f.eyeColor = i;
     f.eyeStatus = s::GetBool(L"Bunbun.EyeStatusColors");
     const std::wstring strip = s::Get(L"Bunbun.IdleStripItems");
-    f.strip = strip == L"time" ? 1 : strip == L"weather" ? 2 : strip == L"nothing" ? 3 : 0;
+    f.strip = strip == L"time" ? 1 : strip == L"weather" ? 2 : strip == L"nothing" ? 3 : strip == L"name" ? 4
+            : strip == L"name-weather" ? 5 : 0;
+    f.name.clear();
+    if (f.strip >= 4) {
+        const std::wstring name = s::Get(L"Bunbun.IdleName");
+        f.name = bb::plat::Utf8(name.empty() ? std::wstring(L"Bunbun") : name);
+    }
     f.mascotDnd = s::GetBool(L"Bunbun.MascotDnd");
     g_lyricsVisualizer = s::GetBool(L"Modules.LyricsVisualizer");
 
@@ -186,8 +195,11 @@ const Feat& Get() { return g_feat; }
 
 // ── Placement ───────────────────────────────────────────────────────────────
 
+bool SeparateDisplays() { return g_separateDisplays; }
+void SetPlacement(int align, bool bottom) { g_feat.align = align; g_feat.bottom = bottom; }
+
 GdkMonitor* TargetMonitor(GdkDisplay* display) {
-    const std::wstring& m = g_feat.monitor;
+    const std::wstring& m = g_separateDisplays ? std::wstring(L"follow") : g_feat.monitor;
     if (m == L"follow") {  // the monitor the pointer is on
         if (GdkSeat* seat = gdk_display_get_default_seat(display)) {
             int x = 0, y = 0;
@@ -1075,6 +1087,51 @@ void CheckAudioOutput() {
 }  // namespace
 
 bool BluetoothAudio() { return g_btAudio; }
+
+bool VolumeNow(int* pct, bool* mute) {
+    static double at = -10;
+    static int v = -1;
+    static bool m = false;
+    static bool ok = false;
+    if (Mono() - at > 2.0) {
+        at = Mono();
+        ok = ReadVolume(&v, &m);
+    }
+    *pct = v;
+    *mute = m;
+    return ok && v >= 0;
+}
+
+void SetVolume(int pct) {
+    const std::string cmd = "pactl set-sink-volume @DEFAULT_SINK@ " + std::to_string(std::clamp(pct, 0, 150)) + "%";
+    g_spawn_command_line_async(cmd.c_str(), nullptr);
+}
+
+void ToggleMute() { g_spawn_command_line_async("pactl set-sink-mute @DEFAULT_SINK@ toggle", nullptr); }
+
+// `pactl list sinks` has each sink's Name and Description; the default's is shown.
+std::string AudioOutputName() {
+    static double at = -100;
+    static std::string name;
+    if (Mono() - at < 10) return name;
+    at = Mono();
+    gchar* def = nullptr;
+    gchar* list = nullptr;
+    if (g_spawn_command_line_sync("pactl get-default-sink", &def, nullptr, nullptr, nullptr) && def &&
+        g_spawn_command_line_sync("pactl list sinks", &list, nullptr, nullptr, nullptr) && list) {
+        std::string sink = def;
+        while (!sink.empty() && isspace(static_cast<unsigned char>(sink.back()))) sink.pop_back();
+        const std::string all = list;
+        const size_t at2 = all.find("Name: " + sink);
+        if (at2 != std::string::npos) {
+            const size_t d = all.find("Description: ", at2);
+            if (d != std::string::npos) name = all.substr(d + 13, all.find('\n', d) - d - 13);
+        }
+    }
+    g_free(def);
+    g_free(list);
+    return name;
+}
 
 void Start(std::function<void(const std::string&, const std::string&, double, double)> toast, std::function<void()> changed) {
     StartIdleWatch();  // AFK

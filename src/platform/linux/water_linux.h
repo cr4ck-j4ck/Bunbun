@@ -26,6 +26,9 @@ enum class Due { None, Drink, Refill };
 Due Check();
 
 void Drink();
+// When the last glass was logged, and when the goal's cheer starts (island Now() seconds).
+double DrankAt();
+double GoalAt();
 void Undo();
 void Refill();
 void Snooze();

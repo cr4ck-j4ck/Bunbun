@@ -88,11 +88,13 @@ settles in with a snack when you turn on mascot do-not-disturb. You can also loa
 | **Focus mode** | `focus 50`: a timer, the mascot on do-not-disturb, notifications held back, and a summary of what you ticked off |
 | **Meetings** | Paste your calendar's private iCal link (Google or Outlook) and the island counts down to your next meeting with a **Join** button |
 | **Downloads** | Browser downloads show as they arrive (name, size, speed), then "Downloaded" |
+| **Edge light** | A light along the island's outline: twin comets that meet at the bottom, a single comet, or a soft breathing glow. Plays on whatever you pick (hover, opening, closing, track change, notifications, agents, system pop-ups, or always), in white, the album art's colour, or one you choose. Settings → Appearance → Edge light |
 | **Studio layout** | The default ([see above](#the-studio-island)): a header, Home cards, an icon tab bar with a volume slider, and Ask Bun as a chat. Classic, the original island, is one click away |
 | **Clipboard & note** | Your last 8 copies (click to copy again) and one quick note with checkboxes |
 | **Colour picker** | Pick any pixel on screen with a magnifier and copy it as HEX, RGB or HSL |
-| **Focus** | A focus page with an hours/minutes picker, presets, +5 min and an optional nudge when a distracting app comes up |
+| **Timers** | One page for Pomodoro (focus, short and long breaks, auto-start, length chips), a countdown set on a ring with your own presets, a stopwatch with laps, and Water; plus an optional nudge when a distracting app comes up |
 | **Home your way** | Pick what each Home card shows (agent, music, focus, weather, calendar, battery or system), add up to four links under them, and open any page from All apps |
+| **Screen Time** | How long each app has been in front today and over the last week, with each app's own name and icon, and an optional daily limit. Counts only while you're at the PC; stored on your PC only |
 | **Water** | A Water page (a glass filling up to your daily goal, a drop per glass, + glass and the week), and optional reminders paced across your active hours: **Drank** or **Later** right on the island, and a nudge to refill your bottle. Stored on your PC only |
 | **Mirror** | An optional camera preview before a call; the camera runs only while it's on |
 | **Tuck away** | Ctrl+Alt+H folds the island to a thin status line; point at it to bring it back. In full screen it tucks itself by default; Settings → Animations → **In full screen** can keep it showing (hover and all) or hide it |
@@ -125,7 +127,7 @@ up to date: the island saves one whenever you look at a page.
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/settings-appearance.png" alt="Appearance: shapes and themes"><br><sub><b>Appearance.</b> Pill, notch or Windows 11 shape, themes, and a live preview of your island on your wallpaper.</sub></td>
-    <td width="50%"><img src="docs/images/settings-displays.png" alt="Position and displays"><br><sub><b>Position & displays.</b> Any screen, or all of them, top or bottom per display.</sub></td>
+    <td width="50%"><img src="docs/images/settings-displays.png" alt="Position and displays"><br><sub><b>Position & motion.</b> Any screen, or all of them, top or bottom per display, and how the island moves.</sub></td>
   </tr>
 </table>
 
