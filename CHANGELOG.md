@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.8]
+
 ### Added
 - **Timers page** (it replaces the Focus page). One page, four modes around a big ring:
   **Focus** runs Pomodoro sessions ("Focus 1 of 4") with short and long breaks, Skip, Reset, a count
