@@ -135,7 +135,7 @@
         if (water) {
             EnsureRoundStroke();
             const float bob = std::sin(static_cast<float>(now) * 4.0f) * bs * 0.08f;
-            SIcon(StudioPage::Water, D2D1::Point2F(bc.x, bc.y + bob), bs * 1.7f, SCol(0x5ac8fa));
+            SIcon(StudioPage::Water, D2D1::Point2F(bc.x, bc.y + bob), bs * 1.7f, SAccent());  // Bunbun: the accent
         }
         // A bell that rings for the first couple of seconds of each 4 s.
         const float ring = water ? 0.0f

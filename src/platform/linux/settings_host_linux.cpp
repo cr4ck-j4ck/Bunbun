@@ -23,6 +23,8 @@
 #include <string>
 
 #include "../../agents/hook_installer.h"
+#include "../../common/backup.h"
+#include "../../common/work_json.h"
 #include "../../common/json.h"
 #include "../../common/todo_commands.h"
 #include "../../common/unix_socket.h"
@@ -98,6 +100,7 @@ bb::mascot::Mood MoodFromName(const std::string& m) {
     if (m == "streaming") return Mood::Streaming;
     if (m == "dnd") return Mood::Dnd;
     if (m == "live") return Mood::Live;
+    if (m == "gaming") return Mood::Gaming;
     return Mood::Idle;
 }
 
@@ -172,6 +175,161 @@ Value CapturePages() {
     if (ok && bb::json::Parse(line, &reply) && reply.isObject()) out["count"] = Value::Number(reply.getNumber("count"));
     return out;
 }
+
+GtkWidget* g_settingsWindow = nullptr;  // the owner of Backup & restore's file dialogs
+bool IslandRunning();
+
+// ── Backup & restore (common/backup.h) ───────────────────────────────────────
+// Bunbun's files by name: water, Screen Time, timers, the shelf and state.ini
+// live in ~/.local/state/Bunbun; settings, notes, to-dos, skin packs and Ask
+// Bun's prompt in ~/.config/Bunbun. The same names as on Windows.
+namespace backups {
+
+std::string PathFor(const std::string& name) {
+    const bool state = name == "water.txt" || name == "screentime.tsv" || name == "timers.txt" || name == "shelf.txt" ||
+                       name == "state.ini" || name == "work.txt";
+    return (state ? bb::plat::StateDir() : bb::plat::ConfigDir()) + "/" + name;
+}
+
+void AddFolder(const std::string& prefix, const std::string& dir, std::vector<bb::backup::File>* files) {
+    std::error_code ec;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(dir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        const std::string rel = std::filesystem::relative(e.path(), dir, ec).generic_string();
+        const std::string name = prefix + rel;
+        std::string data;
+        if (bb::backup::IsBackupName(name) && e.file_size(ec) < bb::backup::kMaxBytes && bb::plat::ReadFile(e.path().string(), &data))
+            files->push_back({name, std::move(data)});
+    }
+}
+
+std::vector<bb::backup::File> Collect() {
+    std::vector<bb::backup::File> files;
+    for (const char* name : bb::backup::kFiles) {
+        std::string data;
+        if (bb::plat::ReadFile(PathFor(name), &data)) files.push_back({name, std::move(data)});
+    }
+    for (const char* folder : bb::backup::kFolders) {
+        const std::string f = folder;
+        AddFolder(f, PathFor(f.substr(0, f.size() - 1)), &files);
+    }
+    return files;
+}
+
+std::string MakeZip(const std::vector<bb::backup::File>& files) {
+    const long long now = static_cast<long long>(time(nullptr));
+    return bb::backup::Zip(files, bb::backup::Manifest(BUNBUN_VERSION_STR, "linux", now), now);
+}
+
+std::string Stamp() {
+    char buf[40];
+    const time_t now = time(nullptr);
+    struct tm t{};
+    localtime_r(&now, &t);
+    strftime(buf, sizeof buf, "%Y-%m-%d %H.%M", &t);
+    return buf;
+}
+
+// The desktop's Save / Open dialog; empty when cancelled. `ext`: "zip", "png" or "pdf".
+std::string PickFile(bool save, const std::string& suggested, const std::string& ext = "zip", const char* title = nullptr) {
+    GtkFileChooserNative* dlg = gtk_file_chooser_native_new(
+        title ? title : save ? "Save a backup of Bunbun" : "Restore Bunbun from a backup",
+        g_settingsWindow ? GTK_WINDOW(g_settingsWindow) : nullptr,
+        save ? GTK_FILE_CHOOSER_ACTION_SAVE : GTK_FILE_CHOOSER_ACTION_OPEN, nullptr, nullptr);
+    GtkFileFilter* filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, ext == "zip" ? "Bunbun backup (*.zip)" : ext == "pdf" ? "PDF document (*.pdf)" : "PNG image (*.png)");
+    gtk_file_filter_add_pattern(filter, ("*." + ext).c_str());
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), filter);
+    if (save) {
+        gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
+        gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dlg), suggested.c_str());
+        const char* docs = g_get_user_special_dir(G_USER_DIRECTORY_DOCUMENTS);
+        gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dlg), docs ? docs : bb::plat::HomeDir().c_str());
+    }
+    std::string out;
+    if (gtk_native_dialog_run(GTK_NATIVE_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        if (char* f = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg))) {
+            out = f;
+            g_free(f);
+        }
+    }
+    g_object_unref(dlg);
+    const std::string dot = "." + ext;
+    if (save && !out.empty() && (out.size() < dot.size() || out.substr(out.size() - dot.size()) != dot)) out += dot;
+    return out;
+}
+
+// Runs `bunbun --quit` and waits for it.
+void QuitIsland() {
+    const std::string island = IslandCommand();
+    gchar* argv[] = {const_cast<gchar*>(island.c_str()), const_cast<gchar*>("--quit"), nullptr};
+    g_spawn_sync(nullptr, argv, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    for (int i = 0; i < 50 && IslandRunning(); ++i) usleep(100 * 1000);
+}
+
+Value Create(std::string* err) {
+    const std::string path = PickFile(true, "Bunbun backup " + Stamp() + ".zip");
+    Value o = Value::Object();
+    if (path.empty()) { o["cancelled"] = Value::Bool(true); return o; }
+    const std::vector<bb::backup::File> files = Collect();
+    const std::string zip = MakeZip(files);
+    if (!bb::plat::WriteFileAtomic(path, zip)) { *err = "couldn't write the backup there"; return {}; }
+    o["path"] = Value::String(path);
+    o["files"] = Value::Number(static_cast<double>(files.size()));
+    o["bytes"] = Value::Number(static_cast<double>(zip.size()));
+    return o;
+}
+
+Value Restore(std::string* err) {
+    const std::string path = PickFile(false, "");
+    Value o = Value::Object();
+    if (path.empty()) { o["cancelled"] = Value::Bool(true); return o; }
+    std::string zip, manifest;
+    if (!bb::plat::ReadFile(path, &zip)) { *err = "couldn't read that file"; return {}; }
+    std::vector<bb::backup::File> files;
+    if (!bb::backup::Unzip(zip, &files, &manifest, err)) return {};
+    const std::string safety = bb::plat::StateDir() + "/backups/Before restore " + Stamp() + ".zip";
+    bb::plat::MakeDirs(bb::plat::StateDir() + "/backups");
+    if (!bb::plat::WriteFileAtomic(safety, MakeZip(Collect()))) {
+        *err = "couldn't save a copy of the current data first; nothing was changed";
+        return {};
+    }
+    const bool wasRunning = IslandRunning();
+    if (wasRunning) QuitIsland();
+    int written = 0, failed = 0;
+    for (const auto& f : files) {
+        const std::string target = PathFor(f.name);
+        bb::plat::MakeDirs(target.substr(0, target.find_last_of('/')));
+        (bb::plat::WriteFileAtomic(target, f.data) ? written : failed)++;
+    }
+    if (wasRunning) bb::plat::Spawn({IslandCommand()});
+    o["files"] = Value::Number(written);
+    o["failed"] = Value::Number(failed);
+    o["safety"] = Value::String(safety);
+    o["fromVersion"] = Value::String(bb::backup::ManifestValue(manifest, "version"));
+    o["fromPlatform"] = Value::String(bb::backup::ManifestValue(manifest, "platform"));
+    return o;
+}
+
+// A file the page made (the work report as PNG or PDF), saved where you pick.
+Value SaveFile(const Value& args, std::string* err) {
+    const std::string ext = args.getString("ext");
+    if (ext != "png" && ext != "pdf") { *err = "only png or pdf"; return {}; }
+    gsize len = 0;
+    guchar* bytes = g_base64_decode(args.getString("base64").c_str(), &len);
+    const std::string data(reinterpret_cast<const char*>(bytes), len);
+    g_free(bytes);
+    if (data.empty()) { *err = "nothing to save"; return {}; }
+    const std::string path = PickFile(true, args.getString("name"), ext, "Save the work report");
+    Value o = Value::Object();
+    if (path.empty()) { o["cancelled"] = Value::Bool(true); return o; }
+    if (!bb::plat::WriteFileAtomic(path, data)) { *err = "couldn't write the file there"; return {}; }
+    o["path"] = Value::String(path);
+    bb::plat::OpenWithDefault(path);
+    return o;
+}
+
+}  // namespace backups
 
 bool IslandRunning() {
     // The island holds an flock on its lock file for as long as it runs.
@@ -279,6 +437,7 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
     if (cmd == "disconnectCopilot") return HookResult(hooks::UninstallCopilotHooks(&report), report);
     if (cmd == "connectCodex") return HookResult(hooks::InstallCodexHooks(&report), report);
     if (cmd == "disconnectCodex") return HookResult(hooks::UninstallCodexHooks(&report), report);
+    if (cmd == "getAccent") return Value::String("");  // the island's live accent: Windows only for now
     if (cmd == "getSystem") {
         Value o = Value::Object();
         o["platform"] = Value::String("linux");
@@ -292,6 +451,14 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         SetAutostart(args.getBool("on"));
         return Value::Bool(AutostartEnabled());
     }
+    if (cmd == "workDays") {  // Work mode's report (work.txt in the state folder)
+        std::string text;
+        bb::plat::ReadFile(backups::PathFor("work.txt"), &text);
+        return bb::work::WorkDaysJson(text, static_cast<int>(args.getNumber("from", 0)), static_cast<int>(args.getNumber("to", 99999999)));
+    }
+    if (cmd == "saveFile") return backups::SaveFile(args, err);
+    if (cmd == "backupCreate") return backups::Create(err);  // Backup & restore
+    if (cmd == "backupRestore") return backups::Restore(err);
     if (cmd == "startIsland") {
         if (!IslandRunning()) bb::plat::Spawn({IslandCommand()});
         return Value::Bool(true);
@@ -476,6 +643,7 @@ int main(int argc, char** argv) {
     webkit_web_view_set_background_color(g_view, &bg);
 
     GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    g_settingsWindow = window;
     gtk_window_set_title(GTK_WINDOW(window), "Bunbun Settings");
     // The icon theme has it once installed; the AppImage and a build tree carry their own.
     const std::string iconFile = bb::plat::DataDir() + "/../icons/hicolor/256x256/apps/bunbun.png";

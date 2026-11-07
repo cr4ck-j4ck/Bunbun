@@ -1016,12 +1016,17 @@ void EndLookupSession(HWND hwnd) {
     ClearCompose();  // Bunbun: closing the box drops a half-written reply's target
     if (!g_lookupUi.open) return;
     HWND previous = g_lookupUi.prevForeground;
-    const bool hadFocus = GetForegroundWindow() == hwnd;
+    // Bunbun: or nothing has focus. A command that closes the box at once (a timer) let
+    // the island drop focus first, so it went nowhere and was never handed back.
+    const HWND now = GetForegroundWindow();
+    const bool hadFocus = now == hwnd || now == nullptr;
     g_lookupUi = LookupUiState{};  // open = false first, so the focus change below can't re-enter
 
     const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
     if (hadFocus && previous && IsWindow(previous) && IsWindowVisible(previous)) {
+        INPUT unlock{};  // as ForceForeground: lets this process hand the foreground back
+        SendInput(1, &unlock, sizeof(INPUT));
         SetForegroundWindow(previous);
     }
 }

@@ -66,6 +66,7 @@
 #include "lyrics_linux.h"
 #include "sources.h"
 #include "water_linux.h"
+#include "work_linux.h"
 
 namespace bb::lisland {
 
@@ -215,7 +216,8 @@ void LoadSettings() {
     bb::lcal::LoadSettings();   // calendar links and the meeting alert
     bb::llook::SetEdge(bb::lfeat::Get().bottom, bb::lfeat::Get().merged);
     g_mascotOn = s::GetBool(L"Bunbun.Mascot") && s::GetBool(L"Bunbun.MascotOnIsland");
-    g_agentsOn = s::GetBool(L"Bunbun.Agents");
+    bb::lwork::LoadSettings();  // Bunbun.UseCase: office work hides every agent piece
+    g_agentsOn = s::GetBool(L"Bunbun.Agents") && bb::lwork::AgentsOn();
     g_agentPill = s::GetBool(L"Bunbun.AgentPill");
     g_mediaOn = s::GetBool(L"Modules.Media");
     g_streamingMood = s::GetBool(L"Bunbun.StreamingMood");
@@ -483,7 +485,22 @@ void PickColour() {
 // A new song opened the island for a moment (Modules.MediaAutoExpand).
 bool AutoExpanding() { return g_track.playing && Now() < g_expandUntil; }
 
+// Separate displays: the island is folded only because a full-screen app shares its
+// display. The other displays keep showing it at rest (OnMirrorDraw).
+bool g_fsFolded = false;
+
+// GDK index of the display the island is on now.
+int IslandMonitorIndex() {
+    if (!g_window) return -1;
+    GdkDisplay* display = gtk_widget_get_display(g_window);
+    GdkMonitor* mon = bb::lfeat::TargetMonitor(display);
+    for (int i = 0; i < gdk_display_get_n_monitors(display); ++i)
+        if (gdk_display_get_monitor(display, i) == mon) return i;
+    return -1;
+}
+
 Kind CurrentKind() {
+    g_fsFolded = false;
     Kind k = Kind::Clock;
     const bool toast = Now() < g_toastUntil && !Composing() && !g_hover;
     const auto& f = bb::lfeat::Get();
@@ -493,12 +510,20 @@ Kind CurrentKind() {
         // Hidden with the hotkey; tucked into a line (by hand, or in full screen);
         // hidden in full screen; hidden after a while without anything happening.
         // Pointing at a tucked line for a moment brings the island back.
-        const bool fullscreen = bb::lfeat::FullscreenAppActive();
+        bool fullscreen = bb::lfeat::FullscreenAppActive();
+        // Separate displays: a full-screen app on another display folds that display's island, not this one.
+        if (fullscreen && bb::lfeat::SeparateDisplays() && bb::lfeat::FullscreenMonitor() >= 0 &&
+            bb::lfeat::FullscreenMonitor() != IslandMonitorIndex())
+            fullscreen = false;
         const bool reveal = g_hover && Now() - g_hoverSince > f.tuckRevealMs / 1000.0;
         if (bb::lfeat::HiddenByHotkey()) return Kind::Hidden;
         if (bb::lfeat::Tucked() && reveal) bb::lfeat::SetTucked(false);
-        if (bb::lfeat::Tucked() || (fullscreen && bb::lfeat::FullscreenTuckNow() && !reveal)) return Kind::Tuck;
-        if (fullscreen && !bb::lfeat::FullscreenTuckNow() && !(f.unhideOnHover && g_hover)) return Kind::Hidden;
+        if (bb::lfeat::Tucked()) return Kind::Tuck;
+        if (fullscreen && bb::lfeat::FullscreenTuckNow() && !reveal) { g_fsFolded = bb::lfeat::SeparateDisplays(); return Kind::Tuck; }
+        if (fullscreen && !bb::lfeat::FullscreenTuckNow() && !(f.unhideOnHover && g_hover)) {
+            g_fsFolded = bb::lfeat::SeparateDisplays();
+            return Kind::Hidden;
+        }
         if (bb::lfeat::AutoHidden() && !toast && !(f.unhideOnHover && g_hover)) return Kind::Hidden;
     }
     if (g_agentsOn && g_agent.phase != AgentPhase::None) {
@@ -522,6 +547,24 @@ mascot::Mood MoodFor(Kind k) {
     if (Now() - bb::lwater::DrankAt() < 2.6) return mascot::Mood::Drinking;
     if (Now() >= bb::lwater::GoalAt() && Now() - bb::lwater::GoalAt() < 3.0) return mascot::Mood::Happy;
     const bool agentShown = g_agentsOn && g_agent.phase != AgentPhase::None;
+    const bool needsYou = g_agentsOn && (g_agent.phase == AgentPhase::Approval || g_agent.phase == AgentPhase::Question);
+    // Away or asleep wins in every state (music, agents at work, Work mode); only an
+    // agent waiting for your answer still shows (as on Windows).
+    if (!needsYou) {
+        const auto& ff = bb::lfeat::Get();
+        const double idle = bb::lfeat::IdleSeconds();
+        if (ff.sleepMinutes > 0 && idle >= ff.sleepMinutes * 60.0) return mascot::Mood::Sleepy;
+        if (ff.afkMinutes > 0 && idle >= ff.afkMinutes * 60.0) return mascot::Mood::Snack;
+    }
+    // Work mode when no agent is on show: at the laptop while working, a snack at lunch.
+    // Not over Do Not Disturb you chose (as on Windows).
+    const bool dndChosen = bb::lfeat::Get().mascotDnd ||
+                           (bb::lfeat::Get().dndFollowSystem && bb::lsrc::RadioState().dndKnown && bb::lsrc::RadioState().dnd);
+    if (!agentShown && !dndChosen && bb::lwork::On()) {
+        const bb::work::Phase wp = bb::lwork::Now().phase;
+        if (wp == bb::work::Phase::Working || wp == bb::work::Phase::Overtime) return mascot::Mood::Working;
+        if (wp == bb::work::Phase::Lunch) return mascot::Mood::Snack;
+    }
     // An agent at work shows on the mascot even with the agent pill off.
     if (k == Kind::Agent || k == Kind::AgentCard || k == Kind::RichCard || agentShown) {
         switch (g_agent.phase) {
@@ -1089,7 +1132,7 @@ gboolean OnDraw(GtkWidget*, cairo_t* cr, gpointer) {
         if (g_frame) cairo_pattern_destroy(g_frame);
         g_frame = frame;
         g_framePill = {pill.x, pill.y, pill.w, pill.h};
-        if (bb::lfeat::SeparateDisplays() && pill.h <= 60 && pill.w > 1) {  // at rest: keep it for the mirrors
+        if (bb::lfeat::SeparateDisplays() && pill.h <= 60 && pill.w > 1 && !g_fsFolded) {  // at rest: keep it for the mirrors
             if (g_restFrame) cairo_pattern_destroy(g_restFrame);
             g_restFrame = cairo_pattern_reference(frame);
             g_restPill = {pill.x, pill.y, pill.w, pill.h};
@@ -1762,8 +1805,21 @@ gboolean OnMirrorDraw(GtkWidget* w, cairo_t* cr, gpointer data) {
     cairo_set_source_rgba(cr, 0, 0, 0, 0);
     cairo_paint(cr);
     cairo_restore(cr);
-    // Separate: while the island is open on its display, the others show it at rest.
-    const bool rest = bb::lfeat::SeparateDisplays() && g_framePill.h > 60 && g_restFrame;
+    // Separate: a full-screen app on this display (and the island isn't here): this
+    // display's island hides, or folds to a line.
+    if (bb::lfeat::SeparateDisplays() && bb::lfeat::FullscreenMonitor() == m.monitor && !g_fsFolded) {
+        if (!bb::lfeat::FullscreenTuckNow()) return TRUE;
+        const double tw = 60, th = 6;
+        const double px = m.align == 0 ? 0 : m.align == 2 ? kCanvasW - tw : (kCanvasW - tw) / 2;
+        const double canvasH = gtk_widget_get_allocated_height(w) / g_scale;
+        const double py = m.bottom ? canvasH - kTopGap - th : 0;
+        cairo_scale(cr, g_scale, g_scale);
+        PaintTuck(cr, Rect{px, py, tw, th});
+        return TRUE;
+    }
+    // Separate: while the island is open on its display (or folded for a full-screen
+    // app there), the others show it at rest.
+    const bool rest = bb::lfeat::SeparateDisplays() && (g_framePill.h > 60 || g_fsFolded) && g_restFrame;
     cairo_pattern_t* frame = rest ? g_restFrame : g_frame;
     const auto& fp = rest ? g_restPill : g_framePill;
     if (!frame || fp.w <= 0) return TRUE;
@@ -2327,6 +2383,12 @@ int main(int argc, char** argv) {
             ShowToast(k == bb::ltimers::kKindPomodoro ? "Pomodoro" : k == bb::ltimers::kKindTimer ? "Timer" : "Focus",
                       bb::ltimers::OnFinished(k), 10);
         bb::ltimers::Tick();  // the next Pomodoro phase, when it starts by itself
+        // Work mode (work_linux.cpp), every 5 s: the day's log and its notes.
+        static int s_workTick = 0;
+        if (++s_workTick >= 5) {
+            s_workTick = 0;
+            for (const auto& [title, text] : bb::lwork::Tick()) ShowToast(title, text, 6);
+        }
         bb::lscreen::Tick();  // Screen Time: the app in front gets this second
         // The water reminder (Bunbun.WaterReminders), every 30 s.
         static int s_waterTick = 0;

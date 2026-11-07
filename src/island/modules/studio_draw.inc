@@ -90,6 +90,27 @@
     D2D1_POINT_2F studioOrigin_{};      // published content rect's top-left, for hit rects
 
     static D2D1_COLOR_F SCol(uint32_t rgb, float a = 1.0f) { return D2D1::ColorF(rgb, a); }
+
+    // Bunbun: Studio on a light island (Porcelain, a light Custom or solid fill). The
+    // pages are drawn for a dark island: white text, grey labels, near-black cards. On
+    // a light one every neutral colour is turned around against the theme (white text
+    // becomes the theme's text, black cards light ones, greys in between); the accent
+    // and status colours, and the theme's own colours, stay as they are. AcquireBrush
+    // applies it while a Studio frame is drawn.
+    bool studioInk_ = false;
+    D2D1_COLOR_F inkText_{}, inkCard_{}, inkKeep1_{}, inkKeep2_{}, inkKeep3_{};
+    static bool SameCol(const D2D1_COLOR_F& a, const D2D1_COLOR_F& b) {
+        // Near-exact: Porcelain's text (#14161A) is only 4/255 from the cards' #18181A.
+        return std::fabs(a.r - b.r) < 0.004f && std::fabs(a.g - b.g) < 0.004f && std::fabs(a.b - b.b) < 0.004f;
+    }
+    D2D1_COLOR_F StudioInk(D2D1_COLOR_F c) const {
+        const float mx = std::max({c.r, c.g, c.b}), mn = std::min({c.r, c.g, c.b});
+        if (mx - mn > 0.08f) return c;  // a colour, not a neutral
+        if (SameCol(c, inkKeep1_) || SameCol(c, inkKeep2_) || SameCol(c, inkKeep3_)) return c;
+        const float lum = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+        return D2D1::ColorF(SLerp(inkCard_.r, inkText_.r, lum), SLerp(inkCard_.g, inkText_.g, lum),
+                            SLerp(inkCard_.b, inkText_.b, lum), c.a);
+    }
     D2D1_COLOR_F SFade(D2D1_COLOR_F c) const { c.a *= studioAlpha_; return c; }
 
     // Records a clickable spot in window (client) coordinates, through the transform
@@ -273,6 +294,7 @@
     D2D1_RECT_F BeginStudioFrame(const SharedState& state, const Settings& settings, IslandKind kind,
                                  D2D1_RECT_F island, double now) {
         studio_ = StudioFrame{};
+        studioInk_ = false;
         if (!settings.studioLayout || (kind != IslandKind::Media && kind != IslandKind::Idle) ||
             GameOverlayShown(settings.gameOverlay)) {
             return island;
@@ -283,6 +305,17 @@
 
         studio_.on = true;
         studio_.mix = mix;
+        {
+            const D2D1_COLOR_F bg = settings.pillBgColor;
+            studioInk_ = 0.2126f * bg.r + 0.7152f * bg.g + 0.0722f * bg.b > 0.55f;
+            inkText_ = settings.textPrimaryColor;
+            inkCard_ = D2D1::ColorF(bg.r * 0.93f, bg.g * 0.93f, bg.b * 0.93f, 1.0f);
+            inkKeep1_ = settings.textPrimaryColor;
+            inkKeep2_ = settings.textSecondaryColor;
+            inkKeep3_ = bg;
+            if (0.2126f * inkText_.r + 0.7152f * inkText_.g + 0.0722f * inkText_.b > 0.5f)
+                inkText_ = D2D1::ColorF(0.08f, 0.09f, 0.10f, 1.0f);  // a light Custom fill with white text set
+        }
         studio_.island = island;
         studio_.context = kind == IslandKind::Media ? 0 : 1;
         studio_.tabs = DashboardTabIds(studio_.context, settings);
@@ -350,6 +383,7 @@
         const float hy = isl.top + 17.0f;
         std::wstring first, second;
         StudioName(studio_.page_, state.agent, &first, &second);
+        if (studio_.page_ == StudioPage::Work && state.work.study) { first = L"Study "; second = L"Time"; }  // Bunbun
         const D2D1_COLOR_F pageCol = StudioPageColor(studio_.page_, state);
 
         // Bunbun: header, left to right: mascot, page name (and Weather's controls);
@@ -362,6 +396,8 @@
             auto mood = state.agent.phase != bb::AgentPhase::None ? AgentMood(state.agent.phase)
                         : state.media.playing ? MediaMascotMood(state.media, settings) : bb::mascot::Mood::Idle;
             double moodSince = state.agent.phaseSince;
+            if (state.agent.phase == bb::AgentPhase::None) WorkMood(state.work, &mood);  // Bunbun: Work mode
+            AwayMood(settings, state, &mood);  // Bunbun: away or asleep over the rest
             if (WaterMood(now, &mood, &moodSince)) g_layoutDirty = true;  // Bunbun: drinking a logged glass, the goal's cheer
             if (settings.idleEyes) {
                 DrawIdleEyes(state, D2D1::Point2F(fx + 9.0f, hy), 14.0f, mood, now, state.agent.phaseSince);
@@ -489,6 +525,20 @@
             rightEdge = rc.x - 9.0f;
         }
 
+        // 5b. Bunbun: Work mode without agents on show: the day's progress in that place.
+        if (!AgentsShown(settings) && state.work.on && state.work.goal > 0) {
+            const float u = std::min(1.0f, static_cast<float>(state.work.Worked()) / state.work.goal);
+            const D2D1_COLOR_F uc = WorkPhaseColour(static_cast<bb::work::Phase>(state.work.phase));
+            wchar_t pct[24];
+            swprintf_s(pct, state.work.study ? L"Study %d%%" : L"Work %d%%", static_cast<int>(u * 100.0f + 0.5f));
+            const float pw = SMeasure(pct, SFLabel);
+            const D2D1_POINT_2F rc = D2D1::Point2F(rightEdge - pw - 14.0f, hy);
+            SRing(rc, 6.0f, 2.4f, u, uc);
+            SText(pct, D2D1::RectF(rc.x + 10, hy - 8, rc.x + 12 + pw, hy + 8), SFLabel, SFade(SCol(0x8e8e93)));
+            SHit(D2D1::RectF(rc.x - 9, hy - 10, rc.x + 12 + pw, hy + 10), StudioAction::WorkPage);
+            rightEdge = rc.x - 9.0f;
+        }
+
         // 6. Date and time, right-aligned against the rest.
         {
             SYSTEMTIME t{};
@@ -522,6 +572,7 @@
         for (int i = 0; i < n; ++i) {
             pages[i] = StudioPageFor(studio_.context, studio_.tabs[static_cast<size_t>(i)]);
             labels[i] = StudioTabLabel(pages[i]);
+            if (pages[i] == StudioPage::Work && state.work.study) labels[i] = L"Study";  // Bunbun
             const float want = i == studio_.tabIdx ? 30.0f + 10.0f + SMeasure(labels[i], SFLabel) : 30.0f;
             float& cur = studioTabW_[static_cast<size_t>(i)];
             cur += (want - cur) * 0.25f;
@@ -566,6 +617,8 @@
 
         DrawTrayDropOverlay(now);
         studioAlpha_ = 1.0f;
+        // Bunbun: the light-island remap stays on until the next frame begins: live pages
+        // (Weather, System) repaint their cards in partial passes after this.
     }
 
     // A file dragged over the open island: a drop zone with a marching dashed
@@ -770,7 +823,7 @@
             }
         };
         auto tileFocus = [&](const D2D1_RECT_F r) {
-            const D2D1_COLOR_F purple = SCol(0xbf5af2);
+            const D2D1_COLOR_F purple = SCol(0xbf5af2);  // Bunbun: Home cards keep their own colours
             const TimerSnapshot& tm = state.timer;
             if (settings.focusPage) SHit(r, StudioAction::FocusPage);
             DrawStudioTile(r, purple, tm.active && tm.running, now);
@@ -794,8 +847,35 @@
                 SHit(D2D1::RectF(bc.x - 17, bc.y - 17, bc.x + 17, bc.y + 17), StudioAction::FocusStart, 25);
             }
         };
+        // Bunbun: Work mode's card: today's work against the goal, the state, start / pause.
+        auto tileWork = [&](const D2D1_RECT_F r) {
+            const WorkSnapshot& w = state.work;
+            const auto phase = static_cast<bb::work::Phase>(w.phase);
+            // Bunbun: Home cards keep their own colours (the Work page follows the accent).
+            const D2D1_COLOR_F col = phase == bb::work::Phase::Working ? SCol(bb::work::KindColour(bb::work::Kind::Work))
+                                                                         : WorkPhaseColour(phase);
+            SHit(r, StudioAction::WorkPage);
+            DrawStudioTile(r, col, phase == bb::work::Phase::Working || phase == bb::work::Phase::Overtime, now);
+            SText(w.study ? L"Study" : L"Work", D2D1::RectF(r.left + 14, r.top + 14, r.right - 52, r.top + 32), SFLabel, D2D1::ColorF(1, 1, 1, 0.65f));
+            const D2D1_POINT_2F rc = D2D1::Point2F(r.right - 30, r.top + 30);
+            SRing(rc, 15, 4.5f, w.goal > 0 ? std::min(1.0f, static_cast<float>(w.Worked()) / w.goal) : 0.0f, col);
+            SText(bb::work::Duration(w.Worked()), D2D1::RectF(r.left + 14, r.bottom - 58, r.right - 46, r.bottom - 28), SFBig, white);
+            // The card's line is short: "Until 18:00" while working, else the state.
+            std::wstring line = phase == bb::work::Phase::Working && !w.study ? L"Until " + bb::work::FormatClock(w.end) : WorkStatusLine(w, now);
+            if (w.study && phase == bb::work::Phase::Working && !w.subject.empty() && w.blockEnd >= 0)
+                line = w.subject + L"  B7 " + bb::work::FormatClock(w.blockEnd);  // short on the card
+            SText(line, D2D1::RectF(r.left + 14, r.bottom - 26, r.right - 46, r.bottom - 10), SFBody, D2D1::ColorF(1, 1, 1, 0.8f));
+            const D2D1_POINT_2F bc = D2D1::Point2F(r.right - 27, r.bottom - 27);
+            const bool going = phase == bb::work::Phase::Working || phase == bb::work::Phase::Overtime ||
+                               phase == bb::work::Phase::Away || phase == bb::work::Phase::Asleep;
+            const StudioAction act = going ? StudioAction::WorkPause
+                                   : phase == bb::work::Phase::Paused || phase == bb::work::Phase::Break ? StudioAction::WorkResume
+                                                                                                         : StudioAction::WorkStart;
+            SRoundButton(bc, 15, going ? 1 : 0, col, SHover(act));
+            SHit(D2D1::RectF(bc.x - 17, bc.y - 17, bc.x + 17, bc.y + 17), act);
+        };
         auto tileCalendar = [&](const D2D1_RECT_F r) {
-            const D2D1_COLOR_F red = SCol(0xff453a);
+            const D2D1_COLOR_F red = SCol(0xff453a);  // Bunbun: Home cards keep their own colours
             if (const int tab = DashboardPageIndex(StudioPage::Calendar, settings); tab >= 0) SHit(r, StudioAction::Tab, tab);
             DrawStudioTile(r, red, state.meeting.valid, now);
             SYSTEMTIME st{};
@@ -835,7 +915,7 @@
             SText(line, D2D1::RectF(r.left + 14, r.bottom - 26, r.right - 12, r.bottom - 10), SFBody, D2D1::ColorF(1, 1, 1, 0.8f));
         };
         auto tileSystem = [&](const D2D1_RECT_F r) {
-            const D2D1_COLOR_F green = SCol(0x30d158);
+            const D2D1_COLOR_F green = SCol(0x30d158);  // Bunbun: Home cards keep their own colours
             if (const int tab = DashboardPageIndex(StudioPage::Hardware, settings); tab >= 0) SHit(r, StudioAction::Tab, tab);
             DrawStudioTile(r, green, false, now);
             SText(L"System", D2D1::RectF(r.left + 14, r.top + 14, r.right - 52, r.top + 32), SFLabel, D2D1::ColorF(1, 1, 1, 0.65f));
@@ -858,6 +938,7 @@
                 case HomeTile::Calendar: tileCalendar(r); break;
                 case HomeTile::Battery: tileBattery(r); break;
                 case HomeTile::System: tileSystem(r); break;
+                case HomeTile::Work: tileWork(r); break;
             }
         }
         // The cards are chosen in Settings → Island pages (the island has no Edit mode).
@@ -916,7 +997,7 @@
     // ── Extra pages (both layouts) ──
     bool DrawStudioExtraPage(int tabId, const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
         if (tabId != kTabAgent && tabId != kTabClipboard && tabId != kTabNote && tabId != kTabFocus && tabId != kTabApps &&
-            tabId != kTabMirror && tabId != kTabHome && tabId != kTabWater && tabId != kTabScreenTime)
+            tabId != kTabMirror && tabId != kTabHome && tabId != kTabWater && tabId != kTabScreenTime && tabId != kTabWork)
             return false;
         if (tabId == kTabHome) {
             DrawStudioHome(state, rect, settings, now);
@@ -934,6 +1015,7 @@
         else if (tabId == kTabMirror) DrawStudioMirrorPage(r);
         else if (tabId == kTabWater) DrawStudioWaterPage(state, r, now);
         else if (tabId == kTabScreenTime) DrawStudioScreenTimePage(state, r, settings, now);
+        else if (tabId == kTabWork) DrawStudioWorkPage(state, r, now);  // Bunbun: Work mode
         else DrawStudioNotePage(r, now);
         return true;
     }
@@ -944,7 +1026,9 @@
     // then the week against the goal.
     void DrawStudioWaterPage(const SharedState& state, D2D1_RECT_F r, double now) {
         const WaterSnapshot& w = state.water;
-        const D2D1_COLOR_F blue = SCol(0x5ac8fa), deep = SCol(0x0a84ff), white = SCol(0xffffff), grey = SCol(0x8e8e93);
+        // Bunbun: the accent, and a deeper shade of it for the water's body.
+        const D2D1_COLOR_F blue = SAccent(), white = SCol(0xffffff), grey = SCol(0x8e8e93);
+        const D2D1_COLOR_F deep = D2D1::ColorF(blue.r * 0.72f, blue.g * 0.72f, blue.b * 0.72f, 1.0f);
         const float H = r.bottom - r.top;
         auto amount = [](int ml) {
             wchar_t b[24];
@@ -1011,7 +1095,9 @@
             SFillRound(b, (b.bottom - b.top) * 0.5f,
                        primary ? D2D1::ColorF(blue.r, blue.g, blue.b, SLerp(0.9f, 1.0f, hover))
                                : D2D1::ColorF(1, 1, 1, SLerp(0.09f, 0.18f, hover)));
-            SText(label, b, SFLabel, primary ? SCol(0x061a26) : white, 1);
+            // Bunbun: dark text on a light accent, white on a dark one.
+            const bool lightFill = 0.2126f * blue.r + 0.7152f * blue.g + 0.0722f * blue.b > 0.55f;
+            SText(label, b, SFLabel, primary ? (lightFill ? SCol(0x101014) : white) : white, 1);
             SHit(b, action);
         };
         const float by = r.top + 84;
@@ -1758,7 +1844,7 @@
         for (int id : DashboardTabIds(ctx, s)) {
             const StudioPage p = StudioPageFor(ctx, id);
             if (p == StudioPage::Apps) continue;
-            apps.push_back({p, id, StudioAction::OpenTab, StudioTabLabel(p)});
+            apps.push_back({p, id, StudioAction::OpenTab, p == StudioPage::Work && state.work.study ? L"Study" : StudioTabLabel(p)});
         }
         apps.push_back({StudioPage::Home, -1, StudioAction::ColorPicker, L"Colour"});
         apps.push_back({StudioPage::Home, -2, StudioAction::Settings, L"Settings"});
@@ -1806,6 +1892,210 @@
     // ── Timers page (timers_module.inc) ──
     // One page for every timer: a mode bar on the top right, a big ring on the
     // left, the mode's controls to its right. Water draws its own page below the bar.
+    // ── Work page (work_module.inc) ──
+    // Left: the state, today's work against the goal and the buttons. Right: the
+    // day's timeline (work, away, asleep, lunch, breaks, overtime) and its totals,
+    // with Report for the full report in Settings.
+    // Bunbun: worked time wears the accent; the other kinds keep their own colours
+    // so a timeline still reads at a glance.
+    D2D1_COLOR_F WorkKindColour(bb::work::Kind k) const {
+        return k == bb::work::Kind::Work ? SAccent() : SCol(bb::work::KindColour(k));
+    }
+
+    D2D1_COLOR_F WorkPhaseColour(bb::work::Phase p) const {
+        namespace wk = bb::work;
+        switch (p) {
+            case wk::Phase::Working: return SAccent();
+            case wk::Phase::Overtime: return SCol(wk::KindColour(wk::Kind::Overtime));
+            case wk::Phase::Away: return SCol(wk::KindColour(wk::Kind::Away));
+            case wk::Phase::Asleep: return SCol(wk::KindColour(wk::Kind::Asleep));
+            case wk::Phase::Lunch: return SCol(wk::KindColour(wk::Kind::Lunch));
+            case wk::Phase::Break: return SCol(wk::KindColour(wk::Kind::Break));
+            case wk::Phase::Done: return SCol(0x30d158);
+            default: return SCol(0x8e8e93);
+        }
+    }
+
+    // "Working · until 18:00", "Lunch · back at 13:45", "Break · 3 min left"…
+    // Study: "Maths · until 11:00", "Free time · Physics at 14:00".
+    static std::wstring WorkStatusLine(const WorkSnapshot& w, double now) {
+        namespace wk = bb::work;
+        (void)now;
+        const auto phase = static_cast<wk::Phase>(w.phase);
+        if (w.study) {
+            if ((phase == wk::Phase::Working || phase == wk::Phase::Overtime) && !w.subject.empty())
+                return w.blockEnd >= 0 ? w.subject + L" \x00B7 until " + wk::FormatClock(w.blockEnd) : w.subject;
+            if (phase == wk::Phase::Off)
+                return w.nextBlock >= 0 ? w.nextSubject + L" at " + wk::FormatClock(w.nextBlock) : std::wstring(L"Free time");
+            // Bunbun: studying outside a class (by hand, or a Pomodoro): the work day's end doesn't apply.
+            // The title already says Studying: the line says what's next.
+            if (phase == wk::Phase::Working || phase == wk::Phase::Overtime)
+                return w.nextBlock >= 0 ? L"Next: " + w.nextSubject + L" at " + wk::FormatClock(w.nextBlock) : std::wstring(L"Free study");
+        }
+        switch (phase) {
+            case wk::Phase::Working: return L"Working \x00B7 until " + wk::FormatClock(w.end);
+            case wk::Phase::Overtime: return L"Overtime";
+            case wk::Phase::Lunch: return L"Lunch \x00B7 back at " + wk::FormatClock(w.lunchStart + w.lunchMinutes);
+            case wk::Phase::Break: {
+                const long long left = std::max(0LL, w.breakUntil - static_cast<long long>(time(nullptr)));
+                return L"Break \x00B7 " + std::to_wstring((left + 59) / 60) + L" min left";
+            }
+            case wk::Phase::Away: return L"Away";
+            case wk::Phase::Asleep: return L"Asleep";
+            case wk::Phase::Paused: return L"Paused";
+            case wk::Phase::Done: return L"Done for today";
+            default: return w.autoStart ? L"Starts at " + wk::FormatClock(w.start) : std::wstring(L"Not started");
+        }
+    }
+
+    void DrawStudioWorkPage(const SharedState& state, D2D1_RECT_F r, double now) {
+        namespace wk = bb::work;
+        EnsureRoundStroke();
+        const WorkSnapshot& w = state.work;
+        const auto phase = static_cast<wk::Phase>(w.phase);
+        const D2D1_COLOR_F white = SCol(0xffffff), grey = SCol(0x8e8e93), cardBg = SCol(0x1c1c1e);
+        const D2D1_COLOR_F col = WorkPhaseColour(phase);
+        auto pill = [&](D2D1_RECT_F b, const std::wstring& label, bool primary, StudioAction action) {
+            const float hover = SHover(action);
+            SFillRound(b, (b.bottom - b.top) * 0.5f,
+                       primary ? D2D1::ColorF(1, 1, 1, SLerp(0.92f, 1.0f, hover)) : D2D1::ColorF(1, 1, 1, SLerp(0.09f, 0.18f, hover)));
+            SText(label, b, SFLabel, primary ? SCol(0x141416) : white, 1);
+            SHit(b, action);
+        };
+        auto pillW = [&](const std::wstring& label) { return SMeasure(label, SFLabel) + 28.0f; };
+
+        // ── Left: the state, the time, the buttons ──
+        const float W = r.right - r.left;
+        const float leftW = std::min(300.0f, std::floor(W * 0.4f));
+        const D2D1_RECT_F lc = D2D1::RectF(r.left, r.top, r.left + leftW, r.bottom);
+        SFillRound(lc, 14, cardBg);
+        if (ID2D1SolidColorBrush* b = AcquireBrush(col)) target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(lc.left + 20, lc.top + 22), 4.5f, 4.5f), b);
+        SText(w.study ? wk::StudyLabel(phase) : wk::PhaseLabel(phase), D2D1::RectF(lc.left + 32, lc.top + 12, lc.right - 12, lc.top + 32), SFLabel, white);
+        if (w.study && w.streak > 0)  // Study: the streak of days that met the goal
+            SText(L"\U0001F525 " + std::to_wstring(w.streak) + (w.streak == 1 ? L" day" : L" days"),
+                  D2D1::RectF(lc.left + 120, lc.top + 12, lc.right - 14, lc.top + 32), SFLabel, SCol(0xff9f0a), 2);
+        {   // Bunbun: past an hour ("1h 12m") the hero size no longer fits; a step down then.
+            const std::wstring worked = wk::Duration(w.Worked());
+            const D2D1_RECT_F at = D2D1::RectF(lc.left + 16, lc.top + 38, lc.right - 70, lc.top + 92);
+            SText(worked, at, SMeasure(worked, SFHero) > at.right - at.left ? SFBig : SFHero, white);
+        }
+        const float frac = w.goal > 0 ? std::min(1.0f, static_cast<float>(w.Worked()) / w.goal) : 0.0f;
+        SRing(D2D1::Point2F(lc.right - 40, lc.top + 62), 22, 5.0f, frac, col);
+        SText(std::to_wstring(static_cast<int>(frac * 100.0f + 0.5f)) + L"%", D2D1::RectF(lc.right - 62, lc.top + 52, lc.right - 18, lc.top + 72),
+              SFSmall, grey, 1);
+        SText(w.goal > 0 ? L"of " + wk::Duration(w.goal) + L" today" : std::wstring(w.study ? L"studied today" : L"worked today"),
+              D2D1::RectF(lc.left + 16, lc.top + 92, lc.right - 12, lc.top + 110), SFBody, grey);
+        SText(WorkStatusLine(w, now), D2D1::RectF(lc.left + 16, lc.top + 112, lc.right - 12, lc.top + 130), SFBody, col);
+
+        // Buttons for this state, on one row (the second goes when there's no room).
+        std::vector<std::pair<std::wstring, StudioAction>> btns;
+        switch (phase) {
+            case wk::Phase::Working: case wk::Phase::Overtime: case wk::Phase::Away: case wk::Phase::Asleep:
+                btns = {{L"Pause", StudioAction::WorkPause}, {L"Break", StudioAction::WorkBreak}, {L"Done", StudioAction::WorkDone}};
+                break;
+            case wk::Phase::Paused: case wk::Phase::Break:
+                btns = {{L"Resume", StudioAction::WorkResume}, {L"Done", StudioAction::WorkDone}};
+                break;
+            case wk::Phase::Lunch:
+                btns = {{L"Done for today", StudioAction::WorkDone}};
+                break;
+            case wk::Phase::Done:
+                btns = {{L"Start again", StudioAction::WorkStart}};
+                break;
+            default:
+                btns = {{w.study ? L"Start studying" : L"Start work", StudioAction::WorkStart}};
+                break;
+        }
+        float bx = lc.left + 14;
+        const float by = lc.bottom - 44;
+        for (size_t i = 0; i < btns.size(); ++i) {
+            const float bw = pillW(btns[i].first);
+            if (bx + bw > lc.right - 12) break;
+            pill(D2D1::RectF(bx, by, bx + bw, by + 30), btns[i].first, i == 0, btns[i].second);
+            bx += bw + 8;
+        }
+
+        // ── Right: today's timeline and totals ──
+        const D2D1_RECT_F rc = D2D1::RectF(lc.right + 10, r.top, r.right, r.bottom);
+        SFillRound(rc, 14, cardBg);
+        SText(L"Today", D2D1::RectF(rc.left + 16, rc.top + 12, rc.left + 120, rc.top + 30), SFLabel, white);
+        const float repW = pillW(L"Report");
+        pill(D2D1::RectF(rc.right - 14 - repW, rc.top + 8, rc.right - 14, rc.top + 34), L"Report", false, StudioAction::WorkReport);
+
+        // The span: the scheduled hours, widened to whatever was recorded.
+        int from = w.start * 60, to = (w.end <= w.start ? w.end + 1440 : w.end) * 60;
+        if (w.study) { from = w.first >= 0 ? w.first : 8 * 3600; to = std::max(from + 3600, w.last); }
+        if (w.first >= 0) from = std::min(from, w.first);
+        if (w.last >= 0) to = std::max(to, w.last);
+        if (to <= from) to = from + 3600;
+        const D2D1_RECT_F bar = D2D1::RectF(rc.left + 16, rc.top + 46, rc.right - 16, rc.top + 66);
+        SFillRound(bar, 6, D2D1::ColorF(1, 1, 1, 0.06f));
+        const float bw = bar.right - bar.left;
+        auto xAt = [&](int s) { return bar.left + bw * Clamp(static_cast<float>(s - from) / static_cast<float>(to - from), 0.0f, 1.0f); };
+        for (const wk::Segment& g : w.segments) {
+            const float x0 = xAt(g.start), x1 = std::max(xAt(g.end), x0 + 1.5f);
+            SFillRound(D2D1::RectF(x0, bar.top, x1, bar.bottom), 3, WorkKindColour(g.kind));
+        }
+        // Now, as a thin line.
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        int nowSec = st.wHour * 3600 + st.wMinute * 60 + st.wSecond;
+        if (w.workDate && nowSec < from && to > 86400) nowSec += 86400;
+        if (nowSec >= from && nowSec <= to) {
+            const float nx = xAt(nowSec);
+            SFillRound(D2D1::RectF(nx - 1, bar.top - 4, nx + 1, bar.bottom + 4), 1, white);
+        }
+        SText(wk::FormatClock(from / 60), D2D1::RectF(bar.left, bar.bottom + 4, bar.left + 60, bar.bottom + 18), SFSmall, grey);
+        SText(wk::FormatClock(to / 60), D2D1::RectF(bar.right - 60, bar.bottom + 4, bar.right, bar.bottom + 18), SFSmall, grey, 2);
+
+        // Study: today's subjects, most studied first, as bars; then away and breaks.
+        if (w.study) {
+            const float gx = rc.left + 16, gy = bar.bottom + 28;
+            const float wAll = rc.right - rc.left - 32;
+            int most = 1;
+            for (const auto& s : w.subjects) most = std::max(most, s.second);
+            if (w.subjects.empty())
+                SText(L"Subjects show here as you study.", D2D1::RectF(gx, gy, gx + wAll, gy + 18), SFBody, grey);
+            static const uint32_t kSubject[] = {0x0a84ff, 0xbf5af2, 0x30d158, 0xff9f0a, 0x64d2ff};
+            for (size_t i = 0; i < w.subjects.size() && i < 4; ++i) {
+                const float y = gy + i * 22.0f;
+                const std::wstring dur = wk::Duration(w.subjects[i].second);
+                const float durW = SMeasure(dur, SFLabel) + 6.0f;
+                SText(w.subjects[i].first, D2D1::RectF(gx, y - 2, gx + 110, y + 18), SFBody, white);
+                const float bx0 = gx + 116, bx1 = rc.right - 16 - durW;
+                SFillRound(D2D1::RectF(bx0, y + 4, bx1, y + 12), 4, D2D1::ColorF(1, 1, 1, 0.06f));
+                SFillRound(D2D1::RectF(bx0, y + 4, bx0 + std::max(8.0f, (bx1 - bx0) * w.subjects[i].second / most), y + 12), 4, SCol(kSubject[i % 5]));
+                SText(dur, D2D1::RectF(bx1 + 6, y - 2, rc.right - 16, y + 18), SFLabel, white, 2);
+            }
+            const std::wstring tail = L"Away " + wk::Duration(w.seconds[static_cast<int>(wk::Kind::Away)] + w.seconds[static_cast<int>(wk::Kind::Asleep)]) +
+                                      L" \x00B7 Breaks " + std::to_wstring(w.breaks);
+            SText(tail, D2D1::RectF(gx, rc.bottom - 26, rc.right - 16, rc.bottom - 8), SFSmall, grey);
+            return;
+        }
+        // Totals: two columns of three.
+        const wk::Kind kinds[] = {wk::Kind::Work, wk::Kind::Away, wk::Kind::Lunch, wk::Kind::Overtime, wk::Kind::Asleep, wk::Kind::Break};
+        const float gx = rc.left + 16, gy = bar.bottom + 30;
+        const float colW = (rc.right - rc.left - 32) / 2.0f;
+        for (int i = 0; i < 6; ++i) {
+            const wk::Kind k = kinds[i];
+            const float x = gx + (i / 3) * colW, y = gy + (i % 3) * 26.0f;
+            if (ID2D1SolidColorBrush* b = AcquireBrush(WorkKindColour(k)))
+                target_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y + 4, x + 10, y + 14), 3, 3), b);
+            std::wstring label = wk::KindLabel(k);
+            if (k == wk::Kind::Break) label += L" (" + std::to_wstring(w.breaks) + L")";
+            // Bunbun: the label gets what the time doesn't need; a short form when it's narrow.
+            const std::wstring dur = wk::Duration(w.seconds[static_cast<int>(k)]);
+            const float durW = SMeasure(dur, SFLabel) + 6.0f;
+            if (SMeasure(label, SFBody) > colW - 26.0f - durW) {
+                if (k == wk::Kind::Work) label = L"Work";
+                else if (k == wk::Kind::Overtime) label = L"Over";
+                else if (k == wk::Kind::Break) label = L"Breaks";
+            }
+            SText(label, D2D1::RectF(x + 18, y - 2, x + colW - 4 - durW, y + 20), SFBody, grey);
+            SText(dur, D2D1::RectF(x + colW - 4 - durW, y - 2, x + colW - 4, y + 20), SFLabel, white, 2);
+        }
+    }
+
     void DrawStudioTimersPage(const SharedState& state, D2D1_RECT_F r, double now) {
         namespace bt = bb::timers;
         EnsureRoundStroke();
@@ -1891,11 +2181,28 @@
             const bool brk = p.phase != bt::Phase::Focus;
             const D2D1_COLOR_F col = brk ? green : accent;
             const float frac = mine && t.totalSeconds > 0 ? Clamp(1.0f - static_cast<float>(left / t.totalSeconds), 0.0f, 1.0f) : 0.0f;
+            // Bunbun: before a focus session starts, the ring is a dial for its length, as on Timer.
+            if (Timers::g_focusDrag > 0 && !Timers::g_ringFocus && Timers::g_focusDrag == cfg.focusMinutes)
+                Timers::g_focusDrag = -1;  // the saved length has come back through the settings
+            const bool dial = !mine && !brk && Timers::g_autoStartAt <= 0.0;
+            if (dial) {
+                const int setMin = Timers::g_focusDrag > 0 ? Timers::g_focusDrag : cfg.focusMinutes;
+                const float df = static_cast<float>(bt::FocusDialFraction(setMin));
+                const float hover = std::max(SHover(StudioAction::TimerRing, 1), Timers::g_ringFocus ? 1.0f : 0.0f);
+                SRing(c, R, ringW, df, accent);
+                const float a = df * 6.2831853f;
+                const D2D1_POINT_2F k = D2D1::Point2F(c.x + R * std::sin(a), c.y - R * std::cos(a));
+                if (ID2D1SolidColorBrush* b = AcquireBrush(white))
+                    target_->FillEllipse(D2D1::Ellipse(k, SLerp(6.5f, 8.0f, hover), SLerp(6.5f, 8.0f, hover)), b);
+                ringText(Clock(setMin * 60), L"Drag or scroll", grey);
+                SHit(D2D1::RectF(c.x - R - 10, c.y - R - 10, c.x + R + 10, c.y + R + 10), StudioAction::TimerRing, 1);
+            } else {
             SRing(c, R, ringW, frac, col);
             ringText(Clock(mine ? up(left) : phaseSec),
                      mine ? (t.running ? (brk ? L"Break" : L"Focus") : L"Paused")
                           : (Timers::g_autoStartAt > 0.0 ? L"Starting\x2026" : L"Ready"),
                      mine && t.running ? col : grey);
+            }
             const float xr = r.right - 4.0f;   // keep clear of the page's edge
 
             // Row 1: the phase, then a dot per focus session of the cycle.
@@ -1952,7 +2259,7 @@
                     const std::wstring label = std::to_wstring(m) + (narrow ? L"m" : L" min");
                     const float cw = SMeasure(label, SFLabel) + (narrow ? 18.0f : 22.0f);
                     if (chipX + cw > xr) break;
-                    const bool on = cfg.focusMinutes == m;
+                    const bool on = (Timers::g_focusDrag > 0 ? Timers::g_focusDrag : cfg.focusMinutes) == m;
                     const D2D1_RECT_F chip = D2D1::RectF(chipX, cy, chipX + cw, cy + 24);
                     SFillRound(chip, 12, on ? WithAlpha(accent, 0.35f) : D2D1::ColorF(1, 1, 1, SLerp(0.09f, 0.16f, SHover(StudioAction::PomoLength, m))));
                     SText(label, chip, SFLabel, on ? white : SCol(0xe8e8ee), 1);
@@ -2194,10 +2501,13 @@
         const float colW = (w - gap) * 0.5f;
         const float rowH = (h - gap) * 0.5f;
 
-        const D2D1_RECT_F r1 = D2D1::RectF(rect.left, rect.top, rect.left + colW, rect.top + rowH);
+        // Bunbun: Quick toggles (Network) and Hardware monitor (Performance) are switches
+        // in Studio too: an off card goes and its neighbour takes the whole row.
+        const bool netCard = settings.connectivityModule, perfCard = settings.hardwareMonitorModule;
+        const D2D1_RECT_F r1 = D2D1::RectF(rect.left, rect.top, netCard ? rect.left + colW : rect.right, rect.top + rowH);
         const D2D1_RECT_F r2 = D2D1::RectF(rect.left + colW + gap, rect.top, rect.right, rect.top + rowH);
         const D2D1_RECT_F r3 = D2D1::RectF(rect.left, rect.top + rowH + gap, rect.left + colW, rect.bottom);
-        const D2D1_RECT_F r4 = D2D1::RectF(rect.left + colW + gap, rect.top + rowH + gap, rect.right, rect.bottom);
+        const D2D1_RECT_F r4 = D2D1::RectF(perfCard ? rect.left + colW + gap : rect.left, rect.top + rowH + gap, rect.right, rect.bottom);
 
         const D2D1_COLOR_F cardBg = SCol(0x18181a);
         const D2D1_COLOR_F white = SCol(0xffffff);
@@ -2254,8 +2564,8 @@
         }
 
         // ── Card 2: Network ──
+        if (netCard) {
         SFillRound(r2, 12.0f, cardBg);
-        {
             // Wi-Fi glyph
             const D2D1_POINT_2F wc = D2D1::Point2F(r2.left + 22.0f, r2.top + 17.0f);
             SArc(wc, 2.5f, -2.4f, -0.74f, accent, 1.2f);
@@ -2347,8 +2657,8 @@
         // ── Card 3: Performance (CPU, GPU, RAM, Disk) ──
         // Bunbun: real samples only. Each wave starts flat at the current value (no
         // made-up history), and GPU has a column only when Windows reports its load.
+        if (perfCard) {
         SFillRound(r3, 12.0f, cardBg);
-        {
             SIcon(StudioPage::Hardware, D2D1::Point2F(r3.left + 22.0f, r3.top + 14.0f), 13.0f, accent);
             SText(L"Performance", D2D1::RectF(r3.left + 34.0f, r3.top + 8.0f, r3.left + 140.0f, r3.top + 22.0f), SFLabel, labelCol);
 
@@ -2510,8 +2820,8 @@
             if (tMax <= tMin) tMax = tMin + 2.0f;
 
             ComPtr<ID2D1SolidColorBrush> icStrong, icSoft;
-            target_->CreateSolidColorBrush(white, &icStrong);
-            target_->CreateSolidColorBrush(WithAlpha(white, 0.45f), &icSoft);
+            target_->CreateSolidColorBrush(studioInk_ ? StudioInk(white) : white, &icStrong);  // Bunbun: light islands
+            target_->CreateSolidColorBrush(WithAlpha(studioInk_ ? StudioInk(white) : white, 0.45f), &icSoft);
 
             for (size_t i = 0; i < hours; ++i) {
                 const float cx = rc2.left + 12.0f + static_cast<float>(i) * hStep;
@@ -2631,8 +2941,8 @@
             if (allMax <= allMin) allMax = allMin + 4.0f;
 
             ComPtr<ID2D1SolidColorBrush> icStrong, icSoft;
-            target_->CreateSolidColorBrush(white, &icStrong);
-            target_->CreateSolidColorBrush(WithAlpha(white, 0.45f), &icSoft);
+            target_->CreateSolidColorBrush(studioInk_ ? StudioInk(white) : white, &icStrong);  // Bunbun: light islands
+            target_->CreateSolidColorBrush(WithAlpha(studioInk_ ? StudioInk(white) : white, 0.45f), &icSoft);
 
             for (size_t i = 0; i < days; ++i) {
                 const float rowY = rc3.top + 28.0f + static_cast<float>(i) * 28.0f;

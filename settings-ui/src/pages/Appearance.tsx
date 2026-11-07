@@ -4,7 +4,7 @@ import { Check } from "lucide-react";
 import { useStore } from "../store";
 import { PageHead, Section, Setting } from "../ui/controls";
 import { LivePreview } from "../ui/live";
-import { THEMES } from "../theme";
+import { AccentPicker, ThemePresets } from "../ui/ThemeColors";
 
 const SHAPES = [
   { value: "notch", label: "Notch", desc: "MacBook style, hangs from the top edge (default)", radius: "0 0 14px 14px", top: 0 },
@@ -63,15 +63,7 @@ export function Appearance() {
 
       <section className="section">
         <h3>Theme</h3>
-        <div className="choices" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
-          {THEMES.map(([id, name, sw]) => (
-            <button key={id} className={`choice ${theme === id ? "on" : ""}`} onClick={() => s.set("Themes.ThemePreset", id)}>
-              {theme === id && <span className="check"><Check size={13} strokeWidth={3} /></span>}
-              <div className="theme-sw">{sw.map((c) => <i key={c} style={{ background: c }} />)}</div>
-              <b>{name}</b>
-            </button>
-          ))}
-        </div>
+        <ThemePresets />
       </section>
 
       <Section title="Layout">
@@ -135,8 +127,7 @@ export function Appearance() {
       </Section>
 
       <Section title="Colours">
-        <Setting k="Themes.AccentColorMode" />
-        {s.get("Themes.AccentColorMode") === "custom" && <Setting k="Themes.CustomAccentHex" />}
+        <AccentPicker />
         <Setting k="Themes.CalendarAccent" />
         <Setting k="Themes.ClockAccentGlow" />
         {theme === "custom" && (

@@ -68,6 +68,31 @@ struct WaterSnapshot {
     std::vector<std::pair<int, int>> week;  // (yyyymmdd, ml), oldest first, today last
 };
 
+// Bunbun: Work mode's day, for the Home card, the Work page and the mascot (work_module.inc).
+struct WorkSnapshot {
+    bool on = false;                        // Bunbun.UseCase is work or both
+    int phase = 0;                          // bb::work::Phase
+    int seconds[7] = {};                    // today, by bb::work::Kind
+    int goal = 0;                           // the day's goal, seconds
+    int breaks = 0;
+    int first = -1, last = -1;              // the timeline's span, seconds after midnight
+    int start = 540, end = 1080, lunchStart = 780, lunchMinutes = 45;  // the schedule, minutes
+    bool autoStart = true, inHours = false;
+    int workDate = 0;
+    long long breakUntil = 0;               // epoch seconds a break ends
+    std::vector<bb::work::Segment> segments;
+    // Study (Bunbun.UseCase = study): the subject now, when its block ends, today's
+    // subjects (most studied first) and the streak of days that met the goal.
+    bool study = false;
+    std::wstring subject;
+    int blockEnd = -1;                      // minutes after midnight
+    int nextBlock = -1;                     // the next block today: its start, minutes (-1: none)
+    std::wstring nextSubject;
+    std::vector<std::pair<std::wstring, int>> subjects;
+    int streak = 0;
+    int Worked() const { return seconds[0] + seconds[5]; }
+};
+
 // The reminder pill shows water reminders under these ids (water_module.inc).
 constexpr int kWaterDrinkId = -7001;
 constexpr int kWaterRefillId = -7002;

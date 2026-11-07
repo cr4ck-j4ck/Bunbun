@@ -55,7 +55,7 @@ std::string Deg(double t) { return std::to_string(static_cast<int>(std::lround(t
 void PaintWeatherCards(cairo_t* cr, const Rect& rect) {
     const lsrc::Weather& w = lsrc::CurrentWeather();
     if (!w.has) {  // still loading, or the service couldn't be reached
-        WeatherGlyph(cr, rect.x + rect.w / 2, rect.y + 56, 34, 0, kSky);
+        WeatherGlyph(cr, rect.x + rect.w / 2, rect.y + 56, 34, 0, Accent());
         SText(cr, w.loading ? "Getting the weather\xE2\x80\xA6" : w.error, rect.x, rect.y + 86, rect.w, 22, FBody, W(0.8), 1);
         if (!w.loading) SText(cr, "Change City sets where.", rect.x, rect.y + 108, rect.w, 18, FSmall, C(0x636366), 1);
         return;

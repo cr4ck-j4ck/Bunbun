@@ -104,6 +104,7 @@ void SetPlacement(int align, bool bottom);
 // ── Hiding ──────────────────────────────────────────────────────────────────
 bool FullscreenAppActive();   // X11: the active window is full screen and the island tucks or hides
 bool FullscreenTuckNow();     // ... and it tucks (else hides): In full screen and the per-app lists
+int FullscreenMonitor();      // the display that full-screen window is on (GDK index), -1 unknown
 // Seconds since the last keyboard or mouse input, from GNOME (Mutter) or KDE / the
 // freedesktop ScreenSaver over D-Bus; -1 while unknown.
 double IdleSeconds();

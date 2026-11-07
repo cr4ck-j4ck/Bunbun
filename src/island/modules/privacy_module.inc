@@ -460,8 +460,10 @@ void UpdatePrivacyIndicators() {
 
     {
         std::lock_guard lock(g_stateMutex);
-        g_state.system.micActive = !mic.empty();
-        g_state.system.cameraActive = !cam.empty();
+        if (NowSeconds() >= g_testPrivacyUntil.load(std::memory_order_relaxed)) {  // Bunbun: a test's dots
+            g_state.system.micActive = !mic.empty();
+            g_state.system.cameraActive = !cam.empty();
+        }
         g_state.system.screenActive = !screen.empty();
         g_state.system.micApp = JoinNames(mic);
         g_state.system.cameraApp = JoinNames(cam);

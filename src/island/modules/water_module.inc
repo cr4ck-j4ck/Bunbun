@@ -123,11 +123,12 @@ std::atomic<double> g_waterDrankAt{-100.0};
 std::atomic<double> g_waterGoalAt{-100.0};
 constexpr double kDrinkSeconds = 2.6, kGoalCheerSeconds = 3.0;
 
-void WaterDrink() {
+// Bunbun: `count` drinks of `ml` each (0 = the glass size). Ask Bun logs amounts too.
+void WaterDrinkAmount(int ml, int count) {
     bool reached = false;
-    Water::Change([&reached](const bb::water::Settings& s, bb::water::Day& d, int) {
+    Water::Change([&reached, ml, count](const bb::water::Settings& s, bb::water::Day& d, int) {
         const int before = d.takenMl;
-        bb::water::Drink(s, d, s.glassMl);
+        for (int i = 0; i < std::max(1, count); ++i) bb::water::Drink(s, d, ml > 0 ? ml : s.glassMl);
         reached = s.goalMl > 0 && before < s.goalMl && d.takenMl >= s.goalMl;
     });
     const double now = NowSeconds();
@@ -135,6 +136,19 @@ void WaterDrink() {
     if (reached) g_waterGoalAt.store(now + kDrinkSeconds, std::memory_order_relaxed);  // after the last sip
     g_layoutDirty = true;
     Water::ClearPill();
+}
+void WaterDrink() { WaterDrinkAmount(0, 1); }
+
+// Bunbun: takes back what WaterDrinkAmount logged (Ask Bun's undo).
+void WaterTakeBack(int ml, int count) {
+    Water::Change([ml, count](const bb::water::Settings& s, bb::water::Day& d, int) {
+        for (int i = 0; i < std::max(1, count) && d.glasses > 0; ++i) {
+            const int back = std::min(d.takenMl, ml > 0 ? ml : std::max(1, s.glassMl));
+            d.takenMl -= back;
+            --d.glasses;
+            if (s.bottleMl > 0) d.inBottleMl = std::min(s.bottleMl, bb::water::BottleLeft(s, d) + back);
+        }
+    });
 }
 
 // The music pill's mascot: its own mood, unless a water moment is playing.

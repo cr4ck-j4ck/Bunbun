@@ -580,26 +580,26 @@
  "Themes.AccentColorMode": {
   "default": "auto",
   "name": "Accent color mode",
-  "description": "How the glowing accent color is chosen. Auto extracts it from album art.",
+  "description": "How the island's accent colour (and the settings app's) is chosen. Dynamic: from the album art of what's playing, the solid colour when nothing is. Solid: one fixed colour. System: the device accent.",
   "options": [
    {
     "value": "auto",
-    "label": "Auto, from album art"
+    "label": "Dynamic, from album art"
    },
    {
     "value": "system",
-    "label": "System (Device Accent)"
+    "label": "System accent"
    },
    {
     "value": "custom",
-    "label": "Custom hex"
+    "label": "Solid colour"
    }
   ]
  },
  "Themes.CustomAccentHex": {
   "default": "#4cc9f0",
-  "name": "Custom accent hex",
-  "description": "The hex color to use when the accent mode is set to Custom.",
+  "name": "Solid accent colour",
+  "description": "The accent colour when the accent is Solid, and while nothing is playing in Dynamic.",
   "options": []
  },
  "Themes.CalendarAccent": {
@@ -1224,6 +1224,29 @@
   "description": "Type Space, or a single A-Z or 0-9 key. Falls back to Space if left blank or invalid. Bunbun defaults to B (Ctrl+Alt+B, \"Ask Bun\"): Ctrl+Alt+Space is taken by the Claude desktop app.",
   "options": []
  },
+ "Bunbun.UseCase": {
+  "default": "agents",
+  "name": "Bunbun is for",
+  "description": "AI agents: coding agents on the island, as before. Office work: your working day instead (Work mode, the Work page and card), with the agent pages, cards and limits hidden. Both: the two together. Study: your timetable, study sessions and a daily goal with a streak.",
+  "options": [
+   {
+    "value": "agents",
+    "label": "AI agents"
+   },
+   {
+    "value": "work",
+    "label": "Office work"
+   },
+   {
+    "value": "both",
+    "label": "Both"
+   },
+   {
+    "value": "study",
+    "label": "Study"
+   }
+  ]
+ },
  "Bunbun.Agents": {
   "default": "true",
   "name": "Coding agents",
@@ -1759,6 +1782,10 @@
    {
     "value": "system",
     "label": "System"
+   },
+   {
+    "value": "work",
+    "label": "Work day"
    }
   ]
  },
@@ -1798,6 +1825,10 @@
    {
     "value": "system",
     "label": "System"
+   },
+   {
+    "value": "work",
+    "label": "Work day"
    }
   ]
  },
@@ -1837,6 +1868,10 @@
    {
     "value": "system",
     "label": "System"
+   },
+   {
+    "value": "work",
+    "label": "Work day"
    }
   ]
  },
@@ -2018,5 +2053,83 @@
     "label": "Apple Music"
    }
   ]
+ },
+ "Work.Days": {
+  "default": "mon,tue,wed,thu,fri",
+  "name": "Working days",
+  "description": "The days you work, as three-letter days separated by commas (mon,tue,wed,thu,fri).",
+  "options": []
+ },
+ "Work.Start": {
+  "default": "09:00",
+  "name": "Starts at",
+  "description": "When your work day begins (24-hour, like 09:00).",
+  "options": []
+ },
+ "Work.End": {
+  "default": "18:00",
+  "name": "Ends at",
+  "description": "When it ends. An end before the start runs past midnight, for night shifts.",
+  "options": []
+ },
+ "Work.LunchStart": {
+  "default": "13:00",
+  "name": "Lunch at",
+  "description": "When you have lunch. Work mode pauses for it.",
+  "options": []
+ },
+ "Work.LunchMinutes": {
+  "default": "45",
+  "name": "Lunch (minutes)",
+  "description": "How long lunch is. 0 for no lunch break.",
+  "options": []
+ },
+ "Work.BreakEvery": {
+  "default": "50",
+  "name": "Break every (minutes)",
+  "description": "A short-break reminder after this much work in a row. 0 for none.",
+  "options": []
+ },
+ "Work.BreakMinutes": {
+  "default": "5",
+  "name": "Break length (minutes)",
+  "description": "How long a break is. Being away from the keyboard this long counts as one.",
+  "options": []
+ },
+ "Work.GoalHours": {
+  "default": "0",
+  "name": "Daily goal (hours)",
+  "description": "The work you aim for each day, shown as a ring. 0 uses your hours less lunch.",
+  "options": []
+ },
+ "Work.AutoStart": {
+  "default": "true",
+  "name": "Start with my hours",
+  "description": "Work mode starts and stops with your working hours. Off, it only runs when you press Start.",
+  "options": []
+ },
+ "Work.Reminders": {
+  "default": "true",
+  "name": "Lunch and break reminders",
+  "description": "A note on the island when lunch starts, a break is due, you reach your goal and when your day ends.",
+  "options": []
+ },
+ "Study.Timetable": {
+  "default": "",
+  "name": "Timetable",
+  "description": "Your classes and study blocks, one per line or separated by ;: days, times, subject. For example: mon,wed 10:00-11:00 Maths; tue 14:00-16:00 Physics.",
+  "options": []
+ },
+ "Study.GoalHours": {
+  "default": "3",
+  "name": "Daily study goal (hours)",
+  "description": "How much you aim to study each day. Days that reach it build your streak.",
+  "options": []
+ },
+ "Study.Pomodoro": {
+  "default": "true",
+  "name": "Pomodoro sessions count",
+  "description": "A Pomodoro focus session on the Timers page counts as study, inside your timetable or not.",
+  "options": []
  }
 }

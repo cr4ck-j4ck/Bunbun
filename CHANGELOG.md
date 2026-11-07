@@ -5,6 +5,114 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **A gaming mascot in game mode.** With game mode on, the mascot sits on the left of the stats,
+  controller in hand: buttons being mashed, eyes on the game, leaning into the turns. Every
+  character has it (Dazai puts his book down, Bolt looks up from his visor), and skin packs can
+  add `gaming.png` (else `working.png` stands in). It animates at 12 fps so the game keeps the
+  GPU; turning the mascot off removes the slot. The Mascot studio previews it. Windows (game mode
+  isn't on Linux yet; the mood is there for skin packs).
+- **Ask Bun knows water and your work day.** `drank water`, `drank 500 ml`, `2 glasses`, `undo water`
+  and `how much water` log and report water (the mascot drinks along); `start work`, `pause work`,
+  `back to work`, `take a break`, `done for today` and `how long have I worked` (or studied) drive
+  Work and Study mode. The local AI knows them too ("I just finished a big bottle" logs 750 ml) and
+  can see today's water and work time. Windows.
+- **Work mode, and a choice of what Bunbun is for.** Settings asks once: **AI agents** (as
+  before), **Office work** (the agent pages, cards and limits are hidden) or **Both**. Settings →
+  Work sets your working days and hours (night shifts too), lunch, breaks and a daily goal. The
+  island then:
+  - starts and stops with your hours, or when you press Start
+  - pauses for lunch, reminds you to take a break and notes when the day is done
+  - counts time away and asleep apart from work
+  - shows a Work card on Home, your progress in the header and a Work page with today's timeline
+    and Pause, Break and Done buttons
+
+  **Generate work report** previews today, yesterday or the last 7 days and saves it as an
+  image or a PDF. The log stays on your PC and is part of backups. Windows and Linux.
+- **Study mode**, a fourth answer to what Bunbun is for. Enter your timetable in Settings → Work &
+  study (days, times and subject for each class). The island:
+  - follows it: "Maths · until 11:00", then free time with "Physics at 14:00"
+  - notes when each class begins
+  - counts a Pomodoro session as study, inside the timetable or not
+  - keeps time per subject, with a daily study goal and a streak of days that met it
+  - shows a Study card, "Study n%" in the header and a Study page with today's subjects as bars
+
+  The study report adds hours per subject. Windows and Linux.
+- **A clearer Settings app for your mode.**
+  - The sidebar entry is named after your mode (Work day, Study, or Mode for AI agents), with its
+    own icon and colour, next to Overview.
+  - The page opens with a Today card: time so far, a goal ring, the streak, a mini timeline and the
+    report button.
+  - The mode cards say what each one adds.
+  - Working hours show a preview of the day with lunch, and the timetable a week view.
+  - Overview shows your mode, and drops the agents switch when your mode has no agents.
+- **A richer work and study report.** A header with your name and dates, a donut of the day's
+  split, focus, longest-stretch and break chips, a day-by-day chart against your goal (week), a
+  timeline with hour marks, when in the day you worked, time per subject (study) and a short list
+  of insights.
+- **Accent colour: Dynamic, Solid or System**, in Appearance and in Settings → General. Dynamic
+  takes it from the album art of what's playing; Solid is one fixed colour from a palette of 14
+  or your own; System is the device accent. The settings app now wears exactly the island's
+  colours: its theme presets and the accent the island shows right now. Accent following the album art is Windows only for now.
+- **Every page follows the accent** except the agents', which keep each agent's colour: Weather,
+  Calendar, System, Water, Timers and the Work timeline. The Home cards keep their own colours, with
+  only Music following the album. Colours that mean something stay as they are: a low battery is
+  red, and lunch, away and breaks keep their own colours on the timeline. Windows and Linux.
+- **Set the Focus length on the ring**, as on Timer: drag the knob (Windows) or click the ring
+  (Linux), or scroll over it. One turn is two hours, in 5-minute steps.
+- The first-run "What will you use Bunbun for?" choice is a 2 × 2 grid of the mode cards, and
+  Overview's Your mode is a proper card with the mode's icon and colour.
+- **Away and asleep in every state.** The mascot shows you're away (or asleep) over music, a
+  working agent or Work mode; only an agent waiting for your answer still shows.
+- **Backup & restore** (Settings → General). Create backup saves your settings and Bunbun's data in
+  one .zip: water, Screen Time, notes, to-dos, timers and your mascot packs (not the AI model).
+  Restore loads one back, keeps a copy of what you had first and restarts the island. A backup
+  made on Windows restores on Linux and the other way round.
+
+### Fixed
+  `bunbun-settings --backup <file>` and `--restore <file>` do the same from a script.
+- **Backups left out your own Ask Bun prompt** (`ask/system-prompt.md`): the folder was looked
+  for in the wrong place. It's included now. Windows.
+- **Two activities squeezed side by side** (with coding agents off): Do Not Disturb beside a
+  notification, the timer beside the mascot, in a widened notch. The island shows one at a time
+  now, as it already did with agents on. Windows.
+- **Ask Bun left focus nowhere after a quick command** (a timer): the box closed and your window
+  didn't get the keyboard back. It does now. Windows.
+- **Compact game mode drew the mascot over the RAM chip.** Windows.
+- **Settings, Island pages left out the Work page**, so it couldn't be moved in the page order.
+  It's listed now (as Study in Study mode), on with your mode.
+- **The mascot's celebration never played for the battery-full cheer**, so Celebrate and Hop height
+  seemed to do nothing there. It hops now. Windows.
+- **The Work page cut its time off after an hour** ("1h 1…"); a longer time steps down a size.
+  Windows and Linux.
+- **On a light theme the album's accent could be too pale to read** when the cover was loaded
+  under a dark theme. It's matched to the current theme every time. Windows.
+- **Light themes (Porcelain, a light Custom or solid fill) in Studio:** the open island kept its
+  white text and black cards, so most of it couldn't be read. Its neutral colours, cards and weather
+  icons now follow the theme. Windows.
+- **°C / °F set in Settings** showed °F beside Celsius numbers until the next weather refresh;
+  the weather now reloads in the new unit at once. Windows.
+- **Mascot Do Not Disturb did nothing during work hours**: Work mode's laptop pose covered it.
+  DND you turn on (or Windows' DND, when followed) now wins. Windows and Linux.
+- **Quick toggles and Hardware monitor switches had no effect in Studio**: the System page still
+  showed the Network and Performance cards. An off card now goes, and its neighbour takes the row.
+  Windows and Linux.
+- **The island couldn't be opened during a download, a progress bar or a meeting alert**, nor
+  while a timer ran with music beside it: those pills took over and hovering only grew the
+  pill. It now opens on your pages (on Timers for a timer), and the wheel reaches the pages
+  past them. Clicking a download pill still opens the file. Windows.
+- **The island closed whenever a setting was saved.** A pinned island folded up when you
+  pressed °C / °F, Auto-start or a Focus length on it, or changed anything in Settings. Windows.
+- **Study mode said "Working · until 18:00"** while studying outside a class. It now shows the
+  next class, or Free study. Windows and Linux.
+- **Separate displays: full screen folds only its own display.** A full-screen app tucked (or
+  hid) the island on every display. Now only the island on that display tucks or hides; if it
+  was the one you were using, the island carries on from another display. Windows and Linux.
+- **Settings: blocks no longer touch.** Every block on a page keeps the same gap from the one above
+  (the Mascot studio's character grid sat against the box above it).
+- **The °C / °F switch on the Weather page** went back to °C at once: it saved the choice under
+  [Bunbun] while the setting is read from [Modules]. Windows.
+
 ## [0.3.9]
 
 ### Fixed

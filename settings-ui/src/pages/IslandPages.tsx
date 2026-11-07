@@ -1,6 +1,6 @@
 import { Reorder, useDragControls } from "framer-motion";
 import {
-  Battery, Bot, CalendarDays, ChartColumnBig, ChevronDown, ChevronUp, Clipboard, CloudSun, Cpu, Droplet, FolderDown, GripVertical, Home, Camera,
+  Battery, Bot, Briefcase, CalendarDays, ChartColumnBig, ChevronDown, ChevronUp, Clipboard, CloudSun, Cpu, Droplet, FolderDown, GripVertical, Home, Camera,
   LayoutGrid, Link2, ListChecks, Music2, Plus, Quote, RefreshCw, Sparkles, StickyNote, Timer, ToggleRight, X,
 } from "lucide-react";
 import { createContext, ReactNode, useCallback, useContext, useEffect, useState } from "react";
@@ -25,6 +25,8 @@ const PAGES: PageInfo[] = [
   { key: "agent", name: "Agent", desc: "What your coding agent is doing, its plan and usage.", icon: <Bot size={16} />, setting: "Bunbun.AgentTab", when: "With an agent connected" },
   { key: "clipboard", name: "Clipboard", desc: "Your last 8 copies; click one to copy it again.", icon: <Clipboard size={16} />, setting: "Bunbun.ClipboardHistory" },
   { key: "note", name: "Quick note", desc: "One note with checkboxes.", icon: <StickyNote size={16} />, setting: "Bunbun.QuickNote" },
+  // No switch of its own: it comes with the mode (Settings, Mode: Office work, Both or Study).
+  { key: "work", name: "Work day", desc: "Today's work against your goal, the state (working, lunch, away) with Pause, Break and Done, a timeline of the day and the report. In Study mode: your classes and subjects.", icon: <Briefcase size={16} />, when: "In Work or Study mode" },
   { key: "focus", name: "Timers", desc: "Pomodoro, a countdown you set on a ring, a stopwatch with laps, and Water.", icon: <Timer size={16} />, setting: "Bunbun.FocusPage" },
   // Not listed (merged): Water is a mode of the Timers page. Kept so Bunbun.PageOrder still parses it.
   { key: "water", name: "Water", desc: "Today's water, a + glass button and the week. Reminders are in Features.", icon: <Droplet size={16} />, setting: "Bunbun.WaterPage" },
@@ -202,14 +204,18 @@ function PageList() {
 function PageRow({ page, first, last, onMove, onDrop }: { page: PageInfo; first: boolean; last: boolean; onMove: (by: number) => void; onDrop: () => void }) {
   const s = useStore();
   const drag = useDragControls();
-  const on = page.setting ? s.bool(page.setting) : true;
+  // Work follows the mode (Bunbun.UseCase): on for Office work, Both and Study; called Study in Study mode.
+  const use = s.get("Bunbun.UseCase") || "agents";
+  const isWork = page.key === "work";
+  const on = page.setting ? s.bool(page.setting) : isWork ? use !== "agents" : true;
+  const name = isWork && use === "study" ? "Study" : page.name;
   const linuxMissing = useIsLinux() && !LINUX_PAGES.has(page.key);
   return (
     <Reorder.Item value={page.key} as="div" className={`page-row ${on ? "" : "off"}`} dragListener={false} dragControls={drag} onDragEnd={onDrop}>
       <button className="grip" aria-label={`Drag ${page.name}`} onPointerDown={(e) => drag.start(e)}><GripVertical size={16} /></button>
       <Thumb page={page.key} off={!on} />
       <div className="label">
-        <b>{page.icon} {page.name}{page.when && <span className="badge muted">{page.when}</span>}
+        <b>{page.icon} {name}{page.when && <span className="badge muted">{page.when}</span>}
           {linuxMissing && <em className="badge muted linux">Not on Linux yet</em>}</b>
         <span>{page.desc}</span>
       </div>
@@ -218,7 +224,9 @@ function PageRow({ page, first, last, onMove, onDrop }: { page: PageInfo; first:
           <button disabled={first} aria-label={`Move ${page.name} up`} onClick={() => onMove(-1)}><ChevronUp size={15} /></button>
           <button disabled={last} aria-label={`Move ${page.name} down`} onClick={() => onMove(1)}><ChevronDown size={15} /></button>
         </div>
-        {page.setting ? <Toggle on={on} onChange={(v) => s.set(page.setting!, v)} label={page.name} /> : <span className="always">Always on</span>}
+        {page.setting ? <Toggle on={on} onChange={(v) => s.set(page.setting!, v)} label={page.name} />
+          : <span className="always" title={isWork ? "Comes with your mode: on for Office work, Both and Study (Settings, Mode)." : undefined}>
+            {isWork ? (on ? "With mode" : "Off") : "Always on"}</span>}
       </div>
     </Reorder.Item>
   );
@@ -235,7 +243,7 @@ const AUTO_KIND = ["agent", "music", "focus"];
 // Each Home card has its own colour on the island; only Music follows the album art.
 const TILE_COLOR: Record<string, string> = {
   agent: "#d97757", music: "var(--accent)", focus: "#bf5af2", weather: "#64d2ff",
-  calendar: "#ff453a", battery: "#30d158", system: "#30d158",
+  calendar: "#ff453a", battery: "#30d158", system: "#30d158", work: "#0a84ff",
 };
 
 function HomeCards({ studio }: { studio: boolean }) {

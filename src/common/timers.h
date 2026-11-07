@@ -140,6 +140,24 @@ inline double DialFraction(int seconds) {
     return inTurn == 0 ? 1.0 : static_cast<double>(inTurn) / kDialSecondsPerTurn;
 }
 
+// The Focus length dial: one turn is two hours, in 5-minute steps, 5 min at least.
+constexpr int kFocusDialMinutes = 120;
+inline int FocusMinutesFromAngle(double angle) {
+    constexpr double kTwoPi = 6.283185307179586;
+    double a = std::fmod(angle, kTwoPi);
+    if (a < 0) a += kTwoPi;
+    int minutes = static_cast<int>(std::lround(a / kTwoPi * kFocusDialMinutes / 5.0)) * 5;
+    if (minutes == 0) minutes = kFocusDialMinutes;  // a full turn, not nothing
+    return std::max(5, minutes);
+}
+inline double FocusDialFraction(int minutes) {
+    return std::clamp(static_cast<double>(minutes) / kFocusDialMinutes, 0.0, 1.0);
+}
+// The wheel over the Focus dial: 5 minutes a notch, 5 to 180.
+inline int StepFocusMinutes(int minutes, int notches) {
+    return std::clamp((minutes + 2) / 5 * 5 + notches * 5, 5, 180);
+}
+
 // The wheel over the dial: minutes, or seconds with Shift. Never below 1 s.
 inline int StepCountdown(int seconds, int notches, bool fine) {
     const int step = fine ? 5 : 60;

@@ -22,7 +22,7 @@ const CHARACTERS = [
 const MOODS = [
   ["idle", "Idle"], ["working", "Working"], ["thinking", "Thinking"], ["alert", "Needs you"],
   ["happy", "Celebrate"], ["music", "Music"], ["snack", "AFK"], ["dnd", "Do not disturb"], ["live", "Live"], ["sad", "Error"], ["sleepy", "Sleepy"],
-  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming Shows"],
+  ["listening", "Listening"], ["talking", "Talking"], ["confused", "Confused"], ["streaming", "Streaming Shows"], ["gaming", "Gaming"],
 ] as const;
 
 // Preset colours per character; "" is the character's own colour. Luffy, Dazai and

@@ -31,7 +31,7 @@ constexpr float kPageH = 184.0f;
 constexpr float kIslandH = kPageH + kHeaderH + kFooterH;
 
 // ── Pages and tab ids ────────────────────────────────────────────────────────
-enum class Page { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror, Water, ScreenTime };
+enum class Page { Home, Music, Calendar, Weather, Hardware, Connectivity, Tray, Todo, Lyrics, Agent, Clipboard, Note, Focus, Apps, Mirror, Water, ScreenTime, Work };
 
 // Extra pages share their ids in both views; the built-in ids differ per view
 // (context 0 = the media view, 1 = the idle view; see PageFor).
@@ -44,6 +44,7 @@ constexpr int kTabMirror = 25;
 constexpr int kTabHome = 26;  // Home in the media view (Studio), so it stays while music plays
 constexpr int kTabWater = 27;
 constexpr int kTabScreenTime = 28;
+constexpr int kTabWork = 29;  // Work mode's page (Bunbun.UseCase = work or both)
 
 // Which pages are switched on (and exist on this system). Calendar has no switch
 // on Windows; Linux turns off what it hasn't ported.
@@ -53,6 +54,7 @@ struct PageSwitches {
     bool calendar = true, weather = true, system = true, toggles = true, tray = false, todo = true, lyrics = true;
     bool agent = true, clipboard = true, note = true, focus = true, mirror = false, apps = true, water = true;
     bool screentime = false;
+    bool work = false;
     std::wstring order;              // Bunbun.PageOrder: page keys, comma-separated
 };
 
@@ -68,7 +70,8 @@ constexpr OrderedPage kOrderedPages[] = {
     {L"calendar", 1, 0},  {L"weather", 2, 1},           {L"system", 3, 2},           {L"toggles", 6, 5},
     {L"tray", 4, 4},      {L"todo", 7, 7},              {L"lyrics", 5, -1},          {L"agent", kTabAgent, kTabAgent},
     {L"clipboard", kTabClipboard, kTabClipboard},       {L"note", kTabNote, kTabNote},
-    {L"focus", kTabFocus, kTabFocus},                   {L"water", kTabWater, kTabWater},
+    {L"work", kTabWork, kTabWork},                      {L"focus", kTabFocus, kTabFocus},
+    {L"water", kTabWater, kTabWater},
     {L"mirror", kTabMirror, kTabMirror},                {L"screentime", kTabScreenTime, kTabScreenTime},
     {L"apps", kTabApps, kTabApps},
 };
@@ -88,6 +91,7 @@ inline bool PageOn(std::wstring_view k, const PageSwitches& s) {
     if (k == L"mirror") return s.mirror;
     if (k == L"water") return s.water;
     if (k == L"screentime") return s.screentime;
+    if (k == L"work") return s.work;
     return s.apps;
 }
 
@@ -141,6 +145,7 @@ inline Page PageFor(int context, int id) {
     if (id == kTabMirror) return Page::Mirror;
     if (id == kTabWater) return Page::Water;
     if (id == kTabScreenTime) return Page::ScreenTime;
+    if (id == kTabWork) return Page::Work;
     if (context == 0) {
         switch (id) {
             case 0: return Page::Music;
@@ -184,6 +189,7 @@ inline void PageName(Page page, const std::wstring& agentName, std::wstring* fir
         case Page::Mirror: *first = L"Mir"; *second = L"ror"; break;
         case Page::Water: *first = L"Stay "; *second = L"Hydrated"; break;
         case Page::ScreenTime: *first = L"Screen "; *second = L"Time"; break;
+        case Page::Work: *first = L"Work "; *second = L"Day"; break;
         case Page::Agent: {
             const std::wstring name = agentName.empty() ? L"Coding Agents" : agentName;
             const size_t space = name.find(L' ');
@@ -213,6 +219,7 @@ inline const wchar_t* TabLabel(Page page) {
         case Page::Mirror: return L"Mirror";
         case Page::Water: return L"Water";
         case Page::ScreenTime: return L"Screen Time";
+        case Page::Work: return L"Work";
     }
     return L"";
 }
@@ -251,8 +258,8 @@ inline uint32_t UsageColour(float percent) {
 // What each of Home's three slots shows: Bunbun.HomeTile1-3. Auto = the agent
 // (the weather when no agent is shown), music, focus. Home cards keep their own
 // colours; only the Music card follows the album.
-enum class HomeTile { Agent, Music, Focus, Weather, Calendar, Battery, System };
-constexpr const wchar_t* kHomeTileIds[] = {L"agent", L"music", L"focus", L"weather", L"calendar", L"battery", L"system"};
+enum class HomeTile { Agent, Music, Focus, Weather, Calendar, Battery, System, Work };
+constexpr const wchar_t* kHomeTileIds[] = {L"agent", L"music", L"focus", L"weather", L"calendar", L"battery", L"system", L"work"};
 
 // "agent", "music"… → its HomeTile index, -1 for auto or anything unknown.
 inline int HomeTileSetting(const std::wstring& value) {
@@ -261,13 +268,18 @@ inline int HomeTileSetting(const std::wstring& value) {
     return -1;
 }
 
-inline HomeTile HomeTileFor(int setting, int slot, bool agentsShown) {
-    if (setting >= 0 && setting <= static_cast<int>(HomeTile::System)) {
+// Automatic, with Work mode on (`workOn`): office work leads with the Work card;
+// agents and work together put it third, after the agent and music.
+inline HomeTile HomeTileFor(int setting, int slot, bool agentsShown, bool workOn = false) {
+    if (setting >= 0 && setting <= static_cast<int>(HomeTile::Work)) {
         const HomeTile k = static_cast<HomeTile>(setting);
-        return k == HomeTile::Agent && !agentsShown ? HomeTile::Weather : k;
+        if (k == HomeTile::Agent && !agentsShown) return workOn ? HomeTile::Work : HomeTile::Weather;
+        if (k == HomeTile::Work && !workOn) return HomeTile::Focus;
+        return k;
     }
-    if (slot == 0) return agentsShown ? HomeTile::Agent : HomeTile::Weather;
-    return slot == 1 ? HomeTile::Music : HomeTile::Focus;
+    if (slot == 0) return agentsShown ? HomeTile::Agent : workOn ? HomeTile::Work : HomeTile::Weather;
+    if (slot == 1) return HomeTile::Music;
+    return workOn && agentsShown ? HomeTile::Work : HomeTile::Focus;
 }
 
 // "Name|address; Name|address" -> up to four (name, address). A bare address is

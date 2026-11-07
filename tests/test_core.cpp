@@ -18,6 +18,8 @@
 #include "../src/common/agent_limits.h"
 #include "../src/common/applist.h"
 #include "../src/common/water.h"
+#include "../src/common/backup.h"
+#include "../src/common/work.h"
 
 #include <algorithm>
 #include <cwchar>
@@ -58,6 +60,185 @@ static void WriteAll(const std::wstring& path, const std::string& s) {
 // Screen Time's bookkeeping (common/screentime.h): days, the file, the summary.
 // What plays the edge light (common/edgelight.h).
 // Antigravity's quota pools (common/ag_quota.h).
+// Work mode (common/work.h): the schedule, a simulated day, a night shift, the buttons, the file.
+static void TestWork() {
+    namespace wk = bb::work;
+    auto Check = [](bool ok, const char* what) { if (!ok) { std::printf("FAIL work: %s\n", what); ++g_failed; } };
+    Check(wk::ParseClock(L"09:00", -1) == 540 && wk::ParseClock(L"6:15 pm", -1) == 1095 && wk::ParseClock(L"18", -1) == 1080 &&
+          wk::ParseClock(L"x", -1) == -1, "clock parsing");
+    Check(wk::ParseDays(L"mon,tue,wed,thu,fri") == 0x1F && wk::ParseDays(L"weekend") == 0x60 && wk::ParseDays(L"everyday") == 0x7F,
+          "day parsing");
+    Check(wk::ParseUseCase(L"work") == wk::UseCase::Work && wk::ParseUseCase(L"") == wk::UseCase::Agents &&
+          !wk::AgentsOn(wk::UseCase::Work) && wk::WorkOn(wk::UseCase::Both), "use case");
+
+    // A Monday, 9:00 to 18:00, lunch 13:00 for 45 minutes, breaks every 50 minutes,
+    // AFK after 3 minutes. Away from 10:00 to 10:20.
+    wk::Tracker t;
+    unsigned all = 0;
+    int lunchStarts = 0, breakDue = 0, dayEnds = 0;
+    for (int s = 8 * 3600 + 55 * 60; s <= 18 * 3600 + 5 * 60; s += 10) {
+        wk::Input in;
+        in.epoch = 1800000000 + s;
+        in.date = 20261109; in.prevDate = 20261108; in.weekday = 0; in.second = s;
+        in.idle = (s >= 10 * 3600 && s < 10 * 3600 + 20 * 60) ? s - 10 * 3600 : 0;
+        in.afkMinutes = 3; in.sleepMinutes = 0;
+        const unsigned e = t.Tick(in, 10);
+        all |= e;
+        lunchStarts += (e & wk::kLunchStart) ? 1 : 0;
+        breakDue += (e & wk::kBreakDue) ? 1 : 0;
+        dayEnds += (e & wk::kDayEnded) ? 1 : 0;
+    }
+    const wk::Summary sum = wk::Summarize(t.day);
+    auto approx = [](int seconds, int minutes) { return std::abs(seconds - minutes * 60) <= 60; };
+    Check(approx(sum.Of(wk::Kind::Lunch), 45), "45 minutes of lunch");
+    Check(approx(sum.Of(wk::Kind::Away), 20), "20 minutes away, counted from when the idling began");
+    Check(approx(sum.Worked(), 9 * 60 - 45 - 20), "the rest is work");
+    Check(lunchStarts == 1 && dayEnds == 1, "lunch and the day's end each come once");
+    Check(breakDue >= 7 && breakDue <= 10, "break reminders through the day");
+    Check(sum.breaks >= 1, "20 minutes away counts as a break");
+    Check(t.day.date == 20261109 && sum.first >= 9 * 3600 && sum.last <= 18 * 3600 + 10, "the day's span");
+    Check((all & wk::kGoalReached) == 0, "8h15m isn't reached by 7h55m of work");
+
+    // A night shift, Friday 22:00 to Saturday 06:00: 02:00 on Saturday is Friday's work day.
+    wk::Tracker n;
+    n.schedule.days = 1u << 4;  // Friday
+    n.schedule.start = 22 * 60; n.schedule.end = 6 * 60; n.schedule.lunchMinutes = 0;
+    wk::Input sat;
+    sat.date = 20261114; sat.prevDate = 20261113; sat.weekday = 5; sat.second = 2 * 3600; sat.epoch = 1;
+    bool within = false;
+    int workDate = 0, second = 0;
+    n.Locate(sat, &within, &workDate, &second);
+    Check(within && workDate == 20261113 && second == 86400 + 2 * 3600, "night shift past midnight");
+    sat.second = 7 * 3600;
+    n.Locate(sat, &within, &workDate, &second);
+    Check(!within, "the night shift is over at 07:00");
+
+    // The buttons: Start outside the schedule is overtime; Pause; Done stops tracking.
+    wk::Tracker m;
+    m.schedule.autoStart = false;
+    wk::Input ev;
+    ev.date = 20261109; ev.prevDate = 20261108; ev.weekday = 0; ev.second = 20 * 3600; ev.epoch = 1000;
+    m.Tick(ev, 10);
+    Check(m.phase == wk::Phase::Off, "nothing without Start when the schedule is off");
+    m.Start(20261109);
+    ev.second += 10; m.Tick(ev, 10);
+    Check(m.phase == wk::Phase::Working, "Start works on a day with the schedule off");
+    m.schedule.autoStart = true;
+    m.schedule.start = 9 * 60; m.schedule.end = 18 * 60;
+    ev.second += 10; m.Tick(ev, 10);
+    Check(m.phase == wk::Phase::Overtime, "after hours it's overtime");
+    m.Pause();
+    ev.second += 10; m.Tick(ev, 10);
+    Check(m.phase == wk::Phase::Paused, "Pause");
+    m.Resume();
+    m.TakeBreak(ev.epoch);
+    ev.second += 10; ev.epoch += 10; m.Tick(ev, 10);
+    Check(m.phase == wk::Phase::Break, "Take a break");
+    ev.epoch += 6 * 60; ev.second += 6 * 60; m.Tick(ev, 10);
+    Check(m.phase == wk::Phase::Overtime, "the break ends by itself");
+    m.Done(20261109);
+    ev.second += 10; m.Tick(ev, 10);
+    Check(m.phase == wk::Phase::Done, "Done for today");
+
+    // The file keeps the days, the breaks and the buttons' state.
+    wk::Log log;
+    log.days[t.day.date] = t.day;
+    log.manual = m.manual;
+    const wk::Log back = wk::Parse(wk::Serialize(log));
+    Check(back.days.count(20261109) == 1, "a day survives the file");
+    const wk::Summary again = wk::Summarize(back.days.at(20261109));
+    Check(again.Worked() == sum.Worked() && again.Of(wk::Kind::Away) == sum.Of(wk::Kind::Away) && again.breaks == sum.breaks,
+          "the same totals after the file");
+    Check(back.manual.done && back.manual.date == 20261109, "the buttons' state survives the file");
+    Check(wk::Duration(3 * 3600 + 12 * 60) == L"3h 12m" && wk::Duration(45 * 60) == L"45m", "durations");
+}
+
+// Study mode (common/work.h): the timetable, subjects, Pomodoro sessions, the streak.
+static void TestStudy() {
+    namespace wk = bb::work;
+    auto Check = [](bool ok, const char* what) { if (!ok) { std::printf("FAIL study: %s\n", what); ++g_failed; } };
+    const std::vector<wk::Block> tt = wk::ParseTimetable(L"mon 10:00-11:00 Maths; mon,wed 14:00-15:00 Physics\ntue 9-10:30");
+    Check(tt.size() == 4, "timetable: four blocks (Physics twice)");
+    Check(tt[0].weekday == 0 && tt[0].start == 600 && tt[0].end == 660 && tt[0].subject == L"Maths", "timetable: a block");
+    Check(tt[3].weekday == 1 && tt[3].end == 630 && tt[3].subject == L"Study", "timetable: no subject is Study");
+    Check(wk::StudyOn(wk::UseCase::Study) && !wk::AgentsOn(wk::UseCase::Study) && wk::WorkOn(wk::UseCase::Study), "study use case");
+
+    wk::Tracker t;
+    t.schedule.blocks = tt;
+    t.schedule.goalMinutes = 150;
+    t.schedule.breakEvery = 0;
+    int blockStarts = 0;
+    for (int s = 9 * 3600 + 50 * 60; s <= 21 * 3600; s += 10) {
+        wk::Input in;
+        in.epoch = 1800000000 + s;
+        in.date = 20261109; in.prevDate = 20261108; in.weekday = 0; in.second = s;
+        in.afkMinutes = 3;
+        in.extraActive = s >= 20 * 3600 && s < 20 * 3600 + 25 * 60;  // a Pomodoro after dinner
+        if (t.Tick(in, 10) & wk::kBlockStarted) ++blockStarts;
+    }
+    wk::Summary sum = wk::Summarize(t.day);
+    auto approx = [](int seconds, int minutes) { return std::abs(seconds - minutes * 60) <= 60; };
+    Check(blockStarts == 2, "a note as each block begins");
+    Check(approx(sum.subjects[L"Maths"], 60) && approx(sum.subjects[L"Physics"], 60), "an hour each of Maths and Physics");
+    Check(approx(sum.subjects[L"Pomodoro"], 25), "the Pomodoro counts as study");
+    Check(approx(sum.Worked(), 145), "2h 25m studied");
+    Check(t.phase == wk::Phase::Off, "free time after the last session");
+
+    // The streak: two days before met the goal, and today has too.
+    wk::Log log;
+    for (int d : {20261107, 20261108}) {
+        wk::Day day;
+        day.date = d;
+        day.segments.push_back({36000, 36000 + 3 * 3600, wk::Kind::Work});
+        log.days[d] = day;
+    }
+    wk::Day today;
+    today.date = 20261109;
+    Check(wk::Streak(log, today, 20261109, 150 * 60) == 2, "the streak runs to yesterday until today's goal is met");
+    today.segments.push_back({36000, 36000 + 3 * 3600, wk::Kind::Work});
+    Check(wk::Streak(log, today, 20261109, 150 * 60) == 3, "today's goal adds to the streak");
+    Check(wk::PrevDate(20260301) == 20260228 && wk::PrevDate(20240301) == 20240229 && wk::PrevDate(20260101) == 20251231, "previous day");
+
+    // Subjects (even with accents) survive the file.
+    wk::Log keep;
+    wk::Day d = t.day;
+    d.subjects[L"Mathématiques"] = 1234;
+    keep.days[d.date] = d;
+    const wk::Log back = wk::Parse(wk::Serialize(keep));
+    Check(back.days.at(d.date).subjects.at(L"Mathématiques") == 1234 && back.days.at(d.date).subjects.at(L"Maths") == d.subjects.at(L"Maths"),
+          "subjects survive the file");
+}
+
+// Backups (common/backup.h): a round trip, the names it keeps, and what it refuses.
+static void TestBackup() {
+    namespace bk = bb::backup;
+    auto Check = [](bool ok, const char* what) { if (!ok) { std::printf("FAIL backup: %s\n", what); ++g_failed; } };
+    std::vector<bk::File> in = {{"settings.ini", "[Bunbun]\nMascot=true\n"}, {"water.txt", "taken=3500\n"},
+                                {"mascots/Arya/idle.png", std::string("\x89PNG\0\x01", 7)}, {"ask/system-prompt.md", "hi"}};
+    const std::string zip = bk::Zip(in, bk::Manifest("0.3.10", "windows", 1793990000), 1793990000);
+    std::vector<bk::File> out;
+    std::string manifest, err;
+    Check(bk::Unzip(zip, &out, &manifest, &err), "backup: unzips what it zipped");
+    Check(out.size() == in.size(), "backup: every file comes back");
+    bool same = out.size() == in.size();
+    for (size_t i = 0; same && i < in.size(); ++i) same = out[i].name == in[i].name && out[i].data == in[i].data;
+    Check(same, "backup: names and bytes are the same");
+    Check(bk::ManifestValue(manifest, "version") == "0.3.10" && bk::ManifestValue(manifest, "platform") == "windows",
+          "backup: manifest values");
+    Check(bk::IsBackupName("mascots/Pack/frame 1.png") && bk::IsBackupName("timers.txt"), "backup: keeps known names");
+    Check(!bk::IsBackupName("../evil.ini") && !bk::IsBackupName("/etc/passwd") && !bk::IsBackupName("C:x") &&
+          !bk::IsBackupName("mascots/../../x") && !bk::IsBackupName("mascots\\x") && !bk::IsBackupName("models/a.gguf") &&
+          !bk::IsBackupName("mascots/"),
+          "backup: refuses unsafe or unknown names");
+    // A zip without the manifest, a damaged one, and a stranger's file.
+    const std::string bare = bk::Zip({}, "something else", 1793990000);
+    Check(!bk::Unzip(bare, &out, &manifest, &err), "backup: refuses a zip that isn't a backup");
+    std::string broken = zip;
+    broken[60] ^= 0x5A;
+    Check(!bk::Unzip(broken, &out, &manifest, &err), "backup: refuses a damaged backup");
+    Check(!bk::Unzip("hello", &out, &manifest, &err), "backup: refuses a non-zip");
+}
+
 static void TestAgPools() {
     namespace aq = bb::agquota;
     const std::vector<aq::Pool> models = {
@@ -363,6 +544,29 @@ static void TestAssistant() {
     in = parse(L"search cute bunnies");
     CHECK(in.action == as::Action::WebSearch && in.target == L"https://www.google.com/search?q=cute+bunnies");
     CHECK(as::Parse(L"search a&b", L"duckduckgo").target == L"https://duckduckgo.com/?q=a%26b");
+    // Bunbun: water and Work / Study mode.
+    CHECK(parse(L"drank water").action == as::Action::WaterAdd && parse(L"drank water").number == 0);
+    CHECK(parse(L"add water").action == as::Action::WaterAdd);  // not a to-do called water
+    CHECK(parse(L"i had a glass of water").action == as::Action::WaterAdd);
+    CHECK(parse(L"drank 500 ml").number == 500 && parse(L"log 300ml water").number == 300);
+    CHECK(parse(L"drank 1.5 litres of water").number == 1500 && parse(L"drank half a litre of water").number == 500);
+    CHECK(parse(L"2 glasses of water").number == -2 && parse(L"drank two glasses of water").number == -2);
+    CHECK(parse(L"undo water").action == as::Action::WaterUndo);
+    CHECK(parse(L"i just finished a big bottle of water").number == as::kWaterBottle);
+    CHECK(parse(L"drank a 1 litre bottle of water").number == 1000);  // an amount wins
+    CHECK(parse(L"how much water today").info == as::Info::Water && parse(L"water").info == as::Info::Water);
+    CHECK(parse(L"remind me to drink water at 3pm").action == as::Action::TodoAdd);
+    CHECK(parse(L"add water the plants").action != as::Action::WaterAdd);
+    CHECK(parse(L"start work").action == as::Action::WorkStart && parse(L"clock in").action == as::Action::WorkStart);
+    CHECK(parse(L"start studying").action == as::Action::WorkStart);
+    CHECK(parse(L"pause work").action == as::Action::WorkPause && parse(L"back to work").action == as::Action::WorkResume);
+    CHECK(parse(L"take a break").action == as::Action::WorkBreak);
+    CHECK(parse(L"done for today").action == as::Action::WorkDone && parse(L"clock out").action == as::Action::WorkDone);
+    CHECK(parse(L"stop studying").action == as::Action::WorkDone);
+    CHECK(parse(L"how long have i worked").info == as::Info::Work && parse(L"how much did i study today").info == as::Info::Work);
+    CHECK(parse(L"start focus").action == as::Action::FocusStart);  // focus stays focus
+    CHECK(parse(L"open wifi settings").action == as::Action::Open && parse(L"start network").action != as::Action::WorkStart);
+    CHECK(parse(L"do my homework").action != as::Action::WorkStart);
     CHECK(parse(L"what time is it").info == as::Info::Time);
     CHECK(parse(L"battery").info == as::Info::Battery);
     CHECK(parse(L"battery settings").action == as::Action::Open);
@@ -609,6 +813,9 @@ int wmain(int argc, wchar_t** argv) {
     TestEdgeLightOn();
     TestAgPools();
     TestAgentLimits();
+    TestBackup();
+    TestWork();
+    TestStudy();
     std::printf(g_failed ? "%d check(s) failed\n" : "all checks passed\n", g_failed);
     return g_failed ? 1 : 0;
 }

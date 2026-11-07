@@ -30,6 +30,7 @@ using bb::studio::kTabMirror;
 using bb::studio::kTabWater;
 using bb::studio::kTabHome;
 using bb::studio::kTabScreenTime;
+using bb::studio::kTabWork;
 
 // ── Which agents the island shows ────────────────────────────────────────────
 // Agents in the order of Settings::showAgent (Bunbun.Show*).
@@ -137,6 +138,7 @@ bb::studio::PageSwitches PageSwitchesFor(const Settings& s) {
     p.water = false;  // Bunbun: Water lives inside the Timers page (its Water mode), not as a page
     p.apps = s.appsPage;
     p.screentime = s.screenTime;
+    p.work = bb::work::WorkOn(static_cast<bb::work::UseCase>(s.useCase));  // Bunbun: Work mode's page
     p.order = s.pageOrder;
     return p;
 }
@@ -971,7 +973,8 @@ using bb::studio::kHomeTileIds;
 bool AgentsShown(const Settings& s);  // above
 
 HomeTile HomeTileKind(const Settings& s, int slot) {
-    return bb::studio::HomeTileFor(s.homeTile[std::clamp(slot, 0, 2)], slot, AgentsShown(s));
+    return bb::studio::HomeTileFor(s.homeTile[std::clamp(slot, 0, 2)], slot, AgentsShown(s),
+                                   bb::work::WorkOn(static_cast<bb::work::UseCase>(s.useCase)));
 }
 
 void CycleHomeTile(int slot) {
@@ -1119,6 +1122,7 @@ enum class StudioAction {
     RadioToggle, RadioSettings,            // Bunbun: Wi-Fi / Bluetooth on the System page
     ClipFilter, ClipSelect, ClipSearch, ClipPin, ClipDelete, ClipSave,  // Bunbun: Clipboard page
     ScreenTimeRefresh, ScreenTimeLimitEdit,  // Bunbun: Screen Time page
+    WorkStart, WorkPause, WorkResume, WorkBreak, WorkDone, WorkReport, WorkPage,  // Bunbun: Work mode
 };
 
 // Bunbun: the Calendar page's view (render thread): 0 = month, 1 = week, and how far
@@ -1321,7 +1325,15 @@ bool HandleStudioButtonDown(HWND hwnd, int x, int y) {
     const int i = StudioHitAt(pt);
     if (i < 0) return false;
     const StudioHit& hit = g_studioHits[static_cast<size_t>(i)];
-    if (hit.action == StudioAction::TimerRing && !Timers::CountdownRunning()) {  // Bunbun: set the countdown
+    if (hit.action == StudioAction::TimerRing && hit.arg == 1) {  // Bunbun: set the Focus length
+        Timers::g_ringDrag = true;
+        Timers::g_ringFocus = true;
+        Timers::g_ringCenter = D2D1::Point2F((hit.rect.left + hit.rect.right) * 0.5f, (hit.rect.top + hit.rect.bottom) * 0.5f);
+        SetCapture(hwnd);
+        Timers::SetCountdownFromPoint(pt);
+        return true;
+    }
+    if (hit.action == StudioAction::TimerRing && hit.arg == 0 && !Timers::CountdownRunning()) {  // Bunbun: set the countdown
         Timers::g_ringDrag = true;
         Timers::g_ringCenter = D2D1::Point2F((hit.rect.left + hit.rect.right) * 0.5f, (hit.rect.top + hit.rect.bottom) * 0.5f);
         SetCapture(hwnd);
@@ -1354,6 +1366,10 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
         Timers::g_ringDrag = false;
         ReleaseCapture();
         Timers::SetCountdownFromPoint(StudioPointFromClient(x, y));
+        if (Timers::g_ringFocus) {  // Bunbun: the Focus length, saved once
+            Timers::g_ringFocus = false;
+            if (Timers::g_focusDrag > 0) Timers::SaveFocusMinutes(Timers::g_focusDrag);
+        }
         return true;
     }
     if (g_studioVolumeDrag) {
@@ -1449,6 +1465,15 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
         case StudioAction::FocusPage:
             ShowDashboardTab(DashboardTabIndexOf(kTabFocus));
             break;
+        case StudioAction::WorkPage:  // Bunbun: Work mode
+            ShowDashboardTab(DashboardTabIndexOf(kTabWork));
+            break;
+        case StudioAction::WorkStart: WorkCommand(WorkButton::Start); break;
+        case StudioAction::WorkPause: WorkCommand(WorkButton::Pause); break;
+        case StudioAction::WorkResume: WorkCommand(WorkButton::Resume); break;
+        case StudioAction::WorkBreak: WorkCommand(WorkButton::Break); break;
+        case StudioAction::WorkDone: WorkCommand(WorkButton::Done); break;
+        case StudioAction::WorkReport: OpenSettingsApp(L"work-report"); break;
         case StudioAction::HomeEdit:
             g_homeEdit = !g_homeEdit;
             break;
@@ -1474,7 +1499,8 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             Timers::PomodoroReset();
             break;
         case StudioAction::PomoLength:  // Bunbun: a focus-length chip; 25 is the default, so it's written as unset
-            WriteBunbunSetting(L"PomodoroFocus", hit.arg == 25 ? L"-" : std::to_wstring(hit.arg).c_str());
+            Timers::g_focusDrag = -1;
+            Timers::SaveFocusMinutes(hit.arg);
             break;
         case StudioAction::PomoAuto:  // the default is on: off is written, on goes back to the default
             WriteBunbunSetting(L"PomodoroAutoStart", g_settings.pomoAutoStart ? L"false" : L"-");
@@ -1615,7 +1641,10 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
                 g_settings.weatherFahrenheit = !g_settings.weatherFahrenheit;
                 nextF = g_settings.weatherFahrenheit;
             }
-            WriteBunbunSetting(L"WeatherFahrenheit", nextF ? L"true" : L"-");
+            // Bunbun: Modules.WeatherFahrenheit, where the setting lives (it was written to
+            // [Bunbun], so the reload this triggers read the old unit back). Off = unset, the default.
+            WritePrivateProfileStringW(L"Modules", L"WeatherFahrenheit", nextF ? L"true" : nullptr, bb::SettingsPath());
+            WriteBunbunSetting(L"WeatherFahrenheit", L"-");  // the stray copy older builds left
             Wh_SetIntValue(L"WeatherFahrenheit", nextF ? 1 : 0);
             if (g_settingsChangedEvent) SetEvent(g_settingsChangedEvent);
             break;
@@ -1668,6 +1697,14 @@ bool HandleStudioWheel(HWND hwnd, LPARAM lParam, int step) {
     POINT p{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // WM_MOUSEWHEEL is in screen coordinates
     ScreenToClient(hwnd, &p);
     const int i = StudioHitAt(StudioPointFromClient(p.x, p.y));
+    if (i >= 0 && g_studioHits[static_cast<size_t>(i)].action == StudioAction::TimerRing && g_studioHits[static_cast<size_t>(i)].arg == 1) {
+        // Bunbun: the Focus dial, 5 minutes a notch
+        const int from = Timers::g_focusDrag > 0 ? Timers::g_focusDrag : Timers::Config(g_settings).focusMinutes;
+        Timers::g_focusDrag = bb::timers::StepFocusMinutes(from, -step);
+        Timers::SaveFocusMinutes(Timers::g_focusDrag);
+        g_layoutDirty = true;
+        return true;
+    }
     if (i >= 0 && g_studioHits[static_cast<size_t>(i)].action == StudioAction::TimerRing && !Timers::CountdownRunning()) {
         const bool fine = (GetKeyState(VK_SHIFT) & 0x8000) != 0;  // Bunbun: Shift steps seconds
         Timers::CountdownSet(bb::timers::StepCountdown(Timers::g_countSet, -step, fine));

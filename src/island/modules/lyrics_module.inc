@@ -1490,7 +1490,7 @@ DWORD WINAPI LyricsThreadProc(void*) {
                 retryAtSec = 0.0;
                 failCount = 0;
                 std::lock_guard lock(g_stateMutex);
-                g_state.lyrics = LyricsSnapshot{};
+                if (NowSeconds() >= g_testMediaUntil.load(std::memory_order_relaxed)) g_state.lyrics = LyricsSnapshot{};  // Bunbun: a test's lyrics
             }
             WaitForSingleObject(g_stopEvent, 1000);
             continue;
@@ -1524,13 +1524,13 @@ DWORD WINAPI LyricsThreadProc(void*) {
                 Wh_Log(L"Lyrics: cache hit for %s - %s", artist.c_str(), title.c_str());
                 std::lock_guard lock(g_stateMutex);
                 if (g_state.media.title == title && g_state.media.artist == artist) {
-                    g_state.lyrics = std::move(cached);
+                    if (NowSeconds() >= g_testMediaUntil.load(std::memory_order_relaxed)) g_state.lyrics = std::move(cached);  // Bunbun: a test's lyrics
                 }
                 continue;
             }
         }
 
-        if (!sameTrack) {
+        if (!sameTrack && NowSeconds() >= g_testMediaUntil.load(std::memory_order_relaxed)) {  // Bunbun: not over a test's lyrics
             std::lock_guard lock(g_stateMutex);
             g_state.lyrics = LyricsSnapshot{};
             g_state.lyrics.fetching = true;
@@ -1601,7 +1601,7 @@ DWORD WINAPI LyricsThreadProc(void*) {
         {
             std::lock_guard lock(g_stateMutex);
             if (g_state.media.title == title && g_state.media.artist == artist) {
-                g_state.lyrics = std::move(snap);
+                if (NowSeconds() >= g_testMediaUntil.load(std::memory_order_relaxed)) g_state.lyrics = std::move(snap);  // Bunbun: a test's lyrics
             }
         }
         WaitForSingleObject(g_stopEvent, 500);

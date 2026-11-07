@@ -97,8 +97,9 @@ constexpr const char* kSystem =
     "timer <N> min | focus <N> | stop focus | add <to-do> | remind me at <time> to <thing> | remind me in <N> min to <thing>\n"
     "remind me every day at <time> to <thing> | remind me every <weekday> at <time> to <thing> | done <to-do>\n"
     "wifi on | wifi off | bluetooth on | bluetooth off | brightness <0-100> | brighter | dim the screen | dnd on | dnd off\n"
+    "drank water | drank <N> ml | undo water | start work | pause work | back to work | take a break | done for today\n"
     "Lookups (you get the results back, then answer): search <topic> | wiki <topic> | weather | weather in <city> | weather tomorrow | battery | cpu |\n"
-    "what's playing | my list | what time is it\n"
+    "what's playing | my list | what time is it | how much water | how long have I worked\n"
     "Questions about the user's day (time, meetings, to-dos, music) are answered with SAY using the facts given.\n"
     "Answer calculations, arithmetic, and general reasoning directly with SAY.\n"
     "Never invent facts. If you don't know, say so.";
@@ -111,6 +112,8 @@ const std::pair<const char*, const char*> kExamples[] = {
     {"I need to concentrate for an hour", "RUN: focus 60"},
     {"who are you?", "SAY: I'm Bun, your little assistant in the island. I can set reminders, control music and volume, and answer quick questions."},
     {"put eggs on my shopping list", "RUN: add buy eggs"},
+    {"I just finished a big bottle of water", "RUN: drank 750 ml"},
+    {"coffee break, back in 10", "RUN: take a break"},
     {"[Now: Monday 9:10am. Next meeting: Design review at 11:00am.] when's my next meeting?", "SAY: Your next meeting is Design review at 11:00am."},
     {"explain what a dynamic island is", "SAY: It's a pill at the top of the screen that grows to show what's going on: music, timers, calls and alerts."},
     {"when is diwali in 2026?", "RUN: search diwali 2026 date"},
@@ -158,6 +161,12 @@ std::wstring Context() {
     }
     c += n ? L" Open to-dos:" + todos + L"." : L" No open to-dos.";
     if (s.meeting.valid) c += L" Next meeting: " + s.meeting.title + L" at " + Todos::FormatDue(s.meeting.startsAt) + L".";
+    // Bunbun: water and Work / Study mode, for "how am I doing today?".
+    if (s.water.goalMl > 0)
+        c += L" Water: " + std::to_wstring(s.water.takenMl) + L" of " + std::to_wstring(s.water.goalMl) + L" ml.";
+    if (s.work.on)
+        c += std::wstring(s.work.study ? L" Studied " : L" Worked ") + bb::work::Duration(s.work.Worked()) +
+             (s.work.goal > 0 ? L" of " + bb::work::Duration(s.work.goal) : L"") + L" today.";
     return c;
 }
 

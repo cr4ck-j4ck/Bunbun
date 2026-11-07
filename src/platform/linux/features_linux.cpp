@@ -220,6 +220,7 @@ namespace {
 double g_lastInteraction = 0;
 bool g_tucked = false, g_hotkeyHidden = false;
 bool g_fullscreen = false;
+int g_fullscreenMonitor = -1;  // Separate displays: only this display's island folds
 
 #ifdef GDK_WINDOWING_X11
 // The active window's _NET_WM_STATE says whether it's full screen.
@@ -253,6 +254,40 @@ bool X11FullscreenNow() {
 }
 
 // The active window's title and class ("Firefox", "discord"), lower case.
+// The display the active window's centre is on (GDK index), or -1.
+int X11ActiveWindowMonitor() {
+    GdkDisplay* gd = gdk_display_get_default();
+    if (!GDK_IS_X11_DISPLAY(gd)) return -1;
+    Display* d = GDK_DISPLAY_XDISPLAY(gd);
+    const Window root = DefaultRootWindow(d);
+    const Atom activeAtom = XInternAtom(d, "_NET_ACTIVE_WINDOW", True);
+    if (activeAtom == 0) return -1;
+    Atom type;
+    int format;
+    unsigned long n = 0, after = 0;
+    unsigned char* data = nullptr;
+    Window active = 0;
+    int result = -1;
+    gdk_x11_display_error_trap_push(gd);
+    if (XGetWindowProperty(d, root, activeAtom, 0, 1, False, XA_WINDOW, &type, &format, &n, &after, &data) == Success && data) {
+        if (n) active = *reinterpret_cast<Window*>(data);
+        XFree(data);
+    }
+    XWindowAttributes wa{};
+    int rx = 0, ry = 0;
+    Window child = 0;
+    if (active && XGetWindowAttributes(d, active, &wa) && XTranslateCoordinates(d, active, root, 0, 0, &rx, &ry, &child)) {
+        // X11 is in device pixels, GDK's monitors in its scaled units.
+        GdkMonitor* first = gdk_display_get_monitor(gd, 0);
+        const int k = std::max(1, first ? gdk_monitor_get_scale_factor(first) : 1);
+        GdkMonitor* mon = gdk_display_get_monitor_at_point(gd, (rx + wa.width / 2) / k, (ry + wa.height / 2) / k);
+        for (int i = 0; i < gdk_display_get_n_monitors(gd); ++i)
+            if (gdk_display_get_monitor(gd, i) == mon) result = i;
+    }
+    gdk_x11_display_error_trap_pop_ignored(gd);
+    return result;
+}
+
 std::string X11ActiveWindowText() {
     GdkDisplay* gd = gdk_display_get_default();
     if (!GDK_IS_X11_DISPLAY(gd)) return {};
@@ -455,6 +490,7 @@ void UpdateShortcuts() {
 bool FullscreenAppActive() { return g_fullscreen; }
 bool g_fullscreenTuck = false;
 bool FullscreenTuckNow() { return g_fullscreen && g_fullscreenTuck; }
+int FullscreenMonitor() { return g_fullscreen ? g_fullscreenMonitor : -1; }
 
 // ── Idle time (AFK) ─────────────────────────────────────────────────────────
 // Asked every 5 s on a worker thread: GNOME's Mutter IdleMonitor (milliseconds),
@@ -1173,6 +1209,11 @@ void Start(std::function<void(const std::string&, const std::string&, double, do
             else action = g_feat.tuckFullscreen ? 1 : g_feat.hideFullscreen ? 2 : 0;
         }
         const bool full = action != 0;
+        const int fsMonitor = full ? X11ActiveWindowMonitor() : -1;
+        if (fsMonitor != g_fullscreenMonitor) {
+            g_fullscreenMonitor = fsMonitor;
+            if (g_changed) g_changed();
+        }
         if (full != g_fullscreen || (action == 1) != g_fullscreenTuck) {
             g_fullscreen = full;
             g_fullscreenTuck = action == 1;

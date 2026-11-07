@@ -60,10 +60,22 @@ void PaintTimers(cairo_t* cr, const Rect& r) {
         const bool brk = p.phase != bt::Phase::Focus;
         const Col col = brk ? green : accent;
         const double frac = mine && t.total > 0 ? std::clamp(1.0 - left / t.total, 0.0, 1.0) : 0.0;
-        Ring(cr, cx, cy, R, ringW, frac, col);
-        ringText(Clock(mine ? up(left) : phaseSec),
-                 mine ? (t.running ? (brk ? "Break" : "Focus") : "Paused") : (lt::AutoStartAt() > 0 ? "Starting\xE2\x80\xA6" : "Ready"),
-                 mine && t.running ? col : grey);
+        // Before a focus session starts the ring is a dial for its length, as on Timer.
+        if (!mine && !brk && lt::AutoStartAt() <= 0) {
+            const double df = bt::FocusDialFraction(cfg.focusMinutes);
+            const bool hover = NextHitHovered();
+            Ring(cr, cx, cy, R, ringW, df, accent);
+            const double a = df * 2 * kPi;
+            Dot(cr, cx + R * std::sin(a), cy - R * std::cos(a), hover ? 8 : 6.5, white);
+            ringText(Clock(cfg.focusMinutes * 60), "Click or scroll", grey);
+            g_hits.push_back({{cx - R - 10, cy - R - 10, 2 * R + 20, 2 * R + 20}, Action::TimerRing, 1});
+            g_timerRing = {cx, cy};
+        } else {
+            Ring(cr, cx, cy, R, ringW, frac, col);
+            ringText(Clock(mine ? up(left) : phaseSec),
+                     mine ? (t.running ? (brk ? "Break" : "Focus") : "Paused") : (lt::AutoStartAt() > 0 ? "Starting\xE2\x80\xA6" : "Ready"),
+                     mine && t.running ? col : grey);
+        }
 
         // Row 1: the phase, then a dot per focus session of the cycle.
         const std::string phase = U(bt::PhaseLabel(p, cfg));

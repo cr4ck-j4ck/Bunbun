@@ -158,6 +158,15 @@ D2D1_POINT_2F ReadingLook(double t) {
     const float ph = std::fmod(static_cast<float>(t), 2.2f) / 2.2f;
     return D2D1::Point2F(ph < 0.82f ? -0.9f + 1.8f * Smooth(ph / 0.82f) : 0.9f - 1.8f * Smooth((ph - 0.82f) / 0.18f), 0.35f);
 }
+// Gaming is drawn as Working with a controller instead of the laptop, eyes on the
+// game, and a quicker, leaning bob as if steering.
+thread_local bool t_gaming = false;
+// Gaming: the eyes on the game, darting a little left and right.
+D2D1_POINT_2F GamingLook(double t) {
+    const float tp = static_cast<float>(t);
+    return D2D1::Point2F(std::sin(tp * 1.3f) * 0.55f + std::sin(tp * 4.1f) * 0.12f, 0.35f);
+}
+
 
 // 0 = open, 1 = closed: a quick blink every `period` seconds.
 // How open a talking mouth is, 0..1: quick syllables in phrases, with a short
@@ -215,6 +224,7 @@ const wchar_t* MoodFile(Mood m) {
         case Mood::Dnd: return L"dnd.png";
         case Mood::Live: return L"live.png";
         case Mood::Drinking: return L"drinking.png";
+        case Mood::Gaming: return L"gaming.png";
         default: return L"idle.png";
     }
 }
@@ -228,6 +238,7 @@ const wchar_t* FallbackFile(Mood m) {
         case Mood::Dnd: return L"sleepy.png";       // eyes closed, settled in
         case Mood::Live: return L"working.png";     // at the laptop
         case Mood::Drinking: return L"snack.png";   // sipping instead of munching
+        case Mood::Gaming: return L"working.png";   // busy with its hands
         default: return L"idle.png";
     }
 }
@@ -597,7 +608,14 @@ Motion BodyMotion(const Style& st, Mood mood, double t, float since, float s) {
     const float k = st.motion;
     m.bob = std::sin(static_cast<float>(t) * 2.2f) * s * 0.018f * k;
     switch (mood) {
-        case Mood::Working: m.bob = std::sin(static_cast<float>(t) * 5.0f) * s * 0.025f * k; break;
+        case Mood::Working:
+            if (t_gaming) {  // button-mashing: a quick bounce, leaning into the turns
+                m.bob = std::sin(static_cast<float>(t) * 9.0f) * s * 0.018f * k;
+                m.tilt = std::sin(static_cast<float>(t) * 1.3f) * 6.0f * std::min(k, 1.5f);
+            } else {
+                m.bob = std::sin(static_cast<float>(t) * 5.0f) * s * 0.025f * k;
+            }
+            break;
         case Mood::Thinking: m.tilt = (-8.0f + std::sin(static_cast<float>(t) * 1.5f) * 2.0f) * std::min(k, 1.5f); break;
         case Mood::Alert:
             if (st.character == Character::Spiderman) {
@@ -1285,7 +1303,7 @@ void SpideyLenses(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, flo
                   double t, float since, const Style& st, D2D1_POINT_2F look, const D2D1_MATRIX_3X2_F& world) {
     auto brush = [&](D2D1_COLOR_F col) { return cache.Get(rt, col); };
     if (mood == Mood::Working) {
-        look = ReadingLook(t);
+        look = t_gaming ? GamingLook(t) : ReadingLook(t);
     } else if (mood == Mood::Thinking) {
         look = D2D1::Point2F(0.7f, -0.9f);  // gazing up toward the "?"
     }
@@ -2115,6 +2133,60 @@ void ActionTicks(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, floa
 // a logo per character (Spidey's spider, Luffy's straw-hat Jolly Roger, a little
 // Bunbun head for the originals).
 // `scale` shrinks it for the originals, whose faces sit lower in their slot.
+// Gaming: a game controller held up, `top` its top centre. A light D-pad on the left,
+// four coloured buttons on the right (one pressed in turn), a pulsing light between,
+// and little motion ticks at the sides while the buttons are mashed.
+void GameController(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F top, float s, double t,
+                    const D2D1_MATRIX_3X2_F& world, float scale = 1.0f) {
+    rt->SetTransform(world);
+    s *= scale;
+    const float tp = static_cast<float>(t);
+    const float w = s * 0.31f, h = s * 0.12f, lw = std::max(1.0f, s * 0.014f);
+    // Lighter than the laptop's ink, so it still reads on a black island at 30 px.
+    const D2D1_COLOR_F ink = Hex(0x1D1A28), body = Hex(0x5B5580), shade = Hex(0x433E63);
+    ID2D1Brush* inkB = cache.Get(rt, ink);
+    // Grips first, under the body.
+    for (int side = -1; side <= 1; side += 2) {
+        const D2D1_ELLIPSE grip = D2D1::Ellipse(D2D1::Point2F(top.x + side * w * 0.72f, top.y + h * 0.95f), s * 0.075f, s * 0.08f);
+        rt->FillEllipse(grip, cache.Get(rt, shade));
+        rt->DrawEllipse(grip, inkB, lw);
+    }
+    const D2D1_ROUNDED_RECT pad = D2D1::RoundedRect(D2D1::RectF(top.x - w, top.y, top.x + w, top.y + h * 1.25f), h * 0.55f, h * 0.55f);
+    rt->FillRoundedRectangle(pad, cache.Get(rt, body));
+    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(top.x - w * 0.82f, top.y + h * 0.10f, top.x + w * 0.82f, top.y + h * 0.28f),
+                                               h * 0.1f, h * 0.1f),
+                             cache.Get(rt, Hex(0x7A74A6)));  // a highlight along the top
+    rt->DrawRoundedRectangle(pad, inkB, lw);
+    // D-pad.
+    const D2D1_POINT_2F dp = D2D1::Point2F(top.x - w * 0.52f, top.y + h * 0.66f);
+    const float arm = s * 0.042f, thick = s * 0.016f;
+    ID2D1Brush* light = cache.Get(rt, Hex(0xE8E6F2));
+    rt->FillRectangle(D2D1::RectF(dp.x - arm, dp.y - thick, dp.x + arm, dp.y + thick), light);
+    rt->FillRectangle(D2D1::RectF(dp.x - thick, dp.y - arm, dp.x + thick, dp.y + arm), light);
+    // Face buttons: green top, red right, yellow bottom, blue left; one pressed at a time.
+    const D2D1_POINT_2F bp = D2D1::Point2F(top.x + w * 0.52f, top.y + h * 0.66f);
+    const float d = s * 0.033f, r = s * 0.017f;
+    const D2D1_POINT_2F at[4] = {{bp.x, bp.y - d}, {bp.x + d, bp.y}, {bp.x, bp.y + d}, {bp.x - d, bp.y}};
+    const uint32_t col[4] = {0x34C759, 0xFF453A, 0xFFD60A, 0x0A84FF};
+    const int pressed = static_cast<int>(std::fmod(tp * 5.5f, 4.0f));
+    for (int i = 0; i < 4; ++i) {
+        const bool down = i == pressed;
+        const float rr = r * (down ? 0.78f : 1.0f);
+        rt->FillEllipse(D2D1::Ellipse(at[i], rr, rr), cache.Get(rt, Hex(col[i], down ? 0.7f : 1.0f)));
+    }
+    // The light in the middle, pulsing.
+    const float glow = 0.55f + 0.45f * std::sin(tp * 3.0f);
+    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(top.x, top.y + h * 0.66f), s * 0.016f, s * 0.016f), cache.Get(rt, Hex(0x64D2FF, glow)));
+    // Mashing: two short ticks at each side, in and out.
+    const float tick = std::fabs(std::sin(tp * 9.0f));
+    for (int side = -1; side <= 1; side += 2)
+        for (int i = 0; i < 2; ++i) {
+            const float x0 = top.x + side * (w + s * 0.05f), y0 = top.y + h * (0.2f + i * 0.7f);
+            rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x0 + side * s * (0.025f + 0.02f * tick), y0 - s * 0.01f * (i ? -1.0f : 1.0f)),
+                         cache.Get(rt, Hex(0xFFFFFF, 0.55f + 0.35f * tick)), lw * 0.9f);
+        }
+}
+
 void Laptop(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F top, float s, double t, Character who,
             const D2D1_MATRIX_3X2_F& world, float scale = 1.0f) {
     rt->SetTransform(world);
@@ -2617,7 +2689,7 @@ void DazaiFace(ID2D1RenderTarget* rt, BrushCache& cache, D2D1_POINT_2F c, float 
     rt->SetTransform(world);
     switch (mood) {
         case Mood::Working: {
-            if (t_live) {  // Live: at the laptop (drawn with the others), a small smile
+            if (t_live || t_gaming) {  // Live / Gaming: the laptop or controller is drawn with the others; a small smile
                 MouthLine(rt, cache, D2D1::Point2F(c.x, c.y + ry * 0.50f), rx * 0.10f, ry * 0.04f, lw, kDazaiInk);
                 break;
             }
@@ -2828,6 +2900,7 @@ bool NeedsFastFrames(Mood mood, double t, double moodSince) {
         case Mood::Alert: return true;
         case Mood::Talking: return true;  // the mouth moves several times a second
         case Mood::Drinking: return t - moodSince < 2.8;
+        case Mood::Gaming: return true;  // the buttons and the lean never stop
         case Mood::Happy: return t - moodSince < 2.2;
         default: return false;
     }
@@ -2932,6 +3005,8 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
     if (t_dnd) mood = Mood::Sleepy;
     t_live = mood == Mood::Live;
     if (t_live) mood = Mood::Working;
+    t_gaming = mood == Mood::Gaming;
+    if (t_gaming) mood = Mood::Working;
     if (!st.eyesFollow) look = D2D1::Point2F(0, 0);
     t_spidey = SpideyPaletteFor(st);
     const Look L = LookFor(st);
@@ -3049,7 +3124,7 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
 
     const float eyeDx = headRx * 0.40f;
     const float eyeY = headC.y + headRy * (L.robot ? -0.05f : (L.spiderman ? 0.04f : (L.dazai ? 0.10f : 0.02f)));
-    if (mood == Mood::Working) look = ReadingLook(t);  // eyes on the screen (or the page)
+    if (mood == Mood::Working) look = t_gaming ? GamingLook(t) : ReadingLook(t);  // eyes on the screen (or the page)
     const float lookX = std::clamp(look.x, -1.0f, 1.0f) * s * 0.035f;
     float lookY = std::clamp(look.y, -1.0f, 1.0f) * s * 0.025f;
     if (mood == Mood::Thinking) lookY = -s * 0.03f;
@@ -3118,7 +3193,7 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
     if (L.spiderman) SpideyLenses(rt, cache, headC, headRx * 0.94f, headRy * 1.14f, s, mood, t, since, st, look, world);
 
     // Bolt works in his own head: the visor becomes a terminal.
-    const bool terminalEyes = L.robot && mood == Mood::Working;
+    const bool terminalEyes = L.robot && mood == Mood::Working && !t_gaming;  // gaming: eyes on the game
     if (terminalEyes) {
         TerminalVisor(rt, cache, D2D1::RectF(headC.x - headRx + s * 0.06f, headC.y - headRy * 0.55f,
                                              headC.x + headRx - s * 0.06f, headC.y + headRy * 0.45f), s, t);
@@ -3307,7 +3382,11 @@ void DrawStyled(ID2D1RenderTarget* rt, const Style& st, D2D1_POINT_2F center, fl
     } else if (mood == Mood::Sad && !L.luffy && !L.dazai) {
         RainCloud(rt, cache, headC, headRx, headRy, s, t);
     }
-    if (mood == Mood::Working) {
+    if (mood == Mood::Working && t_gaming) {
+        // Gaming: a controller for everyone, a little lower for the tall-faced ones.
+        const float y = L.luffy || L.dazai ? 0.80f : L.spiderman ? 0.52f : L.robot ? 0.66f : 0.62f;
+        GameController(rt, cache, D2D1::Point2F(headC.x, headC.y + headRy * y), s, t, world, L.luffy || L.dazai ? 1.05f : 1.0f);
+    } else if (mood == Mood::Working) {
         // A laptop for (nearly) everyone: Dazai reads a book and Bolt's terminal is
         // on his visor. The originals get a smaller one just under the mouth, so it
         // stays inside their slot.

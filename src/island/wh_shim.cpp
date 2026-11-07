@@ -24,6 +24,14 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id) {
 }
 
 std::wstring EnsureDir(REFKNOWNFOLDERID id) {
+    // Bunbun: BUNBUN_DATA_DIR points everything at another folder (its Roaming and
+    // Local subfolders), so tests can run on a copy instead of the real data.
+    wchar_t over[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"BUNBUN_DATA_DIR", over, MAX_PATH) > 0) {
+        const std::wstring test = std::wstring(over) + (id == FOLDERID_LocalAppData ? L"\\Local" : L"\\Roaming");
+        SHCreateDirectoryExW(nullptr, test.c_str(), nullptr);
+        return test;
+    }
     std::wstring dir = KnownFolder(id) + L"\\Bunbun";
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;

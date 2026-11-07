@@ -98,6 +98,8 @@ async function mock(cmd: string, args: Record<string, unknown>): Promise<unknown
                models: [{ name: "qwen2.5-1.5b-instruct-q4_k_m.gguf", path: "C:\\models\\qwen.gguf", size: 1117320736 }] };
     case "agentStatus":
       return { claudeConnected: false, claudeSettingsPath: "~/.claude/settings.json" };
+    case "getAccent":
+      return "#ff7a59";
     case "getSystem":
       // ?platform=linux shows what the settings app marks as not on Linux yet.
       return { autostart: false, islandRunning: true, version: "0.1.0", packsFolder: "%APPDATA%\\Bunbun\\mascots",
@@ -108,6 +110,29 @@ async function mock(cmd: string, args: Record<string, unknown>): Promise<unknown
       await new Promise((r) => setTimeout(r, 600));
       return { current: "0.1.0", checked: true, latest: "0.2.0", newer: true,
                url: "https://github.com/iaryasharma/Bunbun/releases/latest" };
+    case "workDays": {  // a made-up week for the design preview
+      const out = [];
+      const from = Number(args.from), to = Number(args.to);
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(Date.now() - i * 864e5);
+        const date = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+        if (date < from || date > to) continue;
+        const h = 3600;
+        const segments: [number, number, string][] = [[9 * h, 10.6 * h, "work"], [10.6 * h, 10.9 * h, "away"], [10.9 * h, 13 * h, "work"],
+          [13 * h, 13.75 * h, "lunch"], [13.75 * h, 15.5 * h, "work"], [15.5 * h, 15.6 * h, "break"], [15.6 * h, 18 * h, "work"], [18 * h, 18.4 * h, "overtime"]];
+        const seconds: Record<string, number> = {};
+        for (const [s, e, k] of segments) seconds[k] = (seconds[k] || 0) + (e - s);
+        out.push({ date, seconds, breaks: 2, first: 9 * h, last: 18.4 * h, segments, subjects: { Maths: 2.5 * h, Physics: 1.75 * h, History: 0.9 * h } });
+      }
+      return out;
+    }
+    case "saveFile":
+      return { path: `C:\Users\you\Documents\${String(args.name)}` };
+    case "backupCreate":
+      await new Promise((r) => setTimeout(r, 400));
+      return { path: "C:\Users\you\Documents\Bunbun backup 2026-11-06 23.40.zip", files: 9, bytes: 84211 };
+    case "backupRestore":
+      return { cancelled: true };
     default:
       return true;
   }

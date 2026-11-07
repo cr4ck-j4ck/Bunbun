@@ -308,7 +308,8 @@ std::wstring HelpText() {
            L"timer 10 min · search cute bunnies · battery · weather · what's playing · "
            L"12*7 · lock · screenshot · dnd on / off · add buy milk · remind me at 3pm to call Sam · "
            L"my list · done buy milk · remind me every day at 9 to stand up · focus 25 · wifi off · "
-           L"brightness 60 · undo · define serendipity";
+           L"brightness 60 · undo · define serendipity · drank water · 500 ml · how much water · "
+           L"start work · take a break · done for today · how long have I worked";
 }
 
 // Takes a due time out of a to-do / reminder: "in 20 min", "at 3pm", "at 9:30",
@@ -611,6 +612,93 @@ Intent Parse(const std::wstring& raw, const std::wstring& searchEngine) {
         if (Has(t, L"brighter") || Has(t, L"up") || Has(t, L"increase") || Has(t, L"raise")) { in.action = Action::BrightnessUp; return in; }
         if (Has(t, L"dim") || Has(t, L"down") || Has(t, L"decrease") || Has(t, L"lower")) { in.action = Action::BrightnessDown; return in; }
         if (Has(t, L"max") || Has(t, L"full")) { in.action = Action::BrightnessSet; in.number = 100; return in; }
+    }
+
+    // Bunbun: water. "drank water", "I had a glass of water", "add water", "log 500 ml",
+    // "2 glasses", "water +1", "undo water", "how much water today". Before to-dos, so
+    // "add water" logs a glass instead of adding a to-do; "remind me to drink water" and
+    // "water the plants" stay to-dos.
+    {
+        const bool ml = Has(t, L" ml") || Has(t, L"ml ") || EndsWith(t, L"ml") || Has(t, L"litre") || Has(t, L"liter");
+        const bool water = Has(t, L"water") || Has(t, L"glass") || (ml && (Has(t, L"drank") || Has(t, L"had") || Has(t, L"log")));
+        const bool notWater = StartsWith(t, L"remind") || Has(t, L"reminder") || Has(t, L"plant") ||
+                              Has(t, L"settings") || Has(t, L"refill") || Has(t, L"watermelon") || StartsWith(t, L"open ");
+        if (water && !notWater) {
+            if (Has(t, L"how much") || Has(t, L"how many") || Has(t, L"progress") || Has(t, L"status") ||
+                t == L"water" || t == L"water today" || Has(t, L"did i drink")) {
+                in.action = Action::Info;
+                in.info = Info::Water;
+                return in;
+            }
+            if (Has(t, L"undo") || Has(t, L"remove") || Has(t, L"take back") || Has(t, L"minus") || Has(t, L"didn't")) {
+                in.action = Action::WaterUndo;
+                return in;
+            }
+            const bool logged = Has(t, L"drank") || Has(t, L"drink") || Has(t, L"had ") || StartsWith(t, L"add") || Has(t, L"bottle") ||
+                                StartsWith(t, L"log") || Has(t, L"+") || Has(t, L"finished") || Has(t, L"glass") || ml ||
+                                StartsWith(t, L"water ");
+            if (logged) {
+                in.action = Action::WaterAdd;
+                // An amount: "500 ml", "1.5 l", "half a litre", or a count: "2 glasses".
+                double n = 0;
+                bool hasNum = false;
+                {
+                    std::wstring num;
+                    for (wchar_t c : t) {
+                        if (iswdigit(c) || (c == L'.' && !num.empty())) num += c;
+                        else if (!num.empty()) break;
+                    }
+                    if (!num.empty()) { n = _wtof(num.c_str()); hasNum = true; }
+                }
+                if (Has(t, L"half a litre") || Has(t, L"half a liter")) in.number = 500;
+                else if (hasNum && ml) in.number = static_cast<int>(std::lround(Has(t, L"litre") || Has(t, L"liter") ? n * 1000 : n));
+                else if (hasNum && (EndsWith(t, L" l") || Has(t, L" l "))) in.number = static_cast<int>(std::lround(n * 1000));
+                else if (hasNum && Has(t, L"glass")) in.number = -std::clamp(static_cast<int>(n), 1, 10);
+                else if (Has(t, L"two glasses")) in.number = -2;
+                else if (Has(t, L"three glasses")) in.number = -3;
+                else if (Has(t, L"bottle")) in.number = kWaterBottle;  // the island's bottle size, else 750 ml
+                if (in.number != kWaterBottle) in.number = std::clamp(in.number, -10, 3000);
+                return in;
+            }
+        }
+    }
+
+    // Bunbun: Work / Study mode's day. "start work", "clock in", "start studying",
+    // "pause work", "back to work", "take a break", "done for today", "clock out",
+    // "how long have I worked", "how much did I study today".
+    {
+        const bool workWord = Has(t, L"work") || Has(t, L"study") || Has(t, L"studying") || Has(t, L"clock in") ||
+                              Has(t, L"clock out") || Has(t, L"done for today") || Has(t, L"done for the day");
+        const bool notWork = Has(t, L"settings") || Has(t, L"focus") || Has(t, L"homework") || Has(t, L"network") ||
+                             StartsWith(t, L"open ") || Has(t, L"workout") || Has(t, L"remind");
+        if (workWord && !notWork) {
+            if (Has(t, L"how long") || Has(t, L"how much") || Has(t, L"how many hours") || Has(t, L"status") ||
+                t == L"work today" || t == L"study today" || Has(t, L"progress")) {
+                in.action = Action::Info;
+                in.info = Info::Work;
+                return in;
+            }
+            if (Has(t, L"pause")) { in.action = Action::WorkPause; return in; }
+            if (Has(t, L"resume") || Has(t, L"back to work") || Has(t, L"back to studying") || Has(t, L"continue")) {
+                in.action = Action::WorkResume;
+                return in;
+            }
+            if (Has(t, L"done for") || Has(t, L"clock out") || StartsWith(t, L"stop ") || StartsWith(t, L"end ") ||
+                StartsWith(t, L"finish") || Has(t, L"done with") || Has(t, L"done studying") || Has(t, L"done working")) {
+                in.action = Action::WorkDone;
+                return in;
+            }
+            if (StartsWith(t, L"start") || StartsWith(t, L"begin") || Has(t, L"clock in") || StartsWith(t, L"let's work") ||
+                StartsWith(t, L"lets work") || t == L"work" || t == L"study") {
+                in.action = Action::WorkStart;
+                return in;
+            }
+        }
+        if (t == L"take a break" || t == L"break" || t == L"break time" || t == L"start a break" || t == L"start break" ||
+            t == L"i need a break" || t == L"take a short break") {
+            in.action = Action::WorkBreak;
+            return in;
+        }
     }
 
     // Focus mode: "focus", "focus 50", "start focus for 45 minutes", "deep work".

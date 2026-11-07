@@ -27,6 +27,8 @@
 #include <vector>
 
 #include "../agents/hook_installer.h"
+#include "../common/backup.h"
+#include "../common/work_json.h"
 #include "../common/json.h"
 #include "../common/pipe.h"
 #include "../common/todo_commands.h"
@@ -273,6 +275,7 @@ bb::mascot::Mood MoodFromName(const std::string& m) {
     if (m == "streaming") return Mood::Streaming;
     if (m == "dnd") return Mood::Dnd;
     if (m == "live") return Mood::Live;
+    if (m == "gaming") return Mood::Gaming;
     return Mood::Idle;
 }
 
@@ -353,6 +356,209 @@ bool IslandRunning() {
     if (m) CloseHandle(m);
     return m != nullptr;
 }
+
+// ── Backup & restore (common/backup.h) ─────────────────────────────────────
+// Bunbun's files by name: state.ini and ask/ live in Local AppData, the rest
+// (settings, water, Screen Time, notes, to-dos, skin packs) in Roaming.
+std::string Base64Decode(const std::string& in);  // below
+
+namespace backups {
+
+std::wstring Folder(bool local) {
+    const std::wstring p = local ? bb::StatePath() : bb::SettingsPath();
+    return p.substr(0, p.find_last_of(L'\\'));
+}
+
+std::wstring PathFor(const std::string& name) {
+    // Bunbun: "ask" too: the folder itself is looked up as "ask", and it was searched for
+    // in the roaming folder, so a custom Ask Bun prompt was never backed up.
+    const bool local = name == "state.ini" || name == "ask" || name.rfind("ask/", 0) == 0;
+    std::wstring rel = Wide(name);
+    std::replace(rel.begin(), rel.end(), L'/', L'\\');
+    return Folder(local) + L"\\" + rel;
+}
+
+bool ReadBytes(const std::wstring& path, std::string* out) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    bool ok = GetFileSizeEx(f, &size) && size.QuadPart < static_cast<LONGLONG>(bb::backup::kMaxBytes);
+    if (ok) {
+        out->resize(static_cast<size_t>(size.QuadPart));
+        DWORD got = 0;
+        ok = out->empty() || (ReadFile(f, out->data(), static_cast<DWORD>(out->size()), &got, nullptr) && got == out->size());
+    }
+    CloseHandle(f);
+    return ok;
+}
+
+// Through a temporary file and a rename, so a half-written file never replaces a good one.
+bool WriteBytes(const std::wstring& path, const std::string& data) {
+    const std::wstring dir = path.substr(0, path.find_last_of(L'\\'));
+    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+    const std::wstring tmp = path + L".restoring";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD put = 0;
+    const bool ok = data.empty() || (WriteFile(f, data.data(), static_cast<DWORD>(data.size()), &put, nullptr) && put == data.size());
+    CloseHandle(f);
+    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+void AddFolder(const std::string& prefix, const std::wstring& dir, std::vector<bb::backup::File>* files) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const std::wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        const std::string name = prefix + Utf8(n);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            AddFolder(name + "/", dir + L"\\" + n, files);
+        } else if (bb::backup::IsBackupName(name)) {
+            std::string data;
+            if (ReadBytes(dir + L"\\" + n, &data)) files->push_back({name, std::move(data)});
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+std::vector<bb::backup::File> Collect() {
+    std::vector<bb::backup::File> files;
+    for (const char* name : bb::backup::kFiles) {
+        std::string data;
+        if (ReadBytes(PathFor(name), &data)) files.push_back({name, std::move(data)});
+    }
+    for (const char* folder : bb::backup::kFolders) {
+        const std::string f = folder;
+        AddFolder(f, PathFor(f.substr(0, f.size() - 1)), &files);
+    }
+    return files;
+}
+
+std::string MakeZip(const std::vector<bb::backup::File>& files) {
+    const long long now = static_cast<long long>(time(nullptr));
+    return bb::backup::Zip(files, bb::backup::Manifest(Utf8(WH_MOD_VERSION), "windows", now), now);
+}
+
+std::wstring Stamp() {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    wchar_t buf[40];
+    swprintf(buf, 40, L"%04d-%02d-%02d %02d.%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute);
+    return buf;
+}
+
+// The Save / Open dialog; empty when cancelled. `ext` is "zip", "png" or "pdf".
+std::wstring PickFile(bool save, const std::wstring& suggested, const std::wstring& ext = L"zip", const std::wstring& title = L"") {
+    Microsoft::WRL::ComPtr<IFileDialog> dlg;
+    if (FAILED(CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dlg))))
+        return {};
+    const std::wstring pattern = L"*." + ext;
+    const std::wstring kind = ext == L"zip" ? L"Bunbun backup (*.zip)" : ext == L"pdf" ? L"PDF document (*.pdf)" : L"PNG image (*.png)";
+    const COMDLG_FILTERSPEC types[] = {{kind.c_str(), pattern.c_str()}};
+    dlg->SetFileTypes(1, types);
+    dlg->SetDefaultExtension(ext.c_str());
+    dlg->SetTitle(!title.empty() ? title.c_str() : save ? L"Save a backup of Bunbun" : L"Restore Bunbun from a backup");
+    if (save) dlg->SetFileName(suggested.c_str());
+    PWSTR docs = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs))) {
+        Microsoft::WRL::ComPtr<IShellItem> folder;
+        if (SUCCEEDED(SHCreateItemFromParsingName(docs, nullptr, IID_PPV_ARGS(&folder)))) dlg->SetDefaultFolder(folder.Get());
+        CoTaskMemFree(docs);
+    }
+    if (FAILED(dlg->Show(g_hwnd))) return {};
+    Microsoft::WRL::ComPtr<IShellItem> item;
+    PWSTR path = nullptr;
+    if (FAILED(dlg->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) return {};
+    std::wstring out = path;
+    CoTaskMemFree(path);
+    return out;
+}
+
+// Runs bunbun.exe --quit and waits for it (the island saves its state as it goes).
+void QuitIsland() {
+    std::wstring cmd = L"\"" + ExeDir() + L"\\bunbun.exe\" --quit";
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, ExeDir().c_str(), &si, &pi)) return;
+    WaitForSingleObject(pi.hProcess, 15000);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    for (int i = 0; i < 50 && IslandRunning(); ++i) Sleep(100);
+}
+
+// Bunbun: Create / Restore take the path from the dialog, or from the command line
+// (bunbun-settings --backup <file> / --restore <file>).
+bool TestDataDir() { return GetEnvironmentVariableW(L"BUNBUN_DATA_DIR", nullptr, 0) > 0; }
+
+Value CreateAt(const std::wstring& path, std::string* err) {
+    Value o = Value::Object();
+    const std::vector<bb::backup::File> files = Collect();
+    const std::string zip = MakeZip(files);
+    if (!WriteBytes(path, zip)) { *err = "couldn't write the backup there"; return {}; }
+    o["path"] = Value::String(Utf8(path));
+    o["files"] = Value::Number(static_cast<double>(files.size()));
+    o["bytes"] = Value::Number(static_cast<double>(zip.size()));
+    return o;
+}
+
+Value Create(std::string* err) {
+    const std::wstring path = PickFile(true, L"Bunbun backup " + Stamp() + L".zip");
+    if (path.empty()) { Value o = Value::Object(); o["cancelled"] = Value::Bool(true); return o; }
+    return CreateAt(path, err);
+}
+
+Value RestoreFrom(const std::wstring& path, std::string* err) {
+    Value o = Value::Object();
+    std::string zip, manifest;
+    if (!ReadBytes(path, &zip)) { *err = "couldn't read that file"; return {}; }
+    std::vector<bb::backup::File> files;
+    if (!bb::backup::Unzip(zip, &files, &manifest, err)) return {};
+    // What's here now, kept first, so a restore can be undone.
+    const std::wstring safety = Folder(true) + L"\\backups\\Before restore " + Stamp() + L".zip";
+    if (!WriteBytes(safety, MakeZip(Collect()))) { *err = "couldn't save a copy of the current data first; nothing was changed"; return {}; }
+    // A test on a copy of the data (BUNBUN_DATA_DIR) leaves the real island alone.
+    const bool wasRunning = !TestDataDir() && IslandRunning();
+    if (wasRunning) QuitIsland();
+    int written = 0, failed = 0;
+    for (const auto& f : files) (WriteBytes(PathFor(f.name), f.data) ? written : failed)++;
+    if (wasRunning) ShellExecuteW(nullptr, L"open", (ExeDir() + L"\\bunbun.exe").c_str(), nullptr, ExeDir().c_str(), SW_SHOWNORMAL);
+    o["files"] = Value::Number(written);
+    o["failed"] = Value::Number(failed);
+    o["safety"] = Value::String(Utf8(safety));
+    o["fromVersion"] = Value::String(bb::backup::ManifestValue(manifest, "version"));
+    o["fromPlatform"] = Value::String(bb::backup::ManifestValue(manifest, "platform"));
+    return o;
+}
+
+Value Restore(std::string* err) {
+    const std::wstring path = PickFile(false, L"");
+    if (path.empty()) { Value o = Value::Object(); o["cancelled"] = Value::Bool(true); return o; }
+    return RestoreFrom(path, err);
+}
+
+// Bunbun: a file the page made (the work report as PNG or PDF), saved where you pick.
+Value SaveFile(const Value& args, std::string* err) {
+    const std::string ext = args.getString("ext");
+    if (ext != "png" && ext != "pdf") { *err = "only png or pdf"; return {}; }
+    const std::string data = Base64Decode(args.getString("base64"));
+    if (data.empty()) { *err = "nothing to save"; return {}; }
+    const std::wstring path = PickFile(true, Wide(args.getString("name")), Wide(ext), L"Save the work report");
+    Value o = Value::Object();
+    if (path.empty()) { o["cancelled"] = Value::Bool(true); return o; }
+    if (!WriteBytes(path, data)) { *err = "couldn't write the file there"; return {}; }
+    o["path"] = Value::String(Utf8(path));
+    ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return o;
+}
+
+}  // namespace backups
 
 // ── Bridge ──────────────────────────────────────────────────────────────────
 
@@ -682,7 +888,7 @@ Value SheetCommand(const std::string& cmd, const Value& args, std::string* err) 
     if (!rows || !rows->isArray() || g_sheetRows.empty()) { *err = "slice a sheet first"; return {}; }
     const std::wstring dir = bm::PacksFolder() + L"\\" + name;
     static const char* kMoods[] = {"idle", "working", "thinking", "alert", "happy", "sad", "sleepy", "music", "snack",
-                                   "listening", "talking", "confused", "streaming", "dnd", "live"};
+                                   "listening", "talking", "confused", "streaming", "dnd", "live", "gaming"};
     for (const Value& r : rows->arr) {
         const int index = static_cast<int>(r.getNumber("row", -1));
         const std::string mood = r.getString("mood");
@@ -881,6 +1087,19 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         return o;
     }
     if (cmd == "setAutostart") { SetAutostart(args.getBool("on")); return Value::Bool(AutostartEnabled()); }
+    if (cmd == "getAccent") {  // Bunbun: the island's accent now (accent.txt), for the app's colours
+        std::string text;
+        backups::ReadBytes(backups::PathFor("accent.txt"), &text);
+        return Value::String(text.size() >= 7 && text[0] == '#' ? text.substr(0, 7) : std::string());
+    }
+    if (cmd == "workDays") {  // Bunbun: Work mode's report (work.txt next to settings.ini)
+        std::string text;
+        backups::ReadBytes(backups::PathFor("work.txt"), &text);
+        return bb::work::WorkDaysJson(text, static_cast<int>(args.getNumber("from", 0)), static_cast<int>(args.getNumber("to", 99999999)));
+    }
+    if (cmd == "saveFile") return backups::SaveFile(args, err);
+    if (cmd == "backupCreate") return backups::Create(err);    // Bunbun: Backup & restore
+    if (cmd == "backupRestore") return backups::Restore(err);
     if (cmd == "startIsland") {
         if (!IslandRunning())
             ShellExecuteW(nullptr, L"open", (ExeDir() + L"\\bunbun.exe").c_str(), nullptr, ExeDir().c_str(), SW_SHOWNORMAL);
@@ -1109,6 +1328,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int show) {
+    // Bunbun: --backup <file> / --restore <file>: the Backup & restore buttons without the
+    // window (scripts, tests). Prints the result as JSON; exit code 0 = done.
+    if (cmdLine && *cmdLine) {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(cmdLine, &argc);
+        if (argv && argc >= 2 && (wcscmp(argv[0], L"--backup") == 0 || wcscmp(argv[0], L"--restore") == 0)) {
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            std::string err;
+            const bool backup = wcscmp(argv[0], L"--backup") == 0;
+            const Value r = backup ? backups::CreateAt(argv[1], &err) : backups::RestoreFrom(argv[1], &err);
+            LocalFree(argv);
+            const std::string out = err.empty() ? bb::json::Serialize(r) : "{\"error\":\"" + err + "\"}";
+            if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+                DWORD put = 0;
+                WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), out.data(), static_cast<DWORD>(out.size()), &put, nullptr);
+                WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), "\n", 1, &put, nullptr);
+            }
+            return err.empty() ? 0 : 1;
+        }
+        if (argv) LocalFree(argv);
+    }
     if (cmdLine) {
         const std::wstring args = cmdLine;
         const size_t at = args.find(L"--page ");

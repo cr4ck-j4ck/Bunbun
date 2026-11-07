@@ -90,8 +90,13 @@ void SpeakerGlyph(cairo_t* cr, double cx, double cy, double size, bool muted, Co
 void PaintSystemCards(cairo_t* cr, const Rect& rect) {
     const double now = Now();
     const double gap = 10, colW = (rect.w - gap) / 2, rowH = (rect.h - gap) / 2;
-    const Rect r1{rect.x, rect.y, colW, rowH}, r2{rect.x + colW + gap, rect.y, colW, rowH};
-    const Rect r3{rect.x, rect.y + rowH + gap, colW, rowH}, r4{rect.x + colW + gap, rect.y + rowH + gap, colW, rowH};
+    // Quick toggles (Network) and Hardware monitor (Performance) switch their cards off;
+    // the neighbour then takes the whole row (as on Windows).
+    const bool netCard = bb::settings::GetBool(L"Modules.ConnectivityModule");
+    const bool perfCard = bb::settings::GetBool(L"Modules.HardwareMonitorModule");
+    const Rect r1{rect.x, rect.y, netCard ? colW : rect.w, rowH}, r2{rect.x + colW + gap, rect.y, colW, rowH};
+    const Rect r3{rect.x, rect.y + rowH + gap, colW, rowH};
+    const Rect r4{perfCard ? rect.x + colW + gap : rect.x, rect.y + rowH + gap, perfCard ? colW : rect.w, rowH};
     const Col cardBg = C(0x18181a), white = W(1), grey = kGrey, labelCol = C(0xa0a0a0), green = kGreen, accent = Accent();
     const lsrc::Load& load = lsrc::SystemLoad();
     const lsrc::Battery& bat = lsrc::BatteryState();
@@ -124,8 +129,8 @@ void PaintSystemCards(cairo_t* cr, const Rect& rect) {
     }
 
     // ── Card 2: Network, with the Wi-Fi and Bluetooth switches ──
+    if (netCard) {
     Fill(cr, r2.x, r2.y, r2.w, r2.h, 12, F(cardBg));
-    {
         const double wx = r2.x + 22, wy = r2.y + 17;
         Source(cr, F(accent));
         cairo_set_line_width(cr, 1.2);
@@ -172,8 +177,8 @@ void PaintSystemCards(cairo_t* cr, const Rect& rect) {
     }
 
     // ── Card 3: Performance (GPU only when the driver reports it) ──
+    if (perfCard) {
     Fill(cr, r3.x, r3.y, r3.w, r3.h, 12, F(cardBg));
-    {
         Icon(cr, Page::Hardware, r3.x + 22, r3.y + 14, 13, F(accent));
         SText(cr, "Performance", r3.x + 34, r3.y + 8, 106, 14, FLabel, F(labelCol));
         g_cpuWave.Push(load.cpu, now);

@@ -6,6 +6,7 @@ import { useStore } from "../store";
 import { Row, Section, Toggle } from "../ui/controls";
 import { LiveMascot, useMascotStyle } from "../ui/mascot";
 import { IslandPreview } from "../ui/preview";
+import { modeNav, USE_CASES } from "./Work";
 
 type System = { autostart: boolean; islandRunning: boolean; version: string; platform?: string };
 
@@ -43,7 +44,7 @@ export function Overview({ go }: { go: (page: string) => void }) {
         <div>
           <h2>Hi, I’m <em>Bun</em>.</h2>
           <p>
-            Your island lives at the top of the screen: music, weather, timers, files, and your coding agents,
+            Your island lives at the top of the screen: music, weather, timers, files, and {({ work: "your work day", study: "your studies", both: "your coding agents and work day" } as Record<string, string>)[s.get("Bunbun.UseCase")] ?? "your coding agents"},
             all in one place. Everything here applies instantly.
           </p>
           <div className="actions">
@@ -63,8 +64,27 @@ export function Overview({ go }: { go: (page: string) => void }) {
         </div>
       </motion.div>
 
+      <Section title="Your mode">
+        {(() => {
+          const use = s.get("Bunbun.UseCase") || "agents";
+          const m = USE_CASES.find((u) => u.value === use) ?? USE_CASES[0];
+          const nav = modeNav(use);
+          return (
+            <div className="mode-now" style={{ "--mode": m.tint } as React.CSSProperties}>
+              <span className="mode-now-ico">{m.icon}</span>
+              <div className="mode-now-text">
+                <small>Bunbun is for</small>
+                <b>{m.title}</b>
+                <span>{m.text}</span>
+              </div>
+              <button className="btn small" onClick={() => go("work")}>{use === "agents" ? "Change" : `Open ${nav.label}`}</button>
+            </div>
+          );
+        })()}
+      </Section>
+
       <Section title="Quick switches">
-        {quick.map(([k, label, desc, Icon]) => (
+        {quick.filter(([k]) => k !== "Bunbun.Agents" || ["agents", "both", ""].includes(s.get("Bunbun.UseCase"))).map(([k, label, desc, Icon]) => (
           <Row key={k} label={<span style={{ display: "flex", alignItems: "center", gap: 10 }}><Icon size={16} color="var(--accent)" />{label}</span>} description={desc} settingKeys={[k]}>
             <Toggle on={s.bool(k)} onChange={(v) => s.set(k, v)} />
           </Row>

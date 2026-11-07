@@ -1,8 +1,9 @@
-import { Download, ExternalLink, FileText, RefreshCw, RotateCcw } from "lucide-react";
+import { ArchiveRestore, Download, ExternalLink, FileText, RefreshCw, RotateCcw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { call } from "../bridge";
 import { schema, useStore } from "../store";
 import { PageHead, Row, Section, Setting, Toggle } from "../ui/controls";
+import { AccentPicker, ThemePresets } from "../ui/ThemeColors";
 
 type UpdateInfo = {
   current: string;
@@ -18,6 +19,53 @@ type UpdateInfo = {
 // request on a worker thread). Update hands over to the island's updater, which
 // closes Bunbun, installs the new version and starts it; a copy that wasn't
 // installed with setup opens the release page instead.
+type BackupResult = { cancelled?: boolean; path?: string; files?: number; bytes?: number; failed?: number; safety?: string;
+                      fromVersion?: string; fromPlatform?: string };
+
+// Bunbun: one .zip with your settings and data (water, Screen Time, notes, to-dos,
+// timers, skin packs). Restoring keeps a copy of what was there first and
+// restarts the island. The same file works on Windows and Linux.
+function Backups() {
+  const [busy, setBusy] = useState("");
+  const [note, setNote] = useState("");
+  const run = (cmd: "backupCreate" | "backupRestore") => {
+    if (cmd === "backupRestore" &&
+        !window.confirm("Restore from a backup? Your settings and data are replaced by the backup's. A copy of what you have now is saved first, and the island restarts."))
+      return;
+    setBusy(cmd);
+    setNote("");
+    call<BackupResult>(cmd)
+      .then((r) => {
+        if (!r || r.cancelled) return;
+        if (cmd === "backupCreate") {
+          const kb = Math.max(1, Math.round((r.bytes ?? 0) / 1024));
+          setNote(`Saved ${r.files} files (${kb >= 1024 ? (kb / 1024).toFixed(1) + " MB" : kb + " KB"}) to ${r.path}.`);
+        } else {
+          const from = r.fromVersion ? ` from Bunbun ${r.fromVersion}${r.fromPlatform ? ` on ${r.fromPlatform === "linux" ? "Linux" : "Windows"}` : ""}` : "";
+          setNote(`Restored ${r.files} files${from}.${r.failed ? ` ${r.failed} couldn't be written.` : ""} What you had before is in ${r.safety}.`);
+          setTimeout(() => window.location.reload(), 1200);  // read the restored settings
+        }
+      })
+      .catch((e) => setNote(`Couldn't ${cmd === "backupCreate" ? "back up" : "restore"}: ${String(e?.message ?? e)}`))
+      .finally(() => setBusy(""));
+  };
+  return (
+    <>
+      <Row label="Back up" description="Saves your settings and Bunbun's data in one .zip: water, Screen Time, notes, to-dos, timers and your mascot packs. Not the AI model. Works on Windows and Linux alike.">
+        <button className="btn small" disabled={!!busy} onClick={() => run("backupCreate")}>
+          <Save size={14} /> {busy === "backupCreate" ? "Saving…" : "Create backup…"}
+        </button>
+      </Row>
+      <Row label="Restore" description="Loads a backup in place of your current settings and data. A copy of what you have now is kept first, and the island restarts.">
+        <button className="btn small" disabled={!!busy} onClick={() => run("backupRestore")}>
+          <ArchiveRestore size={14} /> {busy === "backupRestore" ? "Restoring…" : "Restore from backup…"}
+        </button>
+      </Row>
+      {note && <div className="note" style={{ margin: "0 20px 14px" }}>{note}</div>}
+    </>
+  );
+}
+
 function Updates() {
   const [busy, setBusy] = useState(false);
   const [info, setInfo] = useState<UpdateInfo | null>(null);
@@ -74,6 +122,13 @@ export function General() {
   return (
     <div className="page">
       <PageHead title="General" subtitle="Startup, language, clock and the hide/show hotkey." />
+      <section className="section">
+        <h3>Theme</h3>
+        <ThemePresets />
+      </section>
+      <Section title="Colours">
+        <AccentPicker />
+      </Section>
       <Section title="Startup">
         <Row label={linux ? "Start when you log in" : "Start with Windows"} description="Launch Bunbun when you sign in.">
           <Toggle on={!!autostart} label={linux ? "Start when you log in" : "Start with Windows"} disabled={autostart === null}
@@ -111,6 +166,9 @@ export function General() {
             <RotateCcw size={14} /> Reset all
           </button>
         </Row>
+      </Section>
+      <Section title="Backup & restore">
+        <Backups />
       </Section>
       <Section title="Updates">
         <Updates />

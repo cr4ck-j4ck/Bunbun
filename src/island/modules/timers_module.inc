@@ -28,6 +28,8 @@ double g_autoStartAt = 0.0;        // NowSeconds() when the next Pomodoro phase 
 std::vector<tm::Lap> g_laps;       // stopwatch laps, oldest first
 bool g_loaded = false;
 bool g_ringDrag = false;           // left button went down on the countdown ring
+bool g_ringFocus = false;          // Bunbun: ... on the Focus length dial instead
+int g_focusDrag = -1;              // Bunbun: the Focus length being dragged (minutes; -1 none)
 D2D1_POINT_2F g_ringCenter{};      // that ring's centre, in content space
 
 int Today() {
@@ -165,9 +167,19 @@ void SavePreset(const Settings& s) {
 }
 
 // The countdown ring: point straight up is 0, clockwise, one turn an hour.
+// Bunbun: the Focus length (Bunbun.PomodoroFocus); 25 is the default, so it's written as unset.
+void SaveFocusMinutes(int minutes) {
+    WriteBunbunSetting(L"PomodoroFocus", minutes == 25 ? L"-" : std::to_wstring(minutes).c_str());
+}
+
 void SetCountdownFromPoint(const MediaContentPoint& pt) {
     if (!pt.valid) return;
     const double angle = std::atan2(pt.x - g_ringCenter.x, g_ringCenter.y - pt.y);
+    if (g_ringFocus) {  // Bunbun: the Focus dial shows the length while dragging; saved on release
+        const int m = tm::FocusMinutesFromAngle(angle);
+        if (m != g_focusDrag) { g_focusDrag = m; g_layoutDirty = true; }
+        return;
+    }
     const int seconds = tm::SecondsFromAngle(angle);
     if (seconds != g_countSet) CountdownSet(seconds);
 }

@@ -124,11 +124,12 @@ confused.png    Bun didn't understand
 streaming.png   Streaming Shows: a video is playing
 dnd.png         do not disturb
 live.png        Live: streaming, sharing or recording the screen
+gaming.png      game mode: a controller in hand
 ```
 
 Animated: name the frames `idle_1.png`, `idle_2.png`… (all the same canvas size) instead.
 Any mood without its own PNG uses `idle.png`; `talking.png` falls back to `happy.png`,
-`confused.png` to `thinking.png` `streaming.png` to `snack.png`, `dnd.png` to `sleepy.png` and `live.png` to `working.png`. Click **Refresh** in the Mascot studio and pick the
+`confused.png` to `thinking.png` `streaming.png` to `snack.png`, `dnd.png` to `sleepy.png`, and `live.png` and `gaming.png` to `working.png`. Click **Refresh** in the Mascot studio and pick the
 pack.
 
 Skin packs are for artwork you own or have permission to use. Please don't submit third-party

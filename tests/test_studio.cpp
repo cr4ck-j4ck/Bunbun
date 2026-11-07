@@ -216,6 +216,11 @@ static void TestTimers() {
     CHECK(tm::DialFraction(15 * 60) == 0.25 && tm::DialFraction(3600) == 1.0 && tm::DialFraction(0) == 0.0);
     CHECK(tm::StepCountdown(25 * 60 + 30, 1, false) == 26 * 60);
     CHECK(tm::StepCountdown(60, -3, false) == 60 && tm::StepCountdown(60, -2, true) == 50);
+    // The Focus dial: two hours a turn, 5-minute steps.
+    CHECK(tm::FocusMinutesFromAngle(0.0) == 120 && tm::FocusMinutesFromAngle(3.14159265) == 60);
+    CHECK(tm::FocusMinutesFromAngle(-3.14159265 / 2) == 90 && tm::FocusMinutesFromAngle(0.27) == 5);
+    CHECK(tm::FocusDialFraction(30) == 0.25 && tm::FocusDialFraction(200) == 1.0);
+    CHECK(tm::StepFocusMinutes(25, 1) == 30 && tm::StepFocusMinutes(5, -1) == 5 && tm::StepFocusMinutes(178, 2) == 180);
 
     // Presets: minutes or m:ss, no duplicates, at most six.
     const auto pr = tm::ParsePresets(L" 5, 10,1:30 , 10, x, 0, 25, 45, 60, 90");

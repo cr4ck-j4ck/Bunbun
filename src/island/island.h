@@ -46,3 +46,9 @@ std::string IslandTestHits();
 // A left click at client point (x, y), sent to the island window as a real click
 // would be (the pointer itself doesn't move).
 bool IslandTestClick(int x, int y);
+// A made-up event for `seconds`, so tests can see settings that act on live events
+// without touching the PC: kind is media | volume | brightness | caps | battery |
+// notification | progress | privacy | mic | camera | download | bluetooth | cheer | clear.
+// a / b are text (title / artist, app / body...), n a number (percent, on/off).
+// While it lasts, the media, lyrics and privacy pollers leave that part of the state alone.
+bool IslandTestState(const std::string& kind, const std::wstring& a, const std::wstring& b, int n, int seconds);

@@ -14,6 +14,9 @@
 
 namespace bb::assistant {
 
+// Action::WaterAdd's `number` for "a bottle": the bottle size set for Water, else 750 ml.
+constexpr int kWaterBottle = -99;
+
 enum class Action {
     None,         // nothing to do; `reply` says why / what to try
     Reply,        // `reply` is the whole answer (math, help)
@@ -48,10 +51,17 @@ enum class Action {
     BrightnessDown,
     Undo,           // put back what the last command changed
     Lookup,         // Bunbun: online encyclopedia / dictionary lookup (Wikipedia / Wiktionary)
+    WaterAdd,       // Bunbun: log water; `number` = ml, or -n for n glasses (0 = one glass, kWaterBottle = a bottle)
+    WaterUndo,      // take the last glass back
+    WorkStart,      // Bunbun: Work / Study mode's day (Settings, Mode)
+    WorkPause,
+    WorkResume,
+    WorkBreak,
+    WorkDone,
     Info,         // `info` says which
 };
 
-enum class Info { None, Time, Date, Battery, Weather, NowPlaying, System };
+enum class Info { None, Time, Date, Battery, Weather, NowPlaying, System, Water, Work };
 
 struct Intent {
     Action action = Action::None;

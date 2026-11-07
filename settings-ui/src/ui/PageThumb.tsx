@@ -4,7 +4,7 @@ import { CSSProperties, ReactNode } from "react";
 
 export type PageKey =
   | "home" | "music" | "calendar" | "weather" | "system" | "toggles" | "tray" | "todo"
-  | "lyrics" | "agent" | "clipboard" | "note" | "focus" | "mirror" | "apps" | "water" | "screentime";
+  | "lyrics" | "agent" | "clipboard" | "note" | "work" | "focus" | "mirror" | "apps" | "water" | "screentime";
 
 const box = (s: CSSProperties): CSSProperties => ({ position: "absolute", ...s });
 const line = (left: number, top: number, width: number, o = 0.35, h = 5): ReactNode => (
@@ -87,6 +87,17 @@ function Body({ page, accent }: { page: PageKey; accent: string }) {
           background: `conic-gradient(${a} 70%, rgba(255,255,255,.1) 0)`,
           WebkitMask: "radial-gradient(circle, transparent 20px, #000 21px)", mask: "radial-gradient(circle, transparent 20px, #000 21px)" })} />
         <b style={box({ left: 0, right: 0, top: 22, textAlign: "center", fontSize: 11, fontWeight: 650, color: "#fff" })}>25:00</b>
+      </>;
+    case "work":  // today's time and goal ring on the left, the day's timeline on the right
+      return <>
+        <i style={box({ left: 8, top: 6, width: 62, height: 52, borderRadius: 8, background: "rgba(255,255,255,.07)" })} />
+        <b style={box({ left: 14, top: 18, fontSize: 13, fontWeight: 700, color: "#fff" })}>3h 2m</b>
+        {line(14, 40, 40, 0.3, 4)}
+        <i style={box({ left: 76, top: 6, width: 76, height: 52, borderRadius: 8, background: "rgba(255,255,255,.07)" })} />
+        <i style={box({ left: 82, top: 16, width: 64, height: 8, borderRadius: 4, background: "rgba(255,255,255,.12)" })} />
+        <i style={box({ left: 90, top: 16, width: 26, height: 8, borderRadius: 4, background: a })} />
+        <i style={box({ left: 120, top: 16, width: 8, height: 8, borderRadius: 4, background: "#30d158" })} />
+        {[0, 1, 2].map((i) => <span key={i}>{line(82, 32 + i * 8, 40 - i * 8, 0.3, 4)}</span>)}
       </>;
     case "screentime":
       return <>

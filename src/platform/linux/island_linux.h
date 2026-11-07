@@ -44,6 +44,7 @@ enum class Action {
     TimerMode, PomoToggle, PomoSkip, PomoReset, PomoAuto, PomoLength, CountToggle, CountAdd, CountReset,
     CountPreset, CountSave, TimerRing, SwToggle, SwLap, SwReset, SwCopy,
     VolumeMute, VolumeSet,  // the System page's volume card
+    WorkStart, WorkPause, WorkResume, WorkBreak, WorkDone, WorkReport, WorkPage,  // Work mode (work_linux.cpp)
     ScreenTimeLimit,        // the Screen Time page's limit: steps through 2 to 12 hours
     ClipFilter, ClipSelect, ClipDelete,  // the Clipboard page's two panels
 };

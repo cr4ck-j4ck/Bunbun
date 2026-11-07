@@ -25,6 +25,7 @@
 #include "../agents/hook_installer.h"  // Bunbun: which agents are connected (studio_module.inc)
 #include "../agents/agent_diff.h"      // Bunbun: the approval card's diff lines, shared with Linux
 #include "../common/water.h"           // Bunbun: the water reminder's rules, shared with Linux
+#include "../common/work.h"            // Bunbun: Work mode's schedule and day log, shared with Linux
 #include "../common/screentime.h"      // Bunbun: Screen Time's bookkeeping (screentime_module.inc)
 #include "../common/edgelight.h"       // Bunbun: what plays the edge light (edgelight_module.inc)
 #include "../updater.h"  // Bunbun: one-click updates from the island's update notice
@@ -371,9 +372,15 @@ namespace GameOverlayLayout {
 
     constexpr float kMinWidth = 140.0f;
 
-    constexpr float Width(bool compact, bool showFps, int metricCount) {
+    // Bunbun: the gaming mascot's square slot on the left, as tall as the cards.
+    constexpr float MascotW(bool compact) { return For(compact).height - For(compact).padY * 2.0f + 6.0f; }
+
+    constexpr float Width(bool compact, bool showFps, int metricCount, bool mascot = false) {
         const Metrics m = For(compact);
         float w = m.padX * 2.0f;
+        if (mascot) {
+            w += MascotW(compact) + m.fpsGap;
+        }
         if (showFps) {
             w += m.fpsW + m.fpsGap;
         }
@@ -800,6 +807,10 @@ struct Settings {
     bool mirrorPage = false;      // Bunbun: camera preview page
     bool waterPage = true;        // Bunbun: Water page (Bunbun.WaterPage)
     bb::water::Settings water;    // Bunbun: the water reminder (Bunbun.Water*)
+    int useCase = 0;              // Bunbun: Bunbun.UseCase (bb::work::UseCase: agents, work, both)
+    bb::work::Schedule workSchedule;  // Bunbun: Work.* (work_module.inc)
+    bool workReminders = true;
+    bool studyPomodoro = true;    // Bunbun: Study.Pomodoro (a Pomodoro focus session counts as study)
     bool soundOpenClose = false;
     int soundVolume = 40;
     std::wstring homeLinks;       // Bunbun: "Name|address; ..." under the Home tiles
@@ -1322,6 +1333,7 @@ struct SharedState {
     std::vector<TodoItem> todos;        // Bunbun: to-dos (todos_module.inc)
     ReminderSnapshot reminder;          // Bunbun: a reminder that's due
     WaterSnapshot water;                // Bunbun: today's water (water_module.inc)
+    WorkSnapshot work;                  // Bunbun: Work mode's day (work_module.inc)
     DownloadSnapshot download;  // Bunbun: browser downloads
     ProgressSnapshot progress;
     SystemSnapshot system;
@@ -1383,6 +1395,7 @@ Settings g_settings;
 // (see WeatherThreadProc), because no path can ever take the two in the
 // opposite order.
 std::mutex g_settingsMutex;
+HANDLE g_workWake = nullptr;  // Bunbun: wakes Work mode's thread (work_module.inc) after a button or a settings change
 
 // Returns a private copy of the current settings. Callers then read from the
 // copy for the rest of the frame, which also means a settings change landing
@@ -2570,6 +2583,17 @@ inline HMONITOR GetAnchorMonitorFor(int targetMonitor) {
 // island, rebuilt the others and re-sized it on every pass between displays.
 std::atomic<HMONITOR> g_separateAnchor{nullptr};
 
+// Bunbun: IslandTestState holds media / privacy state until these times (NowSeconds()).
+std::atomic<double> g_testMediaUntil{0.0};
+std::atomic<double> g_testPrivacyUntil{0.0};
+
+// Bunbun: Separate displays and full screen. Each display's island is its own, so a
+// full-screen app folds only the island on its display: the working island moves to
+// another display, and that display's own island tucks (1) or hides (2), by the same
+// Show / Tuck / Hide rules. Render thread writes; Mirrors reads on the same thread.
+std::atomic<HMONITOR> g_fsOtherMonitor{nullptr};
+std::atomic<int> g_fsOtherAction{0};
+
 inline HMONITOR GetAnchorMonitor() {
     if (g_settings.displaysAll && g_settings.displaysSeparate) {
         HMONITOR m = g_separateAnchor.load(std::memory_order_relaxed);
@@ -2725,6 +2749,33 @@ void LoadSettings() {
     next.autoDpiScale = (Wh_GetIntSetting(L"Appearance.AutoDpiScale") != 0);
     next.matchScreenSize = Wh_GetIntSetting(L"Appearance.MatchScreenSize") != 0;  // Bunbun
     next.bunbunAgents = Wh_GetIntSetting(L"Bunbun.Agents") != 0;
+    // Bunbun: what Bunbun is for. Office work hides every agent piece (the Agents page,
+    // the cards, the header's limits) and stops showing agents at all.
+    next.useCase = static_cast<int>(bb::work::ParseUseCase(GetStringSettingCopy(L"Bunbun.UseCase")));
+    if (!bb::work::AgentsOn(static_cast<bb::work::UseCase>(next.useCase))) next.bunbunAgents = false;
+    {
+        namespace wk = bb::work;
+        wk::Schedule& w = next.workSchedule;
+        const unsigned days = wk::ParseDays(GetStringSettingCopy(L"Work.Days"));
+        w.days = days ? days : 0x1F;
+        w.start = wk::ParseClock(GetStringSettingCopy(L"Work.Start"), 9 * 60);
+        w.end = wk::ParseClock(GetStringSettingCopy(L"Work.End"), 18 * 60);
+        w.lunchStart = wk::ParseClock(GetStringSettingCopy(L"Work.LunchStart"), 13 * 60);
+        w.lunchMinutes = std::clamp(Wh_GetIntSetting(L"Work.LunchMinutes"), 0, 240);
+        w.breakEvery = std::clamp(Wh_GetIntSetting(L"Work.BreakEvery"), 0, 480);
+        w.breakMinutes = std::clamp(Wh_GetIntSetting(L"Work.BreakMinutes"), 1, 120);
+        w.goalMinutes = std::clamp(Wh_GetIntSetting(L"Work.GoalHours"), 0, 24) * 60;
+        w.autoStart = Wh_GetIntSetting(L"Work.AutoStart") != 0;
+        next.workReminders = Wh_GetIntSetting(L"Work.Reminders") != 0;
+        // Study: the timetable replaces the office hours and lunch; its own goal.
+        if (wk::StudyOn(static_cast<wk::UseCase>(next.useCase))) {
+            w.blocks = wk::ParseTimetable(GetStringSettingCopy(L"Study.Timetable"));
+            w.lunchMinutes = 0;
+            w.autoStart = true;
+            w.goalMinutes = std::clamp(Wh_GetIntSetting(L"Study.GoalHours"), 0, 24) * 60;
+            next.studyPomodoro = Wh_GetIntSetting(L"Study.Pomodoro") != 0;
+        }
+    }
     next.bunbunMascot = Wh_GetIntSetting(L"Bunbun.Mascot") != 0;
     next.bunbunAmbientFps = ClampInt(Wh_GetIntSetting(L"Bunbun.AmbientFps"), 15, 240);
     next.bunbunAssistant = Wh_GetIntSetting(L"Bunbun.Assistant") != 0;
@@ -3100,7 +3151,7 @@ void LoadSettings() {
     const int localOpacity = Wh_GetIntValue(L"PillOpacityOverride", -1);
     g_pillOpacityOverride.store(localOpacity);
     g_gameOverlayPinned.store(Wh_GetIntValue(L"GameOverlayPinned", 0) != 0);
-    g_pinnedExpanded.store(Wh_GetIntValue(L"PinnedExpanded", 0) != 0);
+    // Bunbun: the pin is the render thread's after start-up (see below); a reload keeps it.
     next.pillOpacity = Clamp((localOpacity >= 0 ? localOpacity : settingOpacity) / 100.0f,
                              0.35f, 1.0f);
     next.gameOverlay = Wh_GetIntSetting(L"Modules.GameOverlay") != 0;
@@ -3408,8 +3459,16 @@ void LoadSettings() {
     next.micDotColor = next.privacyDotsMicHex;
     next.camDotColor = next.privacyDotsCamHex;
 
-    g_pinnedExpanded.store(false);
-    Wh_SetIntValue(L"PinnedExpanded", 0);
+    // Bunbun: only at start-up (the island always starts closed). Every reload used
+    // to re-read and then clear the pin, so a button on the island that saves a
+    // setting (°C / °F, Auto-start, Home tiles) or any change in the settings app
+    // closed the pinned island under the pointer.
+    static bool s_firstLoad = true;
+    if (s_firstLoad) {
+        s_firstLoad = false;
+        g_pinnedExpanded.store(false);
+        Wh_SetIntValue(L"PinnedExpanded", 0);
+    }
 
     // Compare-then-publish under one lock so the change flags describe exactly
     // the transition we are about to commit. Two LoadSettings() calls can run
@@ -3422,7 +3481,9 @@ void LoadSettings() {
     bool capsLockChanged = false;
     {
         std::lock_guard lock(g_settingsMutex);
-        cityChanged = next.weatherCity != g_settings.weatherCity;
+        // Bunbun: and the unit. Temperatures come in the unit asked for, so °F set in the
+        // settings app showed °F beside Celsius numbers until the next refresh.
+        cityChanged = next.weatherCity != g_settings.weatherCity || next.weatherFahrenheit != g_settings.weatherFahrenheit;
         capsLockChanged = next.capsLock != g_settings.capsLock;
         hotkeySettingChanged =
             next.hideShowHotkeyEnabled != g_settings.hideShowHotkeyEnabled ||
@@ -3439,6 +3500,7 @@ void LoadSettings() {
         g_settings = std::move(next);
     }
     g_layoutDirty = true;
+    if (g_workWake) SetEvent(g_workWake);  // Bunbun: Work mode notices a new setup or schedule at once
     if (cityChanged && g_settingsChangedEvent) {
         SetEvent(g_settingsChangedEvent);
     }
@@ -4170,7 +4232,7 @@ int DisplayIndexOf(HMONITOR monitor) {
 // only a fallback for when that renderer isn't there.
 // Bunbun: draws the island at rest for another display (shape 0 pill, 1 Windows 11,
 // 2 notch; `scale` its size scale). Defined after the Renderer; render thread only.
-bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size, RECT* pill);
+bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size, RECT* pill, bool tucked = false);
 namespace Mirrors {
 
 struct Mirror {
@@ -4263,11 +4325,21 @@ void PointerToIsland(POINT* p) {
 
 // Separate: the display whose island the pointer is on (with a little slack), else null.
 HMONITOR RestIslandUnder(POINT cursor) {
+    const HMONITOR fs = g_fsOtherMonitor.load(std::memory_order_relaxed);
     for (const auto& m : g_list) {
+        if (m.monitor == fs) continue;  // Bunbun: that display is in full screen; its island stays folded
         RECT r = m.shown;
         InflateRect(&r, 10, 10);
         if (m.visible && PtInRect(&r, cursor)) return m.monitor;
     }
+    return nullptr;
+}
+
+// Bunbun: a display with its own island other than `avoid` (Separate: where the
+// working island goes when a full-screen app covers its display).
+HMONITOR OtherDisplay(HMONITOR avoid) {
+    for (const auto& m : g_list)
+        if (m.monitor != avoid) return m.monitor;
     return nullptr;
 }
 
@@ -4549,6 +4621,13 @@ void Present(HDC src, const Settings& s, RECT pill, SIZE stage, BYTE alpha, doub
             if (m.visible) { ShowWindow(m.hwnd, SW_HIDE); m.visible = false; }
             continue;
         }
+        // Bunbun: a full-screen app on this display: its island hides, or folds to a line.
+        const int fsHere = separate && m.monitor == g_fsOtherMonitor.load(std::memory_order_relaxed)
+                               ? g_fsOtherAction.load(std::memory_order_relaxed) : 0;
+        if (fsHere == 2) {
+            if (m.visible) { ShowWindow(m.hwnd, SW_HIDE); m.visible = false; }
+            continue;
+        }
         MONITORINFO mi{sizeof mi};
         GetMonitorInfoW(m.monitor, &mi);
         const RECT& work = mi.rcWork;
@@ -4568,7 +4647,7 @@ void Present(HDC src, const Settings& s, RECT pill, SIZE stage, BYTE alpha, doub
         SIZE liveSize{};
         RECT livePill{};
         const bool live = separate && RenderRestIsland(m.shape >= 0 ? m.shape : mainShape, mirrorScale, m.origin,
-                                                       &liveDc, &liveSize, &livePill);
+                                                       &liveDc, &liveSize, &livePill, fsHere == 1);
         if (live) {
             from = liveDc;
             fromRect = RECT{0, 0, liveSize.cx, liveSize.cy};
@@ -6211,7 +6290,8 @@ DWORD WINAPI MediaThreadProc(void*) {
                 next.sourceIconGeneration = g_state.media.sourceIconGeneration;
             }
 
-            g_state.media = std::move(next);
+            if (NowSeconds() >= g_testMediaUntil.load(std::memory_order_relaxed))  // Bunbun: a test's made-up track
+                g_state.media = std::move(next);
             if (gotSources) {
                 g_state.mediaSources = std::move(newSources);
             }
@@ -7731,6 +7811,7 @@ void FormatBitRate(wchar_t (&buf)[N], float mbps, bool fresh) {
 #include "modules/todos_module.inc"
 // Bunbun: the water reminder (it shows the reminder pill above).
 #include "modules/water_module.inc"
+#include "modules/work_module.inc"  // Bunbun: Work mode (Bunbun.UseCase = work or both)
 
 // ---- Endpoint volume notifications ----
 // Event-driven rather than polled: a 1s poll turned a held volume key into
@@ -9646,6 +9727,71 @@ QuickLookup::Result RunBun(const std::wstring& question) {
             r.body = L"Timer stopped.";
             r.command = true;
             break;
+        // Bunbun: water, as the Water page's + glass (the mascot drinks along).
+        case as::Action::WaterAdd: {
+            int bottle = 0;
+            if (in.number == as::kWaterBottle) {
+                std::lock_guard lock(g_stateMutex);
+                bottle = g_state.water.bottleMl > 0 ? g_state.water.bottleMl : 750;
+            }
+            const int ml = bottle ? bottle : in.number > 0 ? in.number : 0;
+            const int count = !bottle && in.number < 0 ? -in.number : 1;
+            WaterDrinkAmount(ml, count);
+            WaterSnapshot w;
+            {
+                std::lock_guard lock(g_stateMutex);
+                w = g_state.water;
+            }
+            const int added = (ml > 0 ? ml : w.glassMl) * count;
+            auto liters = [](int v) {
+                wchar_t b[32];
+                if (v >= 1000) swprintf(b, 32, L"%.1f L", v / 1000.0);
+                else swprintf(b, 32, L"%d ml", v);
+                return std::wstring(b);
+            };
+            r.body = L"Logged " + liters(added) + L". " + liters(w.takenMl) + L" of " + liters(w.goalMl) + L" today" +
+                     (w.goalMl > 0 && w.takenMl >= w.goalMl ? L", goal reached! 🎉" : L".");
+            r.command = true;
+            SetBunUndo([ml, count]() { WaterTakeBack(ml, count); return std::wstring(L"Took that water back."); });
+            break;
+        }
+        case as::Action::WaterUndo:
+            WaterUndo();
+            r.body = L"Took the last glass back.";
+            r.command = true;
+            break;
+        // Bunbun: Work / Study mode's buttons.
+        case as::Action::WorkStart:
+        case as::Action::WorkPause:
+        case as::Action::WorkResume:
+        case as::Action::WorkBreak:
+        case as::Action::WorkDone: {
+            bool on = false, study = false;
+            {
+                std::lock_guard lock(g_stateMutex);
+                on = g_state.work.on;
+                study = g_state.work.study;
+            }
+            if (!on) {
+                r.body = L"Work mode is off. Pick Office work, Both or Study in Settings, Mode.";
+                break;
+            }
+            const std::wstring what = study ? L"Study" : L"Work";
+            switch (in.action) {
+                case as::Action::WorkStart: WorkCommand(WorkButton::Start); r.body = what + L" started. Have a good one!"; break;
+                case as::Action::WorkPause: WorkCommand(WorkButton::Pause); r.body = what + L" paused. Say “back to work” to go on."; break;
+                case as::Action::WorkResume: WorkCommand(WorkButton::Resume); r.body = L"Back at it."; break;
+                case as::Action::WorkBreak: {
+                    WorkCommand(WorkButton::Break);
+                    swprintf(buf, 256, L"Break time: %d min. Stretch, drink some water.", std::clamp(Wh_GetIntSetting(L"Work.BreakMinutes"), 1, 120));
+                    r.body = buf;
+                    break;
+                }
+                default: WorkCommand(WorkButton::Done); r.body = L"Done for today. Nice work!"; break;
+            }
+            r.command = true;
+            break;
+        }
         case as::Action::MascotDndOn:
         case as::Action::MascotDndOff: {
             // Bunbun: written to settings.ini like the settings app does; "off" removes
@@ -9821,6 +9967,32 @@ QuickLookup::Result RunBun(const std::wstring& question) {
                              s.system.diskFreePercent);
                     r.body = buf;
                     break;
+                case as::Info::Water: {  // Bunbun
+                    const WaterSnapshot& w = s.water;
+                    const int pct = w.goalMl > 0 ? std::min(100, w.takenMl * 100 / w.goalMl) : 0;
+                    swprintf(buf, 256, L"%d ml of %.1f L today (%d%%), %d glass%ls.", w.takenMl, w.goalMl / 1000.0, pct,
+                             w.glasses, w.glasses == 1 ? L"" : L"es");
+                    r.body = buf;
+                    if (w.nextMinute >= 0) {
+                        swprintf(buf, 256, L" Next reminder at %02d:%02d.", w.nextMinute / 60, w.nextMinute % 60);
+                        r.body += buf;
+                    }
+                    break;
+                }
+                case as::Info::Work: {  // Bunbun
+                    const WorkSnapshot& w = s.work;
+                    if (!w.on) { r.body = L"Work mode is off. Pick Office work, Both or Study in Settings, Mode."; break; }
+                    r.body = std::wstring(L"You’ve ") + (w.study ? L"studied " : L"worked ") + bb::work::Duration(w.Worked());
+                    if (w.goal > 0) r.body += L" of " + bb::work::Duration(w.goal);
+                    r.body += L" today";
+                    const int away = w.seconds[static_cast<int>(bb::work::Kind::Away)] + w.seconds[static_cast<int>(bb::work::Kind::Asleep)];
+                    if (away >= 60) r.body += L", away " + bb::work::Duration(away);
+                    r.body += L". ";
+                    r.body += w.study ? bb::work::StudyLabel(static_cast<bb::work::Phase>(w.phase))
+                                      : bb::work::PhaseLabel(static_cast<bb::work::Phase>(w.phase));
+                    r.body += L".";
+                    break;
+                }
                 default:
                     r.body = as::HelpText();
             }
@@ -10439,6 +10611,28 @@ struct CollapsedLyricLine {
     float builtFor = 0.0f; // Bunbun: the slot width a lyric line was fitted to
 };
 
+// Bunbun: the accent the island shows now (album art, custom or system), in
+// accent.txt next to settings.ini, so the settings app's colours match the island's
+// (its "Dynamic" accent comes from the album art, which only the island sees).
+// Written only when it changes: a track change, not every frame.
+void PublishAccent(const D2D1_COLOR_F& c) {
+    static unsigned last = 0xFFFFFFFFu;
+    const auto ch = [](float v) { return static_cast<unsigned>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+    const unsigned rgb = (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b);
+    if (rgb == last) return;
+    last = rgb;
+    std::wstring path = bb::SettingsPath();
+    path.erase(path.find_last_of(L"\\/"));
+    path += L"\\accent.txt";
+    char hex[8];
+    snprintf(hex, sizeof hex, "#%06X", rgb);
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    WriteFile(f, hex, 7, &wrote, nullptr);
+    CloseHandle(f);
+}
+
 class Renderer {
    public:
     bool Initialize(HWND hwnd) {
@@ -10694,6 +10888,7 @@ class Renderer {
     // (offscreen_). `rest` is in pixels at settings.sizeScale; `bunSlot` the mascot's
     // slot. Returns the bitmap and where the pill is in it.
     bool offscreen_ = false;
+    bool restTuck_ = false;  // Bunbun: this display's island is folded to a line (RenderRestIsland)
     bool RenderOffscreen(const SharedState& state, const Settings& settings, const Activity& rest, float bunSlot,
                          double now, HDC* dc, SIZE* size, RECT* pill) {
         offscreen_ = true;
@@ -11289,8 +11484,10 @@ class Renderer {
         if (settings.accentMode == AccentMode::System) {
             targetAccent = GetSystemAccentColor();
         } else if (settings.accentMode == AccentMode::Auto && state.media.art) {
-            // Already contrast-corrected when the art was decoded.
-            targetAccent = state.media.art->sampledAccent;
+            // Contrast-corrected when the art was decoded, against the theme of that
+            // moment. Bunbun: again here, so a theme changed since (a light one, say)
+            // doesn't keep an accent tuned for the old background.
+            targetAccent = EnsureContrastAgainstBackground(state.media.art->sampledAccent, settings.pillBgColor);
         } else {
             // A custom or system accent was never checked against the island's
             // own background. That did not matter while every theme was dark,
@@ -11299,6 +11496,7 @@ class Renderer {
             // value is stable rather than re-derived every frame.
             targetAccent = EnsureContrastAgainstBackground(targetAccent, settings.pillBgColor);
         }
+        if (!offscreen_) PublishAccent(targetAccent);  // Bunbun: the settings app wears it too
 
         // Smooth accent transition: exponential lerp toward target, ~300ms half-life.
         // On the very first frame (lastAccentTime_ < 0) snap immediately so there's
@@ -11424,7 +11622,8 @@ class Renderer {
 
     // Returns a brush that is unique for the rest of this frame. Colour and opacity are
     // reset, so a previous user's SetOpacity() can never leak into the next one.
-    ID2D1SolidColorBrush* AcquireBrush(const D2D1_COLOR_F& color) {
+    ID2D1SolidColorBrush* AcquireBrush(const D2D1_COLOR_F& colorIn) {
+        const D2D1_COLOR_F color = studioInk_ ? StudioInk(colorIn) : colorIn;  // Bunbun: Studio on a light island
         if (brushPoolUsed_ >= brushPool_.size()) {
             ComPtr<ID2D1SolidColorBrush> b;
             if (FAILED(target_->CreateSolidColorBrush(color, &b)) || !b) {
@@ -11631,7 +11830,8 @@ class Renderer {
         rect = D2D1::RectF(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
 
         // Bunbun: tucked away, the island is only a thin status line.
-        if (ownSurface && g_tucked.load(std::memory_order_relaxed)) {
+        // Offscreen (another display's island) it's that island's own tuck.
+        if (ownSurface && (offscreen_ ? restTuck_ : g_tucked.load(std::memory_order_relaxed))) {
             g_studioHits.clear();
             DrawTuckLine(state, rect, now);
             return;
@@ -14558,6 +14758,17 @@ class Renderer {
         const float cardBottom = rect.bottom - m.padY;
         float cursorX = rect.left + m.padX;
 
+        // Bunbun: the mascot on the left, controller in hand, eyes on the game.
+        if (g_settings.bunbunMascot && g_settings.bunbunMascotOnIsland) {
+            const float side = GameOverlayLayout::MascotW(compact);
+            const D2D1_POINT_2F mid = D2D1::Point2F(cursorX + side * 0.5f, (cardTop + cardBottom) * 0.5f);
+            D2D1_POINT_2F c{};
+            float size = 0.0f;
+            bb::mascot::FitToBox(D2D1::RectF(mid.x - side * 0.5f, mid.y - side * 0.5f, mid.x + side * 0.5f, mid.y + side * 0.5f), &c, &size);
+            bb::mascot::Draw(target_.Get(), c, size, bb::mascot::Mood::Gaming, NowSeconds(), 0.0, MascotLook(c));
+            cursorX += side + m.fpsGap;  // its frames: a 12 fps bucket in the render loop
+        }
+
         // ── FPS, given hero treatment ────────────────────────────────────────
         // Frame rate is the number a player actually watches, so it gets a wider
         // card and a larger figure than the percentages beside it. It has no
@@ -15581,11 +15792,15 @@ class Renderer {
                     double moodSince = 0.0;  // Bunbun: a logged glass plays here too
                     bb::mascot::Mood base = MediaMascotMood(state.media, settings);
                     // Bunbun: an agent at work shows here too (with the agent pill off, this
-                    // pill is all there is while music plays).
+                    // pill is all there is while music plays); else Work mode; and away or
+                    // asleep over all of them.
                     if (settings.bunbunAgents && state.agent.phase != bb::AgentPhase::None) {
                         base = AgentMood(state.agent.phase);
                         g_layoutDirty = true;
+                    } else if (WorkMood(state.work, &base)) {
+                        g_layoutDirty = true;
                     }
+                    AwayMood(settings, state, &base);
                     const bb::mascot::Mood pillMood = WithWaterMood(base, now, &moodSince);
                     if (pillMood == base && base != MediaMascotMood(state.media, settings)) moodSince = state.agent.phaseSince;
                     bb::mascot::Draw(target_.Get(), c, size * 1.05f, pillMood, now, moodSince, MascotLook(c));
@@ -18849,7 +19064,9 @@ class Renderer {
         // Bunbun: battery moods. A cheer when the battery fills up; drowsy below 15%.
         const bool cheer = settings.batteryMoods && now - g_batteryCheerAt.load(std::memory_order_relaxed) < 2.5;
         const bool drowsy = settings.batteryMoods && state.battery.hasBattery && !state.battery.charging && state.battery.percent < 15;
-        if (cheer) s_moodSince = std::min(s_moodSince, g_batteryCheerAt.load(std::memory_order_relaxed));
+        // Bunbun: the cheer starts the mood (max, not min): with min an idle mascot's
+        // mood had begun long ago, so the 2 s celebration (Celebrate / Hop) never played.
+        if (cheer) s_moodSince = std::max(s_moodSince, g_batteryCheerAt.load(std::memory_order_relaxed));
         // Bunbun: seconds since the last keyboard or mouse input anywhere (AFK).
         LASTINPUTINFO lii{sizeof(lii)};
         const double awaySeconds = GetLastInputInfo(&lii) ? (GetTickCount() - lii.dwTime) / 1000.0 : 0.0;
@@ -18882,15 +19099,43 @@ class Renderer {
 
         // Bunbun: a coding agent at work shows on the mascot even with the agent pill
         // off (Bunbun.AgentPill): working, thinking, waiting for you, done or failed.
+        bool agentShown = false;
         {
             static bb::AgentPhase s_agentPhase = bb::AgentPhase::None;
             const bb::AgentPhase phase = settings.bunbunAgents ? state.agent.phase : bb::AgentPhase::None;
             if (phase != bb::AgentPhase::None) {
                 if (phase != s_agentPhase) s_moodSince = now;
                 mood = AgentMood(phase);
+                agentShown = true;
                 g_layoutDirty = true;  // its animation keeps going
             }
             s_agentPhase = phase;
+        }
+        // Bunbun: Work mode (working at the laptop, lunch) when no agent is on show,
+        // over music and the idle moods.
+        // Not over Do Not Disturb you chose (Mascot DND, Focus, Windows' DND): turning it
+        // on during work hours did nothing.
+        if (!agentShown && mood != bb::mascot::Mood::Dnd) {
+            static bb::mascot::Mood s_work = bb::mascot::Mood::Idle;
+            bb::mascot::Mood work = mood;
+            if (WorkMood(state.work, &work)) {
+                if (work != s_work) s_moodSince = now;
+                mood = work;
+                g_layoutDirty = true;
+            }
+            s_work = work;
+        }
+        // Bunbun: away or asleep wins in every state (music, agents at work, Work mode);
+        // only an agent waiting for your answer still shows.
+        {
+            static bool s_away = false;
+            bb::mascot::Mood away = mood;
+            const bool isAway = AwayMood(settings, state, &away);
+            if (isAway) {
+                if (!s_away) s_moodSince = now;
+                mood = away;
+            }
+            s_away = isAway;
         }
         // Bunbun: a glass of water logged: Bun drinks it, and cheers the one that
         // reaches the day's goal. Pokes below still win.
@@ -20874,8 +21119,9 @@ Activity ActivityForKind(IslandKind kind, const Settings& settings, const Shared
 // second renderer: the island's last resting activity, in that display's shape and
 // size. Shape and size go through g_settings too, because parts of the drawing read
 // them there; they are put back at once (unless a settings reload replaced them).
-bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size, RECT* pill) {
+bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size, RECT* pill, bool tucked) {
     if (!g_restRenderer || !g_restState || !g_restLook.valid) return false;
+    tucked = tucked || g_tucked.load(std::memory_order_relaxed);  // Bunbun: Tuck away folds every display
     Settings s = GetSettingsCopy();
     const bool notch = shape == 2, w11 = shape == 1;
     s.notchStyle = notch;
@@ -20884,6 +21130,12 @@ bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size,
     Activity rest = ActivityForKind(static_cast<IslandKind>(g_restLook.kind), s, *g_restState);
     rest.width = (g_restLook.width + (notch ? kNotchExtraContent : 0.0f)) * scale;
     rest.height = g_restLook.height * scale;
+    float bunSlot = g_restLook.bunSlot * scale;
+    if (tucked) {  // Bunbun: the same line the working island folds to
+        rest.width = 60.0f * scale;
+        rest.height = 6.0f * scale;
+        bunSlot = 0.0f;
+    }
     bool wasNotch, wasW11;
     float wasScale;
     {
@@ -20896,7 +21148,8 @@ bool RenderRestIsland(int shape, float scale, POINT origin, HDC* dc, SIZE* size,
         g_settings.sizeScale = scale;
     }
     g_restRenderer->screenOrigin_ = origin;  // for the eyes
-    const bool ok = g_restRenderer->RenderOffscreen(*g_restState, s, rest, g_restLook.bunSlot * scale, NowSeconds(),
+    g_restRenderer->restTuck_ = tucked;
+    const bool ok = g_restRenderer->RenderOffscreen(*g_restState, s, rest, bunSlot, NowSeconds(),
                                                     dc, size, pill);
     {
         std::lock_guard lock(g_settingsMutex);
@@ -23469,8 +23722,11 @@ DWORD WINAPI RenderThreadProc(void*) {
         // are not in the ring: they always show at once. A short while after the
         // cursor leaves, the ring snaps back to its first, most important entry.
         auto inRing = [&snapshot](IslandKind k) {
+            // Bunbun: a running download and a meeting about to start too, so the wheel
+            // (and opening the island) can reach the pages past them.
             return k == IslandKind::Media || k == IslandKind::Idle || k == IslandKind::Timer ||
-                   k == IslandKind::Progress || (k == IslandKind::Agent && !AgentLayout::IsCard(snapshot.agent.phase));
+                   k == IslandKind::Progress || k == IslandKind::Download || k == IslandKind::Meeting ||
+                   (k == IslandKind::Agent && !AgentLayout::IsCard(snapshot.agent.phase));
         };
         std::vector<IslandKind> ringActivities;
         IslandKind ringHost = IslandKind::Idle;
@@ -23536,9 +23792,11 @@ DWORD WINAPI RenderThreadProc(void*) {
         std::optional<Activity> secondary;
         // Secondary is only shown if an agent approval/card requires immediate stand-alone prompt,
         // or if not scrolling between disparate active modules.
-        if (kinds.size() >= 2 && !g_settings.bunbunAgents) {
-            secondary = ActivityForKind(kinds[1], g_settings, snapshot);
-        }
+        // Bunbun: never. With coding agents off, a second activity sat beside the first
+        // (Do Not Disturb beside a notification, the timer beside the mascot) and widened
+        // the notch; the owner found it cluttered. One at a time: the others wait their turn
+        // (alerts expire, live activities are on the scroll ring), as with agents on.
+        (void)kinds;
 
         const bool pinned = g_pinnedExpanded.load();
 
@@ -23703,12 +23961,20 @@ DWORD WINAPI RenderThreadProc(void*) {
         // Bunbun: while a timer or stopwatch runs its pill comes first, and opening the
         // island only made that pill taller: no way to the pages. In Studio it opens on the
         // Timers page instead (the ring moves on to it; the pill is back once you leave).
-        if (g_settings.studioLayout && primary.kind == IslandKind::Timer && !secondary && (isHoverExpanded || pinned)) {
+        // Bunbun: the same for a progress bar or a meeting about to start (they open on the
+        // page you were on), with music beside the pill too, and for a running download
+        // when pinned (hovering it is left alone: a click on it opens the file).
+        const bool passivePill = primary.kind == IslandKind::Timer || primary.kind == IslandKind::Progress ||
+                                 primary.kind == IslandKind::Meeting || (primary.kind == IslandKind::Download && pinned);
+        if (g_settings.studioLayout && passivePill && (isHoverExpanded || pinned)) {
             // In the page list of the view it opens in (music adds pages to it).
             const std::vector<int> ids = DashboardTabIds(ringHost == IslandKind::Media ? 0 : 1, g_settings);
-            const auto it = std::find(ids.begin(), ids.end(), kTabFocus);
-            if (it != ids.end()) {
-                const int tab = static_cast<int>(it - ids.begin());
+            int tab = std::clamp(g_idleTab.load(), 0, std::max(0, static_cast<int>(ids.size()) - 1));
+            if (primary.kind == IslandKind::Timer) {
+                const auto it = std::find(ids.begin(), ids.end(), kTabFocus);
+                if (it != ids.end()) tab = static_cast<int>(it - ids.begin());
+            }
+            if (!ids.empty()) {
                 g_idleTab = tab;
                 g_activityIndex.store(static_cast<int>(ringActivities.size()) + tab, std::memory_order_relaxed);
                 needsRender = true;
@@ -23751,7 +24017,27 @@ DWORD WINAPI RenderThreadProc(void*) {
         static double lastFullscreenCheck = -1.0;  // -1.0 guarantees the very first iteration checks
         if (now - lastFullscreenCheck > 0.5) {
             // Bunbun: per app (the Show / Tuck / Hide lists) on top of In full screen.
-            const int fsAction = FullscreenWatched(g_settings) ? FullscreenAction(hwnd, g_settings) : 0;
+            int fsAction = FullscreenWatched(g_settings) ? FullscreenAction(hwnd, g_settings) : 0;
+            // Bunbun: Separate displays. Only the full-screen app's display folds. If that is
+            // the working island's display, the island moves to another one; that display's
+            // own island then does the tucking or hiding (Mirrors::Present).
+            HMONITOR fsOther = nullptr;
+            if (fsAction != 0 && g_settings.displaysAll && g_settings.displaysSeparate) {
+                const HMONITOR fsMon = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
+                HMONITOR anchor = GetAnchorMonitor();
+                if (fsMon == anchor && !pinned && !isHoverExpanded) {
+                    if (const HMONITOR other = Mirrors::OtherDisplay(fsMon)) {
+                        g_separateAnchor.store(other, std::memory_order_relaxed);
+                        anchor = other;
+                    }
+                }
+                if (fsMon != anchor) {
+                    fsOther = fsMon;
+                    g_fsOtherAction.store(fsAction, std::memory_order_relaxed);
+                    fsAction = 0;  // the working island isn't on that display
+                }
+            }
+            g_fsOtherMonitor.store(fsOther, std::memory_order_relaxed);
             const bool newFullscreen = fsAction != 0;
             s_fullscreenTuckNow = fsAction == 1;
             if (isFullscreen && !newFullscreen) {
@@ -23866,7 +24152,9 @@ DWORD WINAPI RenderThreadProc(void*) {
 
             const bool compact = g_settings.gameOverlayCompact;
             primary.width = GameOverlayLayout::Width(compact, g_settings.gameOverlayShowFps,
-                                                     metricCount) * g_settings.sizeScale;
+                                                     metricCount,
+                                                     g_settings.bunbunMascot && g_settings.bunbunMascotOnIsland) *  // Bunbun
+                            g_settings.sizeScale;
             primary.height = GameOverlayLayout::For(compact).height * g_settings.sizeScale;
         }
         if (primary.kind == IslandKind::Media) {
@@ -24005,7 +24293,10 @@ DWORD WINAPI RenderThreadProc(void*) {
         // On the music pill, the mascot alternates with the cover art in a cycle.
         g_bunSlotWidth = (collapsedLook && !secondary && g_settings.bunbunMascot && g_settings.bunbunMascotOnIsland &&
                           !g_tucked.load(std::memory_order_relaxed) &&
-                          primary.kind == IslandKind::Idle)
+                          primary.kind == IslandKind::Idle &&
+                          // Bunbun: not over the game overlay's chips (compact is short enough to
+                          // count as collapsed, and Bun was drawn on top of the RAM chip).
+                          !(GameOverlayShown(g_settings.gameOverlay) && !isFullscreen))
                              ? kBunSlotContent * g_settings.sizeScale
                              : 0.0f;
         if (g_bunSlotWidth > 0.0f) {
@@ -24299,6 +24590,19 @@ DWORD WINAPI RenderThreadProc(void*) {
             const long long frame = static_cast<long long>(now * bucketFps);
             if (frame != s_agentFrame) {
                 s_agentFrame = frame;
+                needsRender = true;
+            }
+        }
+
+        // Bunbun: the gaming mascot in game mode moves at 12 fps (6 on battery): enough for
+        // the buttons and the lean, and the game keeps the GPU. (A redraw every frame ran
+        // the island at the full refresh rate.)
+        if (!isFullscreen && primary.kind == IslandKind::Idle && GameOverlayShown(g_settings.gameOverlay) &&
+            g_settings.bunbunMascot && g_settings.bunbunMascotOnIsland && !isHidden) {
+            static long long s_gameFrame = -1;
+            const long long frame = static_cast<long long>(now * (g_powerSaving ? 6.0 : 12.0));
+            if (frame != s_gameFrame) {
+                s_gameFrame = frame;
                 needsRender = true;
             }
         }
@@ -24681,6 +24985,8 @@ bool StartThreads() {
     g_todoThread = CreateThread(nullptr, 0, TodoThreadProc, nullptr, 0, nullptr);
     g_waterWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);                               // Bunbun
     g_waterThread = CreateThread(nullptr, 0, WaterThreadProc, nullptr, 0, nullptr);           // Bunbun
+    g_workWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);                                // Bunbun: Work mode
+    g_workThread = CreateThread(nullptr, 0, WorkThreadProc, nullptr, 0, nullptr);
     SubscribeDndNotification();
 
     return true;
@@ -24733,6 +25039,11 @@ void StopThreads() {
     if (g_waterWake) {
         CloseHandle(g_waterWake);
         g_waterWake = nullptr;
+    }
+    g_workThread = nullptr;  // Bunbun: Work mode
+    if (g_workWake) {
+        CloseHandle(g_workWake);
+        g_workWake = nullptr;
     }
     if (g_connectivityWake) {
         CloseHandle(g_connectivityWake);
@@ -24934,7 +25245,7 @@ bool IslandSnapshotPng(std::string* png, RECT* screen, RECT* monitor, RECT* work
 // thread so neither the pipe nor the render loop waits.
 namespace {
 const wchar_t* const kPageKeys[] = {L"home", L"music", L"calendar", L"weather", L"system", L"toggles", L"tray", L"todo",
-                                    L"lyrics", L"agent", L"clipboard", L"note", L"focus", L"apps", L"mirror", L"water", L"screentime"};
+                                    L"lyrics", L"agent", L"clipboard", L"note", L"focus", L"apps", L"mirror", L"water", L"screentime", L"work"};
 
 std::wstring PagePicturesDir() {
     std::wstring dir = bb::StatePath();
@@ -24985,6 +25296,107 @@ std::string IslandTestHits() {
         SendMessageTimeoutW(hwnd, WM_APP_TEST_HITS, 0, reinterpret_cast<LPARAM>(&out), SMTO_ABORTIFHUNG, 2000, &r);
     }
     return out;
+}
+
+bool IslandTestState(const std::string& kind, const std::wstring& a, const std::wstring& b, int n, int seconds) {
+    const double now = NowSeconds();
+    const double until = now + std::max(1, seconds);
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (kind == "clear") {  // every made-up event goes; the pollers write the real state again
+            g_testMediaUntil = 0.0;
+            g_testPrivacyUntil = 0.0;
+            if (g_state.media.sourceName == L"Test") g_state.media = MediaSnapshot{};
+            if (g_state.lyrics.matchedArtist == L"Test Artist") g_state.lyrics = LyricsSnapshot{};
+            g_state.download = DownloadSnapshot{};
+            g_state.progress = ProgressSnapshot{};
+            g_state.volume.active = g_state.brightness.active = g_state.capsLock.active = false;
+            g_state.notification.active = g_state.privacyAlert.active = g_state.bluetoothDevice.active = false;
+            g_state.battery.active = false;
+        } else if (kind == "media") {
+            g_testMediaUntil = until;
+            MediaSnapshot m;
+            m.available = true;
+            m.playing = n != 0;
+            m.title = a.empty() ? L"Test Track" : a;
+            m.artist = b.empty() ? L"Test Artist" : b;
+            m.albumTitle = L"Test Album";
+            m.sourceName = L"Test";
+            m.endTicks = 2400000000LL;  // 4 min, playing from 1:00
+            m.positionTicks = 600000000LL;
+            m.lastUpdatedTicks = static_cast<int64_t>(GetTickCount64());
+            m.titleChangedAt = now;
+            g_state.media = std::move(m);
+            std::vector<LyricsLine> lines;
+            for (int i = 0; i < 12; ++i) lines.push_back({i * 5000LL + 50000, L"Test lyric line " + std::to_wstring(i + 1)});
+            LyricsSnapshot ly;
+            ly.hasData = true;
+            ly.synced = true;
+            ly.matchedTitle = g_state.media.title;
+            ly.matchedArtist = g_state.media.artist;
+            ly.lines = LyricsLines(std::move(lines));
+            g_state.lyrics = std::move(ly);
+        } else if (kind == "cheer") {  // the mascot's Happy cheer alone (Battery moods), no pill
+            g_batteryCheerAt.store(now, std::memory_order_relaxed);
+        } else if (kind == "volume") {
+            g_state.volume.active = true;
+            g_state.volume.percent = n;
+            g_state.volume.muted = n == 0;
+            g_state.volume.deviceName = L"Test Speakers";
+            g_state.volume.expiresAt = until;
+        } else if (kind == "brightness") {
+            g_state.brightness = {true, n, until};
+        } else if (kind == "caps") {
+            g_state.capsLock.active = true;
+            g_state.capsLock.capsOn = n != 0;
+            g_state.capsLock.isNumEvent = false;
+            g_state.capsLock.expiresAt = until;
+        } else if (kind == "battery") {
+            g_state.battery.active = true;
+            g_state.battery.low = n <= 20;
+            g_state.battery.percent = n;
+            g_state.battery.hasBattery = true;
+            g_state.battery.full = n >= 100;
+            g_state.battery.expiresAt = until;
+            if (n >= 100) g_batteryCheerAt.store(now, std::memory_order_relaxed);  // the "full" cheer
+        } else if (kind == "notification") {
+            g_state.notification.active = true;
+            g_state.notification.app = L"Test";
+            g_state.notification.title = a.empty() ? L"Test notification" : a;
+            g_state.notification.body = b.empty() ? L"A message for the test" : b;
+            g_state.notification.icon = {};
+            g_state.notification.shownAt = now;
+            g_state.notification.expiresAt = until;
+        } else if (kind == "progress") {
+            g_state.progress = {n >= 0, std::max(0, n)};
+        } else if (kind == "privacy") {
+            g_state.privacyAlert.active = true;
+            g_state.privacyAlert.text = a.empty() ? L"Test is using your microphone" : a;
+            g_state.privacyAlert.kind = 0;
+            g_state.privacyAlert.expiresAt = until;
+        } else if (kind == "mic" || kind == "camera") {
+            g_testPrivacyUntil = until;
+            (kind == "mic" ? g_state.system.micActive : g_state.system.cameraActive) = n != 0;
+        } else if (kind == "download") {
+            g_state.download.active = true;
+            g_state.download.finished = n < 0;
+            g_state.download.name = a.empty() ? L"test-file.zip" : a;
+            g_state.download.bytes = static_cast<ULONG64>(std::max(0, n)) * 1024ULL * 1024ULL;
+            g_state.download.bytesPerSecond = 2.5 * 1024 * 1024;
+            g_state.download.expiresAt = until;
+        } else if (kind == "bluetooth") {
+            g_state.bluetoothDevice.active = true;
+            g_state.bluetoothDevice.connected = true;
+            g_state.bluetoothDevice.deviceName = a.empty() ? L"Test Buds" : a;
+            g_state.bluetoothDevice.batteryPercent = n;
+            g_state.bluetoothDevice.expiresAt = until;
+        } else {
+            return false;
+        }
+    }
+    g_layoutDirty = true;
+    if (g_hwnd) PostMessageW(g_hwnd, WM_APP_NEW_EVENT, 0, 0);
+    return true;
 }
 
 bool IslandTestClick(int x, int y) {

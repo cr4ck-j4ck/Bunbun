@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Bell, Bot, Brush, Home, LayoutGrid, LayoutPanelTop, ListChecks, Monitor, Music2, NotebookPen, Search, Settings2, Smile, Sparkles, Wrench } from "lucide-react";
+import { Bell, Bot, Briefcase, Brush, Home, LayoutGrid, LayoutPanelTop, ListChecks, Monitor, Music2, NotebookPen, Search, Settings2, Smile, Sparkles, Wrench } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 import { inHost } from "./bridge";
 import { useIsLinux } from "./platform";
@@ -16,12 +16,15 @@ import { Assistant } from "./pages/Assistant";
 import { Todos } from "./pages/Todos";
 import { Notes } from "./pages/Notes";
 import { General, SearchResults } from "./pages/General";
+import { modeNav, UseCaseWelcome, Work } from "./pages/Work";
 
 // The sidebar, in groups: the island itself, its features (one page per area),
 // Bun and the agents, your own lists, then the app.
 // Each page has its own tile colour in the sidebar, so the list reads at a glance.
 const PAGES: { id: string; label: string; icon: ReactNode; tint: string; group?: string }[] = [
   { id: "overview", label: "Overview", icon: <Home size={15} strokeWidth={2.2} />, tint: "#636366" },
+  // Named after your mode (Work day, Study, Mode): see modeNav in pages/Work.tsx.
+  { id: "work", label: "Mode", icon: <Briefcase size={15} strokeWidth={2.2} />, tint: "#0a84ff" },
   { id: "pages", label: "Island pages", icon: <LayoutPanelTop size={15} strokeWidth={2.2} />, tint: "#0a84ff", group: "Island" },
   { id: "appearance", label: "Appearance", icon: <Brush size={15} strokeWidth={2.2} />, tint: "#bf5af2" },
   { id: "displays", label: "Position & motion", icon: <Monitor size={15} strokeWidth={2.2} />, tint: "#32ade6" },
@@ -54,10 +57,17 @@ function Brand() {
 export default function App() {
   const store = useSettingsStore();
   useAppTheme(store);
-  const [page, setPage] = useState(() => (PAGES.some((p) => `#${p.id}` === location.hash) ? location.hash.slice(1) : "overview"));
+  // "#work-report" (the island's Report button) is the Work page with the report open.
+  const [report, setReport] = useState(() => location.hash === "#work-report");
+  const [page, setPage] = useState(() => location.hash === "#work-report" ? "work"
+    : PAGES.some((p) => `#${p.id}` === location.hash) ? location.hash.slice(1) : "overview");
   // The island opens a page by its hash (bunbun-settings --page notes), also while the window is already open.
   useEffect(() => {
-    const onHash = () => { const id = location.hash.slice(1); if (PAGES.some((p) => p.id === id)) setPage(id); };
+    const onHash = () => {
+      const id = location.hash.slice(1);
+      if (id === "work-report") { setPage("work"); setReport(true); return; }
+      if (PAGES.some((p) => p.id === id)) setPage(id);
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -79,10 +89,12 @@ export default function App() {
   else if (page === "notes") content = <Notes />;
   else if (page === "assistant") content = <Assistant />;
   else if (page === "general") content = <General />;
+  else if (page === "work") content = <Work openReport={report} />;
   else content = <Overview go={setPage} />;
 
   return (
     <StoreContext.Provider value={store}>
+      <UseCaseWelcome />
       <div className="shell">
         <aside className="sidebar">
           <Brand />
@@ -91,7 +103,11 @@ export default function App() {
             <input placeholder="Search settings" value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
           <nav className="nav">
-            {PAGES.map((p) => {
+            {PAGES.map((p0) => {
+              // The mode page follows Bunbun.UseCase; with agents off, their page is just Ask Bun.
+              const use = store.get("Bunbun.UseCase") || "agents";
+              const p = p0.id === "work" ? { ...p0, ...modeNav(use) }
+                : p0.id === "assistant" && (use === "work" || use === "study") ? { ...p0, label: "Ask Bun" } : p0;
               const active = !searching && page === p.id;
               return [
                 p.group && <div key={`g-${p.group}`} className="nav-group">{p.group}</div>,

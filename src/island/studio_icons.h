@@ -189,6 +189,11 @@ inline void Icon(const Pen& pen, Page page, D2D1_POINT_2F c, float size, D2D1_CO
             Line(pen, at(12.0f, 17.5f), at(12.0f, 6.5f), col, w * 1.35f);
             Line(pen, at(17.0f, 16.5f), at(17.0f, 11.5f), col, w * 1.35f);
             break;
+        case Page::Work:  // a briefcase: the case, its handle and the clasp line
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(box(3.5f, 7.5f, 20.5f, 19.5f), 2.2f * s, 2.2f * s), b, w);
+            Poly(pen, {P(9, 7.5f), P(9, 5), P(15, 5), P(15, 7.5f)}, c, s, col, w);
+            Poly(pen, {P(3.5f, 12.5f), P(20.5f, 12.5f)}, c, s, col, w);
+            break;
         case Page::Note:
             Poly(pen, {P(6, 3.5f), P(14, 3.5f), P(19, 8.5f), P(19, 20.5f), P(6, 20.5f)}, c, s, col, w, true);
             Poly(pen, {P(9, 12), P(16, 12)}, c, s, col, w);

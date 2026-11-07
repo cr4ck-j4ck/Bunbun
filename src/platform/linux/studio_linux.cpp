@@ -43,6 +43,7 @@
 #include "lyrics_linux.h"
 #include "sources.h"
 #include "water_linux.h"
+#include "work_linux.h"
 #include "timers_linux.h"
 #include "screentime_linux.h"
 
@@ -270,6 +271,7 @@ st::PageSwitches Switches() {
     p.mirror = bb::lshelf::MirrorOn();
     p.water = false;  // Water is a mode of the Timers page (Bunbun.WaterPage = Water in Timers)
     p.screentime = bb::lscreen::On();
+    p.work = bb::lwork::On();  // Work mode's page
     p.agent = g_s.agentTab && AgentsShown();
     p.order = g_s.pageOrder;
     return p;
@@ -706,6 +708,25 @@ bool PickUsage(float* used, const char** tag = nullptr) {
 // City); on the right, close, gear, eyedropper, battery, agent usage, then the
 // date and time, which give way (date first) when the left side needs the room.
 // The same layout as Windows (studio_draw.inc's EndStudioFrame).
+// Work mode (work_linux.cpp): each state's colour, the card's and the page's lines.
+Col WorkColour(bb::work::Phase p) {
+    namespace wk = bb::work;
+    switch (p) {
+        case wk::Phase::Working: return Accent();
+        case wk::Phase::Overtime: return C(wk::KindColour(wk::Kind::Overtime));
+        case wk::Phase::Away: return C(wk::KindColour(wk::Kind::Away));
+        case wk::Phase::Asleep: return C(wk::KindColour(wk::Kind::Asleep));
+        case wk::Phase::Lunch: return C(wk::KindColour(wk::Kind::Lunch));
+        case wk::Phase::Break: return C(wk::KindColour(wk::Kind::Break));
+        case wk::Phase::Done: return C(0x30d158);
+        default: return C(0x8e8e93);
+    }
+}
+void TileWork(cairo_t* cr, const Rect& r);
+// A page's name in the tab bar; Work is Study in Study mode.
+std::wstring TabName(Page p) { return p == Page::Work && bb::lwork::Now().study ? std::wstring(L"Study") : std::wstring(st::TabLabel(p)); }
+void PaintWork(cairo_t* cr, const Rect& pg);
+
 void PaintHeader(cairo_t* cr, const Rect& isl) {
     const double hy = isl.y + 17;
     const Col grey = C(0x8e8e93);
@@ -725,6 +746,7 @@ void PaintHeader(cairo_t* cr, const Rect& isl) {
         const std::string city = lsrc::CurrentWeather().city;
         second = city.empty() ? L"" : bb::plat::Wide(city);
     } else if (g_page == Page::ScreenTime) { first = L"Screen Time"; second.clear(); }
+    else if (g_page == Page::Work && bb::lwork::Now().study) { first = L"Study Time"; second.clear(); }
     else subtitled = false;
     const double w1 = Measure(cr, U(first), FTitle);
     SText(cr, first, fx, hy - 10, w1 + 2, 20, FTitle, F(W(1)));
@@ -820,6 +842,21 @@ void PaintHeader(cairo_t* cr, const Rect& isl) {
         g_hits.push_back({{rx - 9, hy - 10, pw + 21, 20}, Action::AgentPage});
         rightEdge = rx - 9;
     }
+    // Work mode without agents on show: the day's progress in the limits' place.
+    if (!AgentsShown() && bb::lwork::On()) {
+        const bb::lwork::Snapshot w = bb::lwork::Now();
+        if (w.goal > 0) {
+            const double u = std::min(1.0, static_cast<double>(w.today.Worked()) / w.goal);
+            char pct[24];
+            snprintf(pct, sizeof pct, w.study ? "Study %d%%" : "Work %d%%", static_cast<int>(u * 100 + 0.5));
+            const double pw = Measure(cr, pct, FLabel);
+            const double rx = rightEdge - pw - 14;
+            Ring(cr, rx, hy, 6, 2.4, u, WorkColour(w.phase));
+            SText(cr, pct, rx + 10, hy - 8, pw + 2, 16, FLabel, F(grey));
+            g_hits.push_back({{rx - 9, hy - 10, pw + 21, 20}, Action::WorkPage});
+            rightEdge = rx - 9;
+        }
+    }
     const std::string date = bb::lfeat::FormatDate(time(nullptr));  // Modules.DateFormat
     const std::string clock = ClockText();
     const double timeW = Measure(cr, clock, FTitle), dateW = Measure(cr, date, FBody);
@@ -838,7 +875,7 @@ void PaintTabBar(cairo_t* cr, const Rect& isl) {
     double total = 0;
     for (int i = 0; i < n; ++i) {
         const Page p = st::PageFor(g_context, g_tabs[static_cast<size_t>(i)]);
-        const double want = i == g_tabIdx ? 30 + 10 + Measure(cr, U(st::TabLabel(p)), FLabel) : 30;
+        const double want = i == g_tabIdx ? 30 + 10 + Measure(cr, U(TabName(p)), FLabel) : 30;
         double& cur = g_tabW[static_cast<size_t>(i)];
         cur += (want - cur) * 0.25;
         if (std::fabs(want - cur) < 0.3 || g_offscreen) cur = want;
@@ -855,7 +892,7 @@ void PaintTabBar(cairo_t* cr, const Rect& isl) {
             Fill(cr, tx, fy - 13, w, 26, 13, F(white ? C(0x2c2c2e) : WithA(tint, 0.22)));
             const Col ink = F(white ? W(1) : tint);
             Icon(cr, p, tx + 15, fy, 15, ink);
-            if (w > 44) SText(cr, st::TabLabel(p), tx + 27, fy - 9, w - 31, 18, FLabel, ink);
+            if (w > 44) SText(cr, TabName(p), tx + 27, fy - 9, w - 31, 18, FLabel, ink);
         } else {
             if (hovered) Dot(cr, tx + w / 2, fy, 13, F(C(0x3a3a3c)));
             Icon(cr, p, tx + w / 2, fy - (hovered ? 1.5 : 0), hovered ? 16.8 : 15, F(hovered ? W(1) : C(0x8e8e93)));
@@ -1001,7 +1038,7 @@ void TileBattery(cairo_t* cr, const Rect& r) {
 
 void TileSystem(cairo_t* cr, const Rect& r) {
     const lsrc::Load& load = lsrc::SystemLoad();
-    Tile(cr, r, C(0x30d158), false);
+    Tile(cr, r, C(0x30d158), false);  // Home cards keep their own colours
     Ring(cr, r.x + r.w - 30, r.y + 30, 15, 4.5, load.mem / 100.0, C(0x64d2ff));
     TileTexts(cr, r, "System", W(0.65), std::to_string(load.cpu) + "%", "CPU" + kDot + "RAM " + std::to_string(load.mem) + "%");
     if (const int i = TabIndexOf(Page::Hardware); i >= 0) g_hits.push_back({r, Action::Tab, i});
@@ -1012,7 +1049,8 @@ void PaintHome(cairo_t* cr, const Rect& pg) {
     const bool agents = AgentsShown();
     for (int slot = 0; slot < 3; ++slot) {
         const Rect r{pg.x + slot * (tileW + gap), top, tileW, tileH};
-        switch (st::HomeTileFor(g_s.homeTile[slot], slot, agents)) {
+        switch (st::HomeTileFor(g_s.homeTile[slot], slot, agents, bb::lwork::On())) {
+            case st::HomeTile::Work: TileWork(cr, r); break;
             case st::HomeTile::Agent: TileAgent(cr, r); break;
             case st::HomeTile::Music: TileMusic(cr, r); break;
             case st::HomeTile::Weather: TileWeather(cr, r); break;
@@ -1218,7 +1256,7 @@ void PaintCalendar(cairo_t* cr, const Rect& pg) {
     const double gridW = 238, cellW = gridW / 7;
     char month[32];
     strftime(month, sizeof month, "%B %Y", &lt);
-    SText(cr, month, pg.x, pg.y, gridW, 18, FLabel, kRed);
+    SText(cr, month, pg.x, pg.y, gridW, 18, FLabel, Accent());
     // Monday or Sunday first (Modules.FirstDayOfWeek).
     const bool monday = bb::lfeat::Get().mondayFirst;
     static const char* kDays[] = {"S", "M", "T", "W", "T", "F", "S"};
@@ -1250,7 +1288,7 @@ void PaintCalendar(cairo_t* cr, const Rect& pg) {
         const int cell = lead + day - 1;
         const double cx = pg.x + (cell % 7 + 0.5) * cellW, cy = pg.y + 38 + (cell / 7 + 0.5) * rowH;
         const bool today = day == lt.tm_mday;
-        if (today) Dot(cr, cx, cy, rowH / 2 - 1, kRed);
+        if (today) Dot(cr, cx, cy, rowH / 2 - 1, Accent());
         SText(cr, std::to_string(day), cx - cellW / 2, cy - rowH / 2, cellW, rowH, today ? FLabel : FSmall,
               today ? W(1) : ((monday ? cell % 7 >= 5 : cell % 7 == 0 || cell % 7 == 6) ? C(0x8e8e93) : C(0xd1d1d6)), 1);
         if (marked[day] && !today) Dot(cr, cx, cy + rowH / 2 - 2.5, 1.6, Accent());
@@ -1294,14 +1332,14 @@ void PaintCalendar(cairo_t* cr, const Rect& pg) {
 void PaintWeather(cairo_t* cr, const Rect& pg) {
     const lsrc::Weather& w = lsrc::CurrentWeather();
     if (!w.has) {
-        Icon(cr, Page::Weather, pg.x + pg.w / 2, pg.y + 56, 34, kSky);
+        Icon(cr, Page::Weather, pg.x + pg.w / 2, pg.y + 56, 34, Accent());
         SText(cr, w.loading ? "Getting the weather\xE2\x80\xA6" : w.error, pg.x, pg.y + 86, pg.w, 22, FBody, W(0.8), 1);
         if (!w.loading) SText(cr, "Settings \xE2\x86\x92 Features \xE2\x86\x92 Page options sets your city.", pg.x, pg.y + 108, pg.w, 18,
                               FSmall, C(0x636366), 1);
         return;
     }
     const double leftW = pg.w * 0.42;
-    SText(cr, w.city.empty() ? std::string("Weather") : w.city, pg.x, pg.y, leftW, 18, FLabel, kSky);
+    SText(cr, w.city.empty() ? std::string("Weather") : w.city, pg.x, pg.y, leftW, 18, FLabel, Accent());
     SText(cr, Temp(w.temp), pg.x, pg.y + 22, leftW, 56, FHero, W(1));
     SText(cr, lsrc::WeatherWords(w.code), pg.x, pg.y + 82, leftW, 20, FSong, W(0.9));
     SText(cr, "H " + Temp(w.high) + "   L " + Temp(w.low), pg.x, pg.y + 106, leftW, 18, FBody, kGrey);
@@ -1340,8 +1378,8 @@ void PaintSystem(cairo_t* cr, const Rect& pg) {
     const double cy = pg.y + 52;
     char mem[48];
     snprintf(mem, sizeof mem, "RAM %.1f of %.0f GB", l.memUsedGB, l.memTotalGB);
-    Meter(cr, pg.x + pg.w * 0.17, cy, l.cpu / 100.0, kGreen, std::to_string(l.cpu) + "%", "CPU");
-    Meter(cr, pg.x + pg.w * 0.50, cy, l.mem / 100.0, kSky, std::to_string(l.mem) + "%", mem);
+    Meter(cr, pg.x + pg.w * 0.17, cy, l.cpu / 100.0, Accent(), std::to_string(l.cpu) + "%", "CPU");
+    Meter(cr, pg.x + pg.w * 0.50, cy, l.mem / 100.0, Accent(), std::to_string(l.mem) + "%", mem);
     Meter(cr, pg.x + pg.w * 0.83, cy, l.disk / 100.0, C(0xff9f0a), std::to_string(l.disk) + "%", "Disk");
     const double by = pg.y + pg.h - 34;
     Fill(cr, pg.x, by, pg.w, 30, 12, W(0.05));
@@ -1600,7 +1638,7 @@ void PaintApps(cairo_t* cr, const Rect& r) {
             cairo_restore(cr);
         } else if (a.tab < 0) Gear(cr, ix + 22, y + 22, 20, C(0xe8e8ee));
         else Icon(cr, a.page, ix + 22, y + 22, 20, C(0xe8e8ee));
-        SText(cr, a.name ? std::string(a.name) : U(st::TabLabel(a.page)), x, y + 48, cellW, 16, FSmall, W(1), 1);
+        SText(cr, a.name ? std::string(a.name) : U(TabName(a.page)), x, y + 48, cellW, 16, FSmall, W(1), 1);
         if (a.page == Page::Agent && waiting) {
             Dot(cr, ix + 42, y + 2, 9, C(0xff4245));
             SText(cr, "1", ix + 33, y - 7, 18, 18, FSmall, W(1), 1);
@@ -1663,7 +1701,8 @@ void PaintShelf(cairo_t* cr, const Rect& r) {
 // filling up to the goal, today with a drop per glass and the buttons, the week.
 void PaintWater(cairo_t* cr, const Rect& r) {
     const bb::lwater::Snapshot w = bb::lwater::Now();
-    const Col blue = C(0x5ac8fa), deep = C(0x0a84ff), grey = C(0x8e8e93);
+    const Col blue = Accent(), grey = C(0x8e8e93);  // the accent, and a deeper shade for the water
+    const Col deep = {blue.r * 0.72, blue.g * 0.72, blue.b * 0.72};
     auto amount = [](int ml) {
         char b[24];
         if (ml >= 1000) snprintf(b, sizeof b, ml % 100 ? "%.2f L" : "%.1f L", ml / 1000.0);
@@ -1804,7 +1843,7 @@ struct { double x = 0, y = 0; } g_timerRing;  // the countdown dial's centre, fo
 
 void TileWeather(cairo_t* cr, const Rect& r) {
     const lsrc::Weather& w = lsrc::CurrentWeather();
-    Tile(cr, r, kSky, false);
+    Tile(cr, r, kSky, false);  // Home cards keep their own colours; only Music follows the album
     Icon(cr, Page::Weather, r.x + r.w - 30, r.y + 30, 20, kSky);
     if (w.has) TileTexts(cr, r, w.city.empty() ? "Weather" : w.city, W(0.65), Temp(w.temp), lsrc::WeatherWords(w.code));
     else TileTexts(cr, r, "Weather", W(0.65), "--\xC2\xB0", w.loading ? "Weather is loading" : "Set your city");
@@ -1831,6 +1870,157 @@ void TileFocus(cairo_t* cr, const Rect& r) {
         g_hits.push_back({{bx - 17, by - 17, 34, 34}, Action::FocusStart, 25});
     }
     if (const int i = TabIndexOf(Page::Focus); i >= 0) g_hits.push_back({r, Action::Tab, i});
+}
+
+// ── Work mode: the Home card and the Work page ──────────────────────────────
+std::string WorkStatusLine(const bb::lwork::Snapshot& w) {
+    namespace wk = bb::work;
+    const std::string mid = " \xC2\xB7 ";
+    if (w.study) {  // "Maths · until 11:00", "Physics at 14:00", "Free time"
+        if ((w.phase == wk::Phase::Working || w.phase == wk::Phase::Overtime) && !w.subject.empty())
+            return w.blockEnd >= 0 ? U(w.subject) + mid + "until " + U(wk::FormatClock(w.blockEnd)) : U(w.subject);
+        if (w.phase == wk::Phase::Off) return w.nextBlock >= 0 ? U(w.nextSubject) + " at " + U(wk::FormatClock(w.nextBlock)) : "Free time";
+        // Studying outside a class (by hand, or a Pomodoro): the work day's end doesn't apply.
+        // The title already says Studying: the line says what's next.
+        if (w.phase == wk::Phase::Working || w.phase == wk::Phase::Overtime)
+            return w.nextBlock >= 0 ? "Next: " + U(w.nextSubject) + " at " + U(wk::FormatClock(w.nextBlock)) : "Free study";
+    }
+    switch (w.phase) {
+        case wk::Phase::Working: return "Working" + mid + "until " + U(wk::FormatClock(w.schedule.end));
+        case wk::Phase::Overtime: return "Overtime";
+        case wk::Phase::Lunch: return "Lunch" + mid + "back at " + U(wk::FormatClock(w.schedule.lunchStart + w.schedule.lunchMinutes));
+        case wk::Phase::Break: {
+            const long long left = std::max(0LL, w.breakUntil - static_cast<long long>(time(nullptr)));
+            return "Break" + mid + std::to_string((left + 59) / 60) + " min left";
+        }
+        case wk::Phase::Away: return "Away";
+        case wk::Phase::Asleep: return "Asleep";
+        case wk::Phase::Paused: return "Paused";
+        case wk::Phase::Done: return "Done for today";
+        default: return w.schedule.autoStart ? "Starts at " + U(wk::FormatClock(w.schedule.start)) : "Not started";
+    }
+}
+
+void TileWork(cairo_t* cr, const Rect& r) {
+    namespace wk = bb::work;
+    const bb::lwork::Snapshot w = bb::lwork::Now();
+    // Home cards keep their own colours (the Work page follows the accent).
+    const Col col = w.phase == wk::Phase::Working ? C(wk::KindColour(wk::Kind::Work)) : WorkColour(w.phase);
+    Tile(cr, r, col, w.phase == wk::Phase::Working || w.phase == wk::Phase::Overtime);
+    Ring(cr, r.x + r.w - 30, r.y + 30, 15, 4.5, w.goal > 0 ? std::min(1.0, static_cast<double>(w.today.Worked()) / w.goal) : 0, col);
+    std::string line = w.phase == wk::Phase::Working && !w.study ? "Until " + U(wk::FormatClock(w.schedule.end)) : WorkStatusLine(w);
+    if (w.study && w.phase == wk::Phase::Working && !w.subject.empty() && w.blockEnd >= 0)
+        line = U(w.subject) + " \xC2\xB7 " + U(wk::FormatClock(w.blockEnd));  // short on the card
+    TileTexts(cr, r, w.study ? "Study" : "Work", W(0.65), U(wk::Duration(w.today.Worked())), line, 46);
+    const double bx = r.x + r.w - 27, by = r.y + r.h - 27;
+    const bool going = w.phase == wk::Phase::Working || w.phase == wk::Phase::Overtime || w.phase == wk::Phase::Away ||
+                       w.phase == wk::Phase::Asleep;
+    const Action act = going ? Action::WorkPause : (w.phase == wk::Phase::Paused || w.phase == wk::Phase::Break) ? Action::WorkResume
+                                                                                                             : Action::WorkStart;
+    RoundButton(cr, bx, by, 15, going ? 1 : 0, col, NextHitHovered());
+    g_hits.push_back({{bx - 17, by - 17, 34, 34}, act});
+    if (const int i = TabIndexOf(Page::Work); i >= 0) g_hits.push_back({r, Action::Tab, i});
+}
+
+void PaintWork(cairo_t* cr, const Rect& pg) {
+    namespace wk = bb::work;
+    const bb::lwork::Snapshot w = bb::lwork::Now();
+    const Col col = WorkColour(w.phase), grey = C(0x8e8e93), card = C(0x1c1c1e);
+    const double leftW = std::min(300.0, std::floor(pg.w * 0.4));
+    // Left: the state, the time, the buttons.
+    const Rect lc{pg.x, pg.y, leftW, pg.h};
+    Fill(cr, lc.x, lc.y, lc.w, lc.h, 14, card);
+    Dot(cr, lc.x + 20, lc.y + 22, 4.5, col);
+    SText(cr, U(w.study ? wk::StudyLabel(w.phase) : wk::PhaseLabel(w.phase)), lc.x + 32, lc.y + 12, lc.w - 44, 20, FLabel, W(1));
+    if (w.study && w.streak > 0)
+        SText(cr, "\xF0\x9F\x94\xA5 " + std::to_string(w.streak) + (w.streak == 1 ? " day" : " days"), lc.x + 120, lc.y + 12, lc.w - 134, 20,
+              FLabel, C(0xff9f0a), 2);
+    {   // past an hour ("1h 12m") the hero size no longer fits; a step down then (as on Windows)
+        const std::string worked = U(wk::Duration(w.today.Worked()));
+        SText(cr, worked, lc.x + 16, lc.y + 38, lc.w - 86, 52, Measure(cr, worked, FHero) > lc.w - 86 ? FBig : FHero, W(1));
+    }
+    const double frac = w.goal > 0 ? std::min(1.0, static_cast<double>(w.today.Worked()) / w.goal) : 0;
+    Ring(cr, lc.x + lc.w - 40, lc.y + 62, 22, 5, frac, col);
+    SText(cr, std::to_string(static_cast<int>(frac * 100 + 0.5)) + "%", lc.x + lc.w - 62, lc.y + 54, 44, 16, FSmall, grey, 1);
+    SText(cr, w.goal > 0 ? "of " + U(wk::Duration(w.goal)) + " today" : std::string(w.study ? "studied today" : "worked today"), lc.x + 16, lc.y + 92, lc.w - 28, 18, FBody, grey);
+    SText(cr, WorkStatusLine(w), lc.x + 16, lc.y + 112, lc.w - 28, 18, FBody, col);
+    std::vector<std::pair<std::string, Action>> btns;
+    switch (w.phase) {
+        case wk::Phase::Working: case wk::Phase::Overtime: case wk::Phase::Away: case wk::Phase::Asleep:
+            btns = {{"Pause", Action::WorkPause}, {"Break", Action::WorkBreak}, {"Done", Action::WorkDone}}; break;
+        case wk::Phase::Paused: case wk::Phase::Break: btns = {{"Resume", Action::WorkResume}, {"Done", Action::WorkDone}}; break;
+        case wk::Phase::Lunch: btns = {{"Done for today", Action::WorkDone}}; break;
+        case wk::Phase::Done: btns = {{"Start again", Action::WorkStart}}; break;
+        default: btns = {{w.study ? "Start studying" : "Start work", Action::WorkStart}}; break;
+    }
+    double bx = lc.x + 14;
+    const double by = lc.y + lc.h - 44;
+    for (size_t i = 0; i < btns.size(); ++i) {
+        const double bw = Measure(cr, btns[i].first, FLabel) + 28;
+        if (bx + bw > lc.x + lc.w - 12) break;
+        Button(cr, {bx, by, bw, 30}, btns[i].first, i == 0, btns[i].second);
+        bx += bw + 8;
+    }
+    // Right: today's timeline and totals.
+    const Rect rc{lc.x + lc.w + 10, pg.y, pg.w - lc.w - 10, pg.h};
+    Fill(cr, rc.x, rc.y, rc.w, rc.h, 14, card);
+    SText(cr, "Today", rc.x + 16, rc.y + 12, 120, 18, FLabel, W(1));
+    const double repW = Measure(cr, "Report", FLabel) + 28;
+    Button(cr, {rc.x + rc.w - 14 - repW, rc.y + 8, repW, 26}, "Report", false, Action::WorkReport);
+    int from = w.schedule.start * 60, to = (w.schedule.end <= w.schedule.start ? w.schedule.end + 1440 : w.schedule.end) * 60;
+    if (w.study) { from = w.today.first >= 0 ? w.today.first : 8 * 3600; to = std::max(from + 3600, w.today.last); }
+    if (w.today.first >= 0) from = std::min(from, w.today.first);
+    if (w.today.last >= 0) to = std::max(to, w.today.last);
+    if (to <= from) to = from + 3600;
+    const double bx0 = rc.x + 16, bw = rc.w - 32, byTop = rc.y + 46;
+    Fill(cr, bx0, byTop, bw, 20, 6, W(0.06));
+    auto xAt = [&](int s) { return bx0 + bw * std::clamp(static_cast<double>(s - from) / (to - from), 0.0, 1.0); };
+    for (const wk::Segment& g : w.segments) {
+        const double x0 = xAt(g.start), x1 = std::max(xAt(g.end), x0 + 1.5);
+        Fill(cr, x0, byTop, x1 - x0, 20, 3, g.kind == wk::Kind::Work ? Accent() : C(wk::KindColour(g.kind)));
+    }
+    const time_t now = time(nullptr);
+    tm lt{};
+    localtime_r(&now, &lt);
+    int nowSec = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec;
+    if (nowSec < from && to > 86400) nowSec += 86400;
+    if (nowSec >= from && nowSec <= to) Fill(cr, xAt(nowSec) - 1, byTop - 4, 2, 28, 1, W(1));
+    SText(cr, U(wk::FormatClock(from / 60)), bx0, byTop + 24, 60, 14, FSmall, grey);
+    SText(cr, U(wk::FormatClock(to / 60)), bx0 + bw - 60, byTop + 24, 60, 14, FSmall, grey, 2);
+    if (w.study) {  // today's subjects as bars, then away and breaks
+        const double gy = byTop + 48, wAll = rc.w - 32;
+        int most = 1;
+        for (const auto& s : w.subjects) most = std::max(most, s.second);
+        if (w.subjects.empty()) SText(cr, "Subjects show here as you study.", bx0, gy, wAll, 18, FBody, grey);
+        static const uint32_t kSubject[] = {0x0a84ff, 0xbf5af2, 0x30d158, 0xff9f0a, 0x64d2ff};
+        for (size_t i = 0; i < w.subjects.size() && i < 4; ++i) {
+            const double y = gy + i * 22;
+            const std::string dur = U(wk::Duration(w.subjects[i].second));
+            const double dw = Measure(cr, dur, FLabel) + 6;
+            SText(cr, U(w.subjects[i].first), bx0, y, 110, 18, FBody, W(1));
+            const double b0 = bx0 + 116, b1 = rc.x + rc.w - 16 - dw;
+            Fill(cr, b0, y + 5, b1 - b0, 8, 4, W(0.06));
+            Fill(cr, b0, y + 5, std::max(8.0, (b1 - b0) * w.subjects[i].second / most), 8, 4, C(kSubject[i % 5]));
+            SText(cr, dur, b1 + 6, y, dw, 18, FLabel, W(1), 2);
+        }
+        SText(cr, "Away " + U(wk::Duration(w.today.Of(wk::Kind::Away) + w.today.Of(wk::Kind::Asleep))) + " \xC2\xB7 Breaks " +
+                      std::to_string(w.today.breaks), bx0, rc.y + rc.h - 26, wAll, 16, FSmall, grey);
+        return;
+    }
+    const wk::Kind kinds[] = {wk::Kind::Work, wk::Kind::Away, wk::Kind::Lunch, wk::Kind::Overtime, wk::Kind::Asleep, wk::Kind::Break};
+    const double colW = (rc.w - 32) / 2, gy = byTop + 50;
+    for (int i = 0; i < 6; ++i) {
+        const wk::Kind k = kinds[i];
+        const double x = bx0 + (i / 3) * colW, y = gy + (i % 3) * 26;
+        Fill(cr, x, y + 4, 10, 10, 3, k == wk::Kind::Work ? Accent() : C(wk::KindColour(k)));
+        const std::string dur = U(wk::Duration(w.today.Of(k)));
+        const double dw = Measure(cr, dur, FLabel) + 6;
+        std::string label = U(wk::KindLabel(k));
+        if (k == wk::Kind::Break) label += " (" + std::to_string(w.today.breaks) + ")";
+        if (Measure(cr, label, FBody) > colW - 26 - dw) label = k == wk::Kind::Work ? "Work" : k == wk::Kind::Overtime ? "Over" : k == wk::Kind::Break ? "Breaks" : label;
+        SText(cr, label, x + 18, y, colW - 22 - dw, 18, FBody, grey);
+        SText(cr, dur, x + colW - 4 - dw, y, dw, 18, FLabel, W(1), 2);
+    }
 }
 
 // ── Lyrics: the small-island pill and the Lyrics page ───────────────────────
@@ -2230,7 +2420,7 @@ void PaintAgentPage(cairo_t* cr, const Rect& r) {
 
 const char* PageKey(Page p) {
     static const char* kKeys[] = {"home", "music", "calendar", "weather", "system", "toggles", "tray", "todo",
-                                  "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water", "screentime"};
+                                  "lyrics", "agent", "clipboard", "note", "focus", "apps", "mirror", "water", "screentime", "work"};
     return kKeys[std::clamp(static_cast<int>(p), 0, static_cast<int>(std::size(kKeys)) - 1)];
 }
 
@@ -2383,6 +2573,7 @@ void PaintStudioFrame(cairo_t* cr, const Rect& isl, double mix) {
         case Page::Mirror: PaintMirror(cr, pg); break;
         case Page::Water: PaintWater(cr, pg); break;
         case Page::ScreenTime: PaintScreenTime(cr, pg); break;
+        case Page::Work: PaintWork(cr, pg); break;
         default: PaintHome(cr, pg); break;
     }
     cairo_pop_group_to_source(cr);
@@ -2395,13 +2586,17 @@ void PaintStudioFrame(cairo_t* cr, const Rect& isl, double mix) {
 }  // namespace
 
 bool StudioScrollTimer(double delta, bool fine) {
-    if (g_page != Page::Focus || bb::ltimers::Mode() != bb::timers::Mode::Countdown) return false;
+    if (g_page != Page::Focus) return false;
     if (g_hoverHit < 0 || g_hoverHit >= static_cast<int>(g_hits.size()) || g_hits[g_hoverHit].action != Action::TimerRing) return false;
     static double acc = 0;
     acc += delta;
     if (std::fabs(acc) < 1.0) return true;  // a touchpad's small steps add up
     const int notches = acc < 0 ? 1 : -1;  // up adds time
     acc = 0;
+    if (g_hits[g_hoverHit].index == 1) {  // the Focus dial: 5 minutes a notch
+        bb::ltimers::PomodoroLength(bb::timers::StepFocusMinutes(bb::ltimers::Config().focusMinutes, notches));
+        return true;
+    }
     bb::ltimers::CountdownStep(notches, fine);
     return true;
 }
@@ -2605,6 +2800,13 @@ bool StudioDo(const Hit& h) {
             StartCompose(ComposePlan, a.requestId, -1, "What should change in the plan?");
             return true;
         case Action::WaterAdd: bb::lwater::Drink(); return true;
+        case Action::WorkStart: bb::lwork::Start(); return true;  // Work mode
+        case Action::WorkPause: bb::lwork::Pause(); return true;
+        case Action::WorkResume: bb::lwork::Resume(); return true;
+        case Action::WorkBreak: bb::lwork::TakeBreak(); return true;
+        case Action::WorkDone: bb::lwork::Done(); return true;
+        case Action::WorkReport: OpenSettings("work-report"); return true;
+        case Action::WorkPage: if (const int i = TabIndexOf(Page::Work); i >= 0) g_tabIdx = i; return true;
         case Action::WaterUndo: bb::lwater::Undo(); return true;
         case Action::WaterRefill: bb::lwater::Refill(); return true;
         case Action::QuestionToggle:
@@ -2693,7 +2895,8 @@ bool StudioDo(const Hit& h) {
         case Action::CountSave: bb::ltimers::SavePreset(); return true;
         case Action::TimerRing: {  // a click on the dial: straight up is 0, clockwise, one turn an hour
             const double angle = std::atan2(g_mouseX - g_timerRing.x, g_timerRing.y - g_mouseY);
-            bb::ltimers::CountdownSet(bb::timers::SecondsFromAngle(angle));
+            if (h.index == 1) bb::ltimers::PomodoroLength(bb::timers::FocusMinutesFromAngle(angle));  // the Focus dial
+            else bb::ltimers::CountdownSet(bb::timers::SecondsFromAngle(angle));
             return true;
         }
         case Action::SwToggle: bb::ltimers::StopwatchToggle(); return true;
