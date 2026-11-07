@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.10]
+
 ### Added
 - **A gaming mascot in game mode.** With game mode on, the mascot sits on the left of the stats,
   controller in hand: buttons being mashed, eyes on the game, leaning into the turns. Every
