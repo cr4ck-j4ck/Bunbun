@@ -715,6 +715,7 @@ struct Settings {
     bool connectivityModule = true;  // Bunbun: Wi-Fi / Bluetooth / DND tab
     bool todoModule = true;          // Bunbun: To-do tab and reminders
     bool localAi = false;            // Bunbun: Ask Bun's local AI (bunbun-brain.exe)
+    std::wstring aiBackend, ollamaUrl, ollamaModel, geminiKey, geminiModel;  // Bunbun: local | ollama | gemini
     std::wstring localAiModel;       // Bunbun: a .gguf file; empty = the first in %LOCALAPPDATA%\Bunbun\models
     int localAiIdleMinutes = 5;      // Bunbun: close the helper (free its memory) after this long idle
     bool reminderSound = true;       // Bunbun: play Windows' reminder sound when one is due
@@ -2766,6 +2767,7 @@ void LoadSettings() {
         w.breakMinutes = std::clamp(Wh_GetIntSetting(L"Work.BreakMinutes"), 1, 120);
         w.goalMinutes = std::clamp(Wh_GetIntSetting(L"Work.GoalHours"), 0, 24) * 60;
         w.autoStart = Wh_GetIntSetting(L"Work.AutoStart") != 0;
+        w.daysOff = wk::ParseDatesOff(GetStringSettingCopy(L"Work.DaysOff"));  // Bunbun: holidays and leave
         next.workReminders = Wh_GetIntSetting(L"Work.Reminders") != 0;
         // Study: the timetable replaces the office hours and lunch; its own goal.
         if (wk::StudyOn(static_cast<wk::UseCase>(next.useCase))) {
@@ -3393,10 +3395,22 @@ void LoadSettings() {
     next.todoModule = Wh_GetIntSetting(L"Modules.TodoModule") != 0;                          // Bunbun
     next.localAi = Wh_GetIntSetting(L"Bunbun.LocalAi") != 0;
     next.localAiModel = GetStringSettingCopy(L"Bunbun.LocalAiModel");
+    next.aiBackend = GetStringSettingCopy(L"Bunbun.AiBackend");
+    next.ollamaUrl = GetStringSettingCopy(L"Bunbun.OllamaUrl");
+    next.ollamaModel = GetStringSettingCopy(L"Bunbun.OllamaModel");
+    next.geminiKey = GetStringSettingCopy(L"Bunbun.GeminiKey");
+    next.geminiModel = GetStringSettingCopy(L"Bunbun.GeminiModel");
     next.localAiIdleMinutes = std::max(1, Wh_GetIntSetting(L"Bunbun.LocalAiIdleMinutes"));
     next.reminderSound = Wh_GetIntSetting(L"Modules.ReminderSound") != 0;
     next.quietReminders = Wh_GetIntSetting(L"Modules.QuietReminders") != 0;
     next.calendarIcsUrl = GetStringSettingCopy(L"Modules.CalendarIcsUrl");                    // Bunbun
+    {   // Bunbun: a country's public holidays and festivals ride along as one more calendar link.
+        const std::wstring region = GetStringSettingCopy(L"Modules.CalendarHolidays");
+        if (!region.empty() && region != L"none" && region.find_first_not_of(L"abcdefghijklmnopqrstuvwxyz_") == std::wstring::npos) {
+            next.calendarIcsUrl += L" https://calendar.google.com/calendar/ical/en." + region +
+                                   L"%23holiday%40group.v.calendar.google.com/public/basic.ics";
+        }
+    }
     next.meetingAlertMinutes = std::max(0, Wh_GetIntSetting(L"Modules.MeetingAlertMinutes"));
     next.downloadsModule = Wh_GetIntSetting(L"Modules.Downloads") != 0;
     next.batteryMoods = Wh_GetIntSetting(L"Bunbun.BatteryMoods") != 0;
@@ -22378,11 +22392,23 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                          h.arg, h.rect.left, h.rect.top, h.rect.right, h.rect.bottom);
                 s += buf;
             }
+            // The agent card's buttons (an approval, a question) as actions 1000 + their own, in
+            // client pixels: their rects are relative to the published content rect, scaled about its centre.
+            {
+                const float l = g_mediaHitLeft.load(), t = g_mediaHitTop.load(), r = g_mediaHitRight.load(), bt = g_mediaHitBottom.load();
+                const float sc = std::max(0.05f, g_mediaHitScale.load()), cx = (l + r) * 0.5f, cy = (t + bt) * 0.5f;
+                for (const AgentButton& b : g_agentButtons) {
+                    snprintf(buf, sizeof buf, "%s[%d,%d,%.0f,%.0f,%.0f,%.0f]", s.size() > 1 ? "," : "", 1000 + b.action,
+                             b.action == 0 ? b.answerIndex : b.arg, (b.rect.left + l - cx) * sc + cx, (b.rect.top + t - cy) * sc + cy,
+                             (b.rect.right + l - cx) * sc + cx, (b.rect.bottom + t - cy) * sc + cy);
+                    s += buf;
+                }
+            }
             *out = s + "]";
             return 0;
         }
         case WM_APP_SUBMIT_ASK: {
-            StartQuickLookup(hwnd);
+            if (!g_lookupUi.open) StartQuickLookup(hwnd, true);  // an open box is typed into, not toggled shut
             wchar_t* q = reinterpret_cast<wchar_t*>(lParam);
             if (q) {
                 SubmitLookup(q);
@@ -22509,7 +22535,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_KILLFOCUS:
             // Clicked another window / Alt+Tab / Win key: the search is over.
-            if (g_lookupUi.open) {
+            // Bunbun: not an answer to an agent. A toast, a focus bounce or a click in the terminal
+            // to copy something used to close the box and drop what was typed ("Other..." seemed
+            // dead). It waits instead (two minutes), and a click on it takes the keyboard back.
+            if (g_lookupUi.open && !ComposeActive()) {
                 // Bunbun: a question to Bun outlives the focus. Typing ends, but
                 // the request stays live and its answer shows as a passive card
                 // that expires on its own.
@@ -22594,6 +22623,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
                 if (g_lookupUi.open) {
                     s_trayPressActive = false;
+                    if (GetForegroundWindow() != hwnd) ForceForeground(hwnd);  // Bunbun: a click on the box takes the keyboard back
                     return 0;  // handled on button-up by HandleLookupClick
                 }
 
@@ -25298,7 +25328,8 @@ std::string IslandTestHits() {
     return out;
 }
 
-bool IslandTestState(const std::string& kind, const std::wstring& a, const std::wstring& b, int n, int seconds) {
+bool IslandTestState(const std::string& kind, const std::wstring& a, const std::wstring& b, int n, int seconds,
+                     const std::wstring& lyrics) {
     const double now = NowSeconds();
     const double until = now + std::max(1, seconds);
     {
@@ -25306,8 +25337,8 @@ bool IslandTestState(const std::string& kind, const std::wstring& a, const std::
         if (kind == "clear") {  // every made-up event goes; the pollers write the real state again
             g_testMediaUntil = 0.0;
             g_testPrivacyUntil = 0.0;
-            if (g_state.media.sourceName == L"Test") g_state.media = MediaSnapshot{};
-            if (g_state.lyrics.matchedArtist == L"Test Artist") g_state.lyrics = LyricsSnapshot{};
+            if (g_state.media.sourceName == L"Radio") g_state.media = MediaSnapshot{};
+            if (g_state.lyrics.synced && g_state.media.title.empty()) g_state.lyrics = LyricsSnapshot{};
             g_state.download = DownloadSnapshot{};
             g_state.progress = ProgressSnapshot{};
             g_state.volume.active = g_state.brightness.active = g_state.capsLock.active = false;
@@ -25321,14 +25352,24 @@ bool IslandTestState(const std::string& kind, const std::wstring& a, const std::
             m.title = a.empty() ? L"Test Track" : a;
             m.artist = b.empty() ? L"Test Artist" : b;
             m.albumTitle = L"Test Album";
-            m.sourceName = L"Test";
+            m.sourceName = L"Radio";
             m.endTicks = 2400000000LL;  // 4 min, playing from 1:00
             m.positionTicks = 600000000LL;
             m.lastUpdatedTicks = static_cast<int64_t>(GetTickCount64());
             m.titleChangedAt = now;
             g_state.media = std::move(m);
             std::vector<LyricsLine> lines;
-            for (int i = 0; i < 12; ++i) lines.push_back({i * 5000LL + 50000, L"Test lyric line " + std::to_wstring(i + 1)});
+            if (lyrics.empty()) {
+                for (int i = 0; i < 12; ++i) lines.push_back({i * 5000LL + 50000, L"Test lyric line " + std::to_wstring(i + 1)});
+            } else {  // one line every 5 s, the third one being sung at 1:00
+                size_t at = 0;
+                for (int i = 0; at <= lyrics.size(); ++i) {
+                    const size_t bar = lyrics.find(L'|', at);
+                    lines.push_back({i * 5000LL + 50000, lyrics.substr(at, bar == std::wstring::npos ? std::wstring::npos : bar - at)});
+                    if (bar == std::wstring::npos) break;
+                    at = bar + 1;
+                }
+            }
             LyricsSnapshot ly;
             ly.hasData = true;
             ly.synced = true;
@@ -25342,7 +25383,7 @@ bool IslandTestState(const std::string& kind, const std::wstring& a, const std::
             g_state.volume.active = true;
             g_state.volume.percent = n;
             g_state.volume.muted = n == 0;
-            g_state.volume.deviceName = L"Test Speakers";
+            g_state.volume.deviceName = L"Speakers";
             g_state.volume.expiresAt = until;
         } else if (kind == "brightness") {
             g_state.brightness = {true, n, until};
@@ -25361,7 +25402,7 @@ bool IslandTestState(const std::string& kind, const std::wstring& a, const std::
             if (n >= 100) g_batteryCheerAt.store(now, std::memory_order_relaxed);  // the "full" cheer
         } else if (kind == "notification") {
             g_state.notification.active = true;
-            g_state.notification.app = L"Test";
+            g_state.notification.app = L"Bunbun";
             g_state.notification.title = a.empty() ? L"Test notification" : a;
             g_state.notification.body = b.empty() ? L"A message for the test" : b;
             g_state.notification.icon = {};

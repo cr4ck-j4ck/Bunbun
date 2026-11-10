@@ -71,7 +71,7 @@ new versions still apply. Runtime state lives in `%LOCALAPPDATA%\Bunbun\state.in
   to talk to a pipe server running as anyone else.
 - The island only answers the exact request it shows; requests are withdrawn when the agent's turn
   ends or you answer in the terminal.
-- No telemetry and no AI service. Network use is limited to the weather, lyrics and dictionary
+- No telemetry and no Bunbun AI service (Gemini, with the user's own key, is opt-in). Network use is limited to the weather, lyrics and dictionary
   modules, to the calendar link the user adds (HTTPS, every 5 minutes), to web searches you ask Bun for, and to the update check (one request a day to
   `api.github.com/repos/<repo>/releases/latest`, off with `Bunbun.UpdateCheck`). The update check
   only reads; nothing is downloaded or run, and only a `https://github.com/` page is ever opened

@@ -106,7 +106,7 @@ Your other settings stay as they are, and a backup is made first.`);
         : "Bun is a local Windows assistant, and keeps an eye on your coding agents."} />
 
       <Section title="Ask Bun">
-        <Setting k="Bunbun.Assistant" label="Ask Bun" description="Press the hotkey, type a command, press Enter. Everything runs on this PC; nothing is sent to any AI service." />
+        <Setting k="Bunbun.Assistant" label="Ask Bun" description="Press the hotkey, type a command, press Enter. By default everything runs on this PC; nothing is sent to any AI service." />
         <Row label={<span style={{ display: "flex", gap: 8, alignItems: "center" }}><Keyboard size={15} /> Hotkey</span>}
           description="Default Ctrl + Alt + B. (Ctrl + Alt + Space is used by the Claude desktop app.)" settingKeys={["Shortcuts.LookupModifiers", "Shortcuts.LookupKey"]}>
           <select className="field" style={{ minWidth: 150 }} value={s.get("Shortcuts.LookupModifiers")} onChange={(e) => s.set("Shortcuts.LookupModifiers", e.target.value)}>
@@ -138,6 +138,11 @@ Your other settings stay as they are, and a backup is made first.`);
           </Row>
         )}
         <Setting k="Bunbun.LocalAiIdleMinutes" />
+      </Section>
+      <Section title="AI engine (optional)">
+        <Setting k="Bunbun.AiBackend" />
+        {s.get("Bunbun.AiBackend") === "ollama" && <><Setting k="Bunbun.OllamaUrl" /><Setting k="Bunbun.OllamaModel" /></>}
+        {s.get("Bunbun.AiBackend") === "gemini" && <><Setting k="Bunbun.GeminiKey" /><Setting k="Bunbun.GeminiModel" /></>}
       </Section>
       <section className="section">
         <h3>Things you can say</h3>

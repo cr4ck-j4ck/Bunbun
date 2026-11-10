@@ -725,14 +725,21 @@ bool NeedsQuestionCard(const bb::AgentView& a) { return bb::studio::NeedsQuestio
 bool QuestionAnswered(int i) { return g_questions.Answered(i); }
 
 void ClearCompose() { g_compose = ComposeTarget{}; }
+bool ComposeActive() { return g_compose.kind != 0; }
 
 void StartCompose(int kind, uint64_t id, int question, const std::wstring& label) {
     HWND hwnd = g_hwnd;
     if (!hwnd) return;
-    StartQuickLookup(hwnd);
-    g_compose = ComposeTarget{kind, id, question, label};
+    StartQuickLookup(hwnd, true);  // the box, however it was (not) open before
+    g_compose = ComposeTarget{kind, id, question, label};  // after: opening a box clears any target
+    {
+        std::lock_guard lock(g_stateMutex);
+        if (g_state.lookup.active) g_state.lookup.expiresAt = NowSeconds() + QuickLookup::kComposeIdleSeconds;
+    }
     g_layoutDirty = true;
 }
+
+std::string QuestionsReply(const bb::AgentView& a);
 
 // SubmitLookup hands the typed text here first; true when it went to an agent.
 bool SubmitCompose(const std::wstring& raw) {
@@ -750,6 +757,16 @@ bool SubmitCompose(const std::wstring& raw) {
                target.question < static_cast<int>(g_questions.other.size()) && g_questions.requestId == target.id) {
         g_questions.other[target.question] = text;
         g_questions.picks[target.question].clear();
+        // One single-choice question: the typed answer is the answer, like a pick (no Send to find).
+        bb::AgentView a;
+        {
+            std::lock_guard lock(g_stateMutex);
+            a = g_state.agent;
+        }
+        if (a.requestId == target.id && bb::studio::AnswersOnPick(a) && QuestionAnswered(0)) {
+            const std::string reply = QuestionsReply(a);
+            if (!reply.empty()) bb::agents::DecideRaw(a.requestId, reply);
+        }
     }
     ClearCompose();
     CloseLookupPanel(g_hwnd);
@@ -1650,7 +1667,7 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             break;
         }
         case StudioAction::WeatherCitySearch:
-            StartQuickLookup(hwnd);
+            StartQuickLookup(hwnd, true);
             g_lookupUi.text = L"weather in ";
             g_lookupUi.caret = static_cast<int>(g_lookupUi.text.size());
             break;
@@ -1662,7 +1679,7 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             g_clipSelected = hit.arg;
             break;
         case StudioAction::ClipSearch:
-            StartQuickLookup(hwnd);
+            StartQuickLookup(hwnd, true);
             g_lookupUi.text = L"clip ";
             g_lookupUi.caret = static_cast<int>(g_lookupUi.text.size());
             break;

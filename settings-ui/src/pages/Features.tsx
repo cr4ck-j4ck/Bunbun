@@ -23,7 +23,7 @@ export const GROUPS: Group[] = [
   { id: "water", title: "Water", desc: "Reminders to drink, paced across your active hours, and the bottle to refill.", icon: <Droplet size={18} />, main: "Bunbun.WaterReminders",
     keys: ["Bunbun.WaterGoalMl", "Bunbun.WaterGlassMl", "Bunbun.WaterBottleMl", "Bunbun.WaterStartHour", "Bunbun.WaterEndHour"] },
   { id: "calendar", title: "Reminders & meetings", desc: "Reminder sounds, your calendar link with a Join button, and browser downloads.", icon: <CalendarDays size={18} />,
-    keys: ["Modules.CalendarIcsUrl", "Modules.MeetingAlertMinutes", "Modules.ReminderSound", "Modules.QuietReminders", "Modules.Downloads"] },
+    keys: ["Modules.CalendarIcsUrl", "Modules.CalendarHolidays", "Modules.MeetingAlertMinutes", "Modules.ReminderSound", "Modules.QuietReminders", "Modules.Downloads"] },
   { id: "pages", title: "Page options", desc: "Weather city and units, system numbers, the file shelf, the focus guard and a daily screen time limit.", icon: <SlidersHorizontal size={18} />,
     keys: ["Modules.WeatherCity", "Modules.WeatherFahrenheit", "Modules.ShowMetricText", "Modules.FileTrayMaxItems", "Modules.FileTrayPersist",
       "Bunbun.FocusGuard", "Bunbun.FocusGuardApps", "Bunbun.ScreenTimeLimit"] },

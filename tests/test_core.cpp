@@ -99,6 +99,22 @@ static void TestWork() {
     Check(t.day.date == 20261109 && sum.first >= 9 * 3600 && sum.last <= 18 * 3600 + 10, "the day's span");
     Check((all & wk::kGoalReached) == 0, "8h15m isn't reached by 7h55m of work");
 
+    // Days off: a date, and a range that rolls over a month end, keep auto-start from treating the day as work.
+    {
+        const std::vector<int> off = wk::ParseDatesOff(L"2026-12-25, 2026-12-30..2027-01-02");
+        Check(off.size() == 5 && off[1] == 20261230 && off[3] == 20270101, "days off parsing");
+        wk::Tracker h;
+        h.schedule.daysOff = off;
+        wk::Input xmas;
+        xmas.date = 20261225; xmas.prevDate = 20261224; xmas.weekday = 4; xmas.second = 10 * 3600; xmas.epoch = 1;
+        bool w = true; int d = 0, sec = 0;
+        h.Locate(xmas, &w, &d, &sec);
+        Check(!w, "no work on a day off, even a working weekday");
+        xmas.date = 20261224; xmas.prevDate = 20261223; xmas.weekday = 3;
+        h.Locate(xmas, &w, &d, &sec);
+        Check(w, "the day before is still a work day");
+    }
+
     // A night shift, Friday 22:00 to Saturday 06:00: 02:00 on Saturday is Friday's work day.
     wk::Tracker n;
     n.schedule.days = 1u << 4;  // Friday

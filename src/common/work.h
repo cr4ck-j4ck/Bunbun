@@ -57,6 +57,7 @@ struct Schedule {
     int goalMinutes = 0;         // the day's goal; 0: the scheduled hours less lunch
     bool autoStart = true;       // start and stop with the schedule (else only by hand)
     std::vector<Block> blocks;   // Study: the timetable; when set, it replaces days / start / end and lunch
+    std::vector<int> daysOff;    // yyyymmdd dates with no work (holiday, leave): auto-start skips them
 };
 
 // "09:00", "9:30", "18", "6:15 pm" → minutes after midnight; `fallback` when unreadable.
@@ -98,6 +99,39 @@ inline unsigned ParseDays(std::wstring text) {
     for (int d = 0; d < 7; ++d)
         if (text.find(kDays[d]) != std::wstring::npos) mask |= 1u << d;
     return mask;
+}
+
+// "2026-12-25, 2026-12-28..2026-12-31" → yyyymmdd dates; a range lists every day in it (at most a year).
+inline std::vector<int> ParseDatesOff(const std::wstring& text) {
+    std::vector<int> out;
+    auto date = [](const std::wstring& t, int* ymd) {
+        int y, m, d;
+        if (swscanf(t.c_str(), L"%d-%d-%d", &y, &m, &d) != 3 || y < 2000 || m < 1 || m > 12 || d < 1 || d > 31) return false;
+        *ymd = y * 10000 + m * 100 + d;
+        return true;
+    };
+    size_t at = 0;
+    while (at <= text.size()) {
+        size_t end = text.find_first_of(L",;\n ", at);
+        if (end == std::wstring::npos) end = text.size();
+        const std::wstring part = text.substr(at, end - at);
+        at = end + 1;
+        const size_t dots = part.find(L"..");
+        int a = 0, b = 0;
+        if (dots == std::wstring::npos ? date(part, &a) : (date(part.substr(0, dots), &a) && date(part.substr(dots + 2), &b))) {
+            if (!b) b = a;
+            // Walk calendar days by yyyymmdd, so month ends roll over properly.
+            for (int day = a, n = 0; day <= b && n < 366; ++n) {
+                out.push_back(day);
+                static const int kLen[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+                int y = day / 10000, m = day / 100 % 100, d = day % 100;
+                const int len = kLen[m - 1] + (m == 2 && (y % 4 == 0 && (y % 100 || y % 400 == 0)));
+                if (++d > len) { d = 1; if (++m > 12) { m = 1; ++y; } }
+                day = y * 10000 + m * 100 + d;
+            }
+        }
+    }
+    return out;
 }
 
 // "mon 10:00-11:00 Maths; tue,thu 14:00-16:00 Physics" (also newlines, "weekdays") → blocks.
@@ -315,8 +349,9 @@ class Tracker {
     // the second within that day (past 86400 after midnight on a night shift).
     void Locate(const Input& in, bool* within, int* workDate, int* second) const {
         const int minute = in.second / 60;
-        const bool today = (schedule.days >> in.weekday) & 1u;
-        const bool yesterday = (schedule.days >> ((in.weekday + 6) % 7)) & 1u;
+        auto off = [&](int d) { return std::find(schedule.daysOff.begin(), schedule.daysOff.end(), d) != schedule.daysOff.end(); };
+        const bool today = ((schedule.days >> in.weekday) & 1u) && !off(in.date);
+        const bool yesterday = ((schedule.days >> ((in.weekday + 6) % 7)) & 1u) && !off(in.prevDate);
         *within = false;
         *workDate = in.date;
         *second = in.second;

@@ -752,6 +752,7 @@ export function Work({ openReport = false }: { openReport?: boolean }) {
             <Row label="Start with my hours" description="Work mode starts and stops with your hours. Off, it only runs when you press Start on the island." settingKeys={["Work.AutoStart"]}>
               <Toggle on={s.bool("Work.AutoStart")} onChange={(v) => s.set("Work.AutoStart", v)} />
             </Row>
+            <Setting k="Work.DaysOff" />
           </Section>
           <Section title="Goal & breaks">
             <Row label="Daily goal" description="Fills the ring on the island. 0 uses your hours less lunch." settingKeys={["Work.GoalHours"]}>

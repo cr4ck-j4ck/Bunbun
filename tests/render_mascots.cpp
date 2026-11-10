@@ -45,7 +45,14 @@ int wmain(int argc, wchar_t** argv) {
                                Character::Luffy, Character::Dazai};
     const Mood moods[] = {Mood::Idle, Mood::Working, Mood::Thinking, Mood::Alert, Mood::Happy, Mood::Music, Mood::Sad, Mood::Sleepy,
                           Mood::Snack, Mood::Listening, Mood::Talking, Mood::Confused, Mood::Streaming, Mood::Dnd, Mood::Live, Mood::Drinking, Mood::Gaming};
-    const int cell = pack.empty() ? 120 : packCell, cols = static_cast<int>(std::size(moods));
+    // --cell N: pixels per cell of the plain sheet (default 120); --transparent: no background.
+    int plainCell = 120;
+    bool transparent = false;
+    for (int i = 2; i < argc; ++i) {
+        if (wcscmp(argv[i], L"--cell") == 0 && i + 1 < argc) plainCell = std::max(32, _wtoi(argv[++i]));
+        if (wcscmp(argv[i], L"--transparent") == 0) transparent = true;
+    }
+    const int cell = pack.empty() ? plainCell : packCell, cols = static_cast<int>(std::size(moods));
     const int rows = pack.empty() ? static_cast<int>(std::size(chars)) : 6;
     const double moments[] = {0.05, 0.5, 1.3, 2.5};
     // Idle looking around: ahead, the four sides and the four diagonals.
@@ -57,7 +64,7 @@ int wmain(int argc, wchar_t** argv) {
     d2d->CreateWicBitmapRenderTarget(bmp.Get(), D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &rt);
     rt->BeginDraw();
-    rt->Clear(D2D1::ColorF(0x1A1622));
+    rt->Clear(transparent ? D2D1::ColorF(0, 0.0f) : D2D1::ColorF(0x1A1622));
     for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < cols; ++c) {
             Style st;

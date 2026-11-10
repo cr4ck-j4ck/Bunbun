@@ -888,7 +888,8 @@ std::string HandleCommand(const std::string& cmd, const Value& msg) {
         out["ok"] = Value::Bool(IslandTestClick(static_cast<int>(msg.getNumber("x", 0)), static_cast<int>(msg.getNumber("y", 0))));
     } else if (cmd == "test_state") {
         out["ok"] = Value::Bool(IslandTestState(msg.getString("kind"), Wide(msg.getString("a")), Wide(msg.getString("b")),
-                                                static_cast<int>(msg.getNumber("n", 0)), static_cast<int>(msg.getNumber("seconds", 8))));
+                                                static_cast<int>(msg.getNumber("n", 0)), static_cast<int>(msg.getNumber("seconds", 8)),
+                                                Wide(msg.getString("lyrics"))));
     } else if (cmd == "ask") {
         const std::string q = msg.getString("query");
         if (!q.empty()) {

@@ -18,6 +18,7 @@
 
 // Forward declarations for Local AI helper
 void BrainWarmup();
+bool ComposeActive();  // Bunbun: an answer to an agent is being typed in the box (studio_module.inc)
 bool BrainTryAnswer(const std::wstring& question, uint64_t lookupId);
 
 // Wikimedia asks API clients to send a descriptive User-Agent with contact info.
@@ -33,6 +34,7 @@ bool g_lookupHotkeyRegistered = false;
 namespace QuickLookup {
 
 constexpr double kPanelIdleSeconds = 25.0;       // panel closes this long after the last key / mouse move
+constexpr double kComposeIdleSeconds = 120.0;    // Bunbun: ... while an answer to an agent is being typed
 constexpr double kResultSeconds = kPanelIdleSeconds;
 constexpr double kMessageSeconds = kPanelIdleSeconds;
 constexpr double kCommandSeconds = 1.6;          // Bunbun: a done command's "Opening Spotify ✨" before the island goes home
@@ -693,82 +695,116 @@ Outcome LookupWikipediaSearch(const std::wstring& query, Result* out) {
     return Outcome::Found;
 }
 
-// ---- source 5: Web Search (Bing + DuckDuckGo fallback for dates, news, and live questions)
-Outcome LookupWebSearch(const std::wstring& query, Result* out) {
+// ---- source 5: Web Search (DuckDuckGo first, Bing as a fallback) ---------------------
+// Bunbun: scripted Bing alone often returns junk for a plain question, which the local AI then
+// "answered" from. Each hit is now checked against the question's own words, so an off-topic page
+// is dropped instead of becoming the evidence.
+struct WebHit { std::wstring title, snippet; };
+
+bool QueryWordsHit(const std::wstring& query, const WebHit& h) {
+    static const wchar_t* const kStop[] = {L"the", L"and", L"for", L"how", L"what", L"why", L"when", L"where", L"who",
+        L"can", L"you", L"are", L"does", L"did", L"was", L"with", L"from", L"that", L"this", L"about", L"tell", L"please",
+        L"my", L"your", L"set", L"get", L"between"};
+    const std::wstring hay = ToLowerCopy(h.title + L" " + h.snippet);
+    int words = 0, hits = 0;
+    std::wstring w;
+    auto flush = [&] {
+        if (w.size() > 2 && std::none_of(std::begin(kStop), std::end(kStop), [&](const wchar_t* t) { return w == t; })) {
+            ++words;
+            if (hay.find(w) != std::wstring::npos) ++hits;
+        }
+        w.clear();
+    };
+    for (wchar_t c : ToLowerCopy(query)) {
+        if (iswalnum(c)) w += c; else flush();
+    }
+    flush();
+    return words == 0 || hits * 5 >= words * 3 && (words < 3 || hits >= 2);   // most of the question's words must appear
+}
+
+std::vector<WebHit> ParseDuckDuckGoHtml(const std::string& html, size_t limit) {
+    std::vector<WebHit> out;
+    size_t pos = 0;
+    while (out.size() < limit && (pos = html.find("class=\"result__a\"", pos)) != std::string::npos) {
+        const size_t tStart = html.find('>', pos);
+        const size_t tEnd = tStart == std::string::npos ? tStart : html.find("</a>", tStart);
+        if (tEnd == std::string::npos) break;
+        const size_t next = html.find("class=\"result__a\"", tEnd);
+        const size_t sOpen = html.find("class=\"result__snippet\"", tEnd);
+        pos = tEnd;
+        if (sOpen == std::string::npos || (next != std::string::npos && sOpen > next)) continue;
+        const size_t sStart = html.find('>', sOpen);
+        const size_t sEnd = sStart == std::string::npos ? sStart : html.find("</a>", sStart);
+        if (sEnd == std::string::npos) continue;
+        WebHit h{StripHtml(bb::todos::FromUtf8(html.substr(tStart + 1, tEnd - tStart - 1))),
+                 StripHtml(bb::todos::FromUtf8(html.substr(sStart + 1, sEnd - sStart - 1)))};
+        if (!h.title.empty() && h.snippet.size() > 15) out.push_back(std::move(h));
+    }
+    return out;
+}
+
+std::vector<WebHit> ParseBingHtml(const std::string& html, size_t limit) {
+    std::vector<WebHit> out;
+    size_t pos = 0;
+    while (out.size() < limit && (pos = html.find("<li class=\"b_algo\"", pos)) != std::string::npos) {
+        const size_t end = html.find("</li>", pos);
+        if (end == std::string::npos) break;
+        const std::string block = html.substr(pos, end - pos);
+        pos = end + 5;
+        const size_t h2 = block.find("<h2");
+        const size_t aOpen = h2 == std::string::npos ? h2 : block.find('>', h2);
+        const size_t h2End = aOpen == std::string::npos ? aOpen : block.find("</h2>", aOpen);
+        if (h2End == std::string::npos) continue;
+        const size_t pOpen = block.find("<p", h2End);
+        const size_t pText = pOpen == std::string::npos ? pOpen : block.find('>', pOpen);
+        const size_t pEnd = pText == std::string::npos ? pText : block.find("</p>", pText);
+        if (pEnd == std::string::npos) continue;
+        WebHit h{StripHtml(bb::todos::FromUtf8(block.substr(aOpen + 1, h2End - aOpen - 1))),
+                 StripHtml(bb::todos::FromUtf8(block.substr(pText + 1, pEnd - pText - 1)))};
+        if (!h.title.empty() && h.snippet.size() > 15) out.push_back(std::move(h));
+    }
+    return out;
+}
+
+// Up to `limit` relevant web results. DuckDuckGo answers a burst of requests with a 202 challenge page
+// (no results), so that case falls through to Bing.
+std::vector<WebHit> WebSearchHits(const std::wstring& query, size_t limit, bool* reachable = nullptr) {
     constexpr wchar_t kBrowserUserAgent[] =
         L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-    constexpr wchar_t kBingHeaders[] = L"Accept-Language: en-US,en;q=0.9\r\n";
-
-    const std::wstring path = L"/search?q=" + AsciiToWide(UrlEncodeComponent(query)) + L"&setlang=en&cc=US";
-    const HttpResult res = HttpGetEx(L"www.bing.com", path.c_str(), true, kBrowserUserAgent, kBingHeaders);
-    if (res.ok && res.status == 200 && !res.body.empty()) {
-        const std::string& html = res.body;
-        size_t pos = 0;
-        while ((pos = html.find("<li class=\"b_algo\"", pos)) != std::string::npos) {
-            size_t end = html.find("</li>", pos);
-            if (end == std::string::npos) break;
-            std::string block = html.substr(pos, end - pos);
-            pos = end + 5;
-
-            size_t h2 = block.find("<h2");
-            if (h2 == std::string::npos) continue;
-            size_t aOpen = block.find('>', h2);
-            if (aOpen == std::string::npos) continue;
-            size_t h2End = block.find("</h2>", aOpen);
-            if (h2End == std::string::npos) continue;
-            std::wstring title = StripHtml(bb::todos::FromUtf8(block.substr(aOpen + 1, h2End - aOpen - 1)));
-
-            size_t pOpen = block.find("<p", h2End);
-            if (pOpen == std::string::npos) continue;
-            size_t pText = block.find('>', pOpen);
-            if (pText == std::string::npos) continue;
-            size_t pEnd = block.find("</p>", pText);
-            if (pEnd == std::string::npos) continue;
-            std::wstring snip = StripHtml(bb::todos::FromUtf8(block.substr(pText + 1, pEnd - pText - 1)));
-
-            if (!title.empty() && !snip.empty() && snip.size() > 15) {
-                Result r;
-                r.title = ClipToChars(title, 80);
-                r.subtitle = L"Web Search";
-                r.body = ClipToChars(snip, kMaxBodyChars);
-                r.source = L"Web Search";
-                *out = std::move(r);
-                return Outcome::Found;
-            }
+    constexpr wchar_t kHeaders[] = L"Accept-Language: en-US,en;q=0.9\r\n";
+    const std::wstring q = AsciiToWide(UrlEncodeComponent(query));
+    bool reached = false;
+    std::vector<WebHit> hits;
+    auto keep = [&](std::vector<WebHit> found) {
+        for (auto& h : found) {
+            if (hits.size() < limit && QueryWordsHit(query, h)) hits.push_back(std::move(h));
         }
-    }
+    };
 
-    // DuckDuckGo Lite fallback
-    const std::wstring ddgPath = L"/lite/?q=" + AsciiToWide(UrlEncodeComponent(query));
-    const HttpResult ddgRes = HttpGetEx(L"lite.duckduckgo.com", ddgPath.c_str(), true, kBrowserUserAgent);
-    if (ddgRes.ok && ddgRes.status == 200 && !ddgRes.body.empty()) {
-        const std::string& html = ddgRes.body;
-        size_t tOpen = html.find("class=\"result-link\"");
-        if (tOpen != std::string::npos) {
-            size_t tStart = html.find('>', tOpen);
-            size_t tEnd = html.find("</a>", tStart);
-            size_t sOpen = html.find("class=\"result-snippet\"", tEnd);
-            if (tStart != std::string::npos && tEnd != std::string::npos && sOpen != std::string::npos) {
-                size_t sStart = html.find('>', sOpen);
-                size_t sEnd = html.find("</td>", sStart);
-                if (sStart != std::string::npos && sEnd != std::string::npos) {
-                    std::wstring title = StripHtml(bb::todos::FromUtf8(html.substr(tStart + 1, tEnd - tStart - 1)));
-                    std::wstring snip = StripHtml(bb::todos::FromUtf8(html.substr(sStart + 1, sEnd - sStart - 1)));
-                    if (!title.empty() && !snip.empty()) {
-                        Result r;
-                        r.title = ClipToChars(title, 80);
-                        r.subtitle = L"Web Search";
-                        r.body = ClipToChars(snip, kMaxBodyChars);
-                        r.source = L"Web Search";
-                        *out = std::move(r);
-                        return Outcome::Found;
-                    }
-                }
-            }
-        }
+    const HttpResult ddg = HttpGetEx(L"html.duckduckgo.com", (L"/html/?q=" + q).c_str(), true, kBrowserUserAgent, kHeaders);
+    if (ddg.ok) reached = true;
+    if (ddg.ok && ddg.status == 200) keep(ParseDuckDuckGoHtml(ddg.body, limit + 3));
+    if (hits.size() < limit) {
+        const HttpResult bing = HttpGetEx(L"www.bing.com", (L"/search?q=" + q + L"&setlang=en&cc=US").c_str(), true,
+                                          kBrowserUserAgent, kHeaders);
+        if (bing.ok) reached = true;
+        if (bing.ok && bing.status == 200) keep(ParseBingHtml(bing.body, limit + 3));
     }
+    if (reachable) *reachable = reached;
+    return hits;
+}
 
-    return Outcome::NotFound;
+Outcome LookupWebSearch(const std::wstring& query, Result* out) {
+    bool reached = false;
+    const std::vector<WebHit> hits = WebSearchHits(query, 1, &reached);
+    if (hits.empty()) return reached ? Outcome::NotFound : Outcome::Failed;
+    Result r;
+    r.title = ClipToChars(hits[0].title, 80);
+    r.subtitle = L"Web Search";
+    r.body = ClipToChars(hits[0].snippet, kMaxBodyChars);
+    r.source = L"Web Search";
+    *out = std::move(r);
+    return Outcome::Found;
 }
 
 std::wstring CleanSearchQuery(const std::wstring& raw) {
@@ -796,36 +832,30 @@ std::wstring CleanSearchQuery(const std::wstring& raw) {
     return res;
 }
 
-// Fetches live search evidence snippets (combining Wikipedia & Web Search in parallel) for grounding the local AI.
+// Fetches live search evidence for grounding the local AI: the top relevant web results first,
+// Wikipedia only as a supplement. Empty when nothing relevant was found (the caller then says so
+// instead of answering from the model's memory).
 std::wstring FetchLiveSearchEvidence(const std::wstring& query) {
     const std::wstring clean = CleanSearchQuery(query);
 
-    // Fetch Web Search and Wikipedia in parallel threads to cut network latency in half
-    auto futWeb = std::async(std::launch::async, [clean, query]() -> std::wstring {
-        Result rWeb;
-        if (LookupWebSearch(query, &rWeb) == Outcome::Found) {
-            return L"- Web Search (" + rWeb.title + L"): " + rWeb.body + L"\n";
-        } else if (clean != query && LookupWebSearch(clean, &rWeb) == Outcome::Found) {
-            return L"- Web Search (" + rWeb.title + L"): " + rWeb.body + L"\n";
-        }
-        return L"";
-    });
-
     auto futWiki = std::async(std::launch::async, [clean, query]() -> std::wstring {
         Result rWiki;
-        if (clean != query && LookupWikipediaSearch(clean, &rWiki) == Outcome::Found) {
-            return L"- Wikipedia (" + rWiki.title + L"): " + rWiki.body + L"\n";
-        } else if (LookupWikipediaSearch(query, &rWiki) == Outcome::Found) {
-            return L"- Wikipedia (" + rWiki.title + L"): " + rWiki.body + L"\n";
+        if ((clean != query && LookupWikipediaSearch(clean, &rWiki) == Outcome::Found) ||
+            LookupWikipediaSearch(query, &rWiki) == Outcome::Found) {
+            if (QueryWordsHit(clean, WebHit{rWiki.title, rWiki.body})) {
+                return L"- Wikipedia (" + rWiki.title + L"): " + rWiki.body + L"\n";
+            }
         }
         return L"";
     });
 
-    std::wstring evidence = futWeb.get();
-    const std::wstring wWiki = futWiki.get();
-    if (!wWiki.empty()) {
-        evidence += wWiki;
+    std::wstring evidence;
+    std::vector<WebHit> hits = WebSearchHits(clean, 3);
+    if (hits.empty() && clean != query) hits = WebSearchHits(query, 3);
+    for (const WebHit& h : hits) {
+        evidence += L"- " + ClipToChars(h.title, 80) + L": " + ClipToChars(h.snippet, 300) + L"\n";
     }
+    evidence += futWiki.get();
     return evidence;
 }
 
@@ -970,10 +1000,12 @@ uint64_t PublishNewLookup(const LookupSnapshot& snap, bool nudge = true) {
 
 // Keeps the panel alive while the user is interacting with it.
 void TouchLookupPanel() {
+    // Bunbun: someone answering an agent's question may take a while to think; the box
+    // waits two minutes, not 25 s, and dropped the half-typed answer on the way.
+    const double idle = ComposeActive() ? QuickLookup::kComposeIdleSeconds : QuickLookup::kPanelIdleSeconds;
     std::lock_guard lock(g_stateMutex);
     if (g_state.lookup.active) {
-        g_state.lookup.expiresAt =
-            std::max(g_state.lookup.expiresAt, NowSeconds() + QuickLookup::kPanelIdleSeconds);
+        g_state.lookup.expiresAt = std::max(g_state.lookup.expiresAt, NowSeconds() + idle);
     }
 }
 
@@ -994,8 +1026,8 @@ void ForceForeground(HWND hwnd) {
 
 // The island is WS_EX_NOACTIVATE so it never steals focus. While the search box is
 // open it has to be able to receive keys, so the flag is dropped for the session.
-void BeginLookupSession(HWND hwnd) {
-    BrainWarmup();  // Pre-warm local AI helper in background so first query has 0ms cold-start
+void BeginLookupSession(HWND hwnd, bool warmModel = true) {
+    if (warmModel) BrainWarmup();  // Pre-warm local AI helper in background so first query has 0ms cold-start
     HWND previous = GetForegroundWindow();
     g_lookupUi.prevForeground = (previous && previous != hwnd) ? previous : nullptr;
 
@@ -1292,21 +1324,25 @@ size_t LookupNextWord(const std::wstring& t, size_t i) {
 }
 
 // Called on the render thread when the hotkey fires.
-void StartQuickLookup(HWND hwnd) {
+// `fromButton`: opened by a click on the island (answering an agent, "Change city", clipboard
+// search), not by the hotkey. Such a box never toggles shut (it was: clicking "Other..." while
+// the box was open closed it, and the answer had nowhere to go), works while Ask Bun's own
+// switch is off (it is also the answer box for agents), and doesn't wake the model.
+void StartQuickLookup(HWND hwnd, bool fromButton = false) {
     bool enabled = false;
     {
         std::lock_guard lock(g_settingsMutex);
         enabled = g_settings.quickLookup;
     }
     // A manually hidden island has nothing to show the panel on.
-    if (!enabled || g_manuallyHidden.load()) {
+    if (!fromButton && (!enabled || g_manuallyHidden.load())) {
         return;
     }
 
-    // Hotkey again = close.
     if (g_lookupUi.open) {
-        CloseLookupPanel(hwnd);
-        return;
+        CloseLookupPanel(hwnd);  // hotkey again = close
+        if (!fromButton) return;
+        // A click: start over with an empty box, and the foreground handed back first.
     }
 
     // Clipboard text is only offered as a suggestion row; nothing is sent anywhere yet.
@@ -1327,7 +1363,7 @@ void StartQuickLookup(HWND hwnd) {
     snap.expiresAt = now + QuickLookup::kPanelIdleSeconds;
     PublishNewLookup(snap);
 
-    BeginLookupSession(hwnd);
+    BeginLookupSession(hwnd, !fromButton);
 }
 
 // WM_KEYDOWN. Printable characters arrive separately through WM_CHAR.

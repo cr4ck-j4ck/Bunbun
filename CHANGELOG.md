@@ -5,6 +5,28 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0]
+### Added
+- **Choose Ask Bun's AI engine.** Besides the built-in offline model, use Ollama on your PC or Google
+  Gemini with your own API key (Gemini searches Google, so answers are current). Both are optional; the
+  built-in model is the default and takes over whenever the chosen engine fails.
+- **Days off for Work mode.** List holidays and leave in Settings → Work (`2026-12-25`, or
+  `2026-12-28..2026-12-31`); all-day calendar events titled leave, vacation, PTO, OOO or day off count too.
+  Work mode doesn't start by itself on those days (Start still works).
+- **Holidays and festivals in the calendar.** Pick your country in Settings → Features and its public
+  holidays appear on the Calendar page (Google's public holiday calendar, no sign-in). Your own Google
+  Calendar already connects through its private iCal link.
+
+### Fixed
+- **Ask Bun no longer answers with something unrelated.** Web evidence now comes from DuckDuckGo first
+  (Bing as a fallback), takes the top three results, and drops any result that doesn't match the
+  question's words. Wikipedia is only a supplement. Commands such as "get me ready for a meeting" go to
+  the planner instead of being answered from search results. When nothing relevant is found online, Bun
+  answers from the model's knowledge and says so.
+- **The agent question card's "Other..." answer is no longer lost.** The answer box stays open while you
+  type (focus loss and the idle timeout no longer discard it), and a single question's typed answer is
+  sent when you submit it.
+
 ## [0.3.11]
 
 ### Fixed

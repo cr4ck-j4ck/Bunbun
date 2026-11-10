@@ -51,4 +51,6 @@ bool IslandTestClick(int x, int y);
 // notification | progress | privacy | mic | camera | download | bluetooth | cheer | clear.
 // a / b are text (title / artist, app / body...), n a number (percent, on/off).
 // While it lasts, the media, lyrics and privacy pollers leave that part of the state alone.
-bool IslandTestState(const std::string& kind, const std::wstring& a, const std::wstring& b, int n, int seconds);
+// For kind "media", `lyrics` is the song's lines separated by "|" (a made-up set when empty).
+bool IslandTestState(const std::string& kind, const std::wstring& a, const std::wstring& b, int n, int seconds,
+                     const std::wstring& lyrics = {});

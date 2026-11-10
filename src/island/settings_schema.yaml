@@ -363,6 +363,21 @@
   - CalendarIcsUrl: ""
     $name: Calendar link
     $description: Your calendar's private iCal link (Google Calendar → Settings → your calendar → "Secret address in iCal format"; Outlook.com → Settings → Shared calendars → Publish → ICS). Several links can go in, separated by spaces. Bunbun fetches it every 5 minutes to show your next meeting with a Join button. Keep it private; anyone with the link can read the calendar.
+  - CalendarHolidays: none
+    $name: Holidays and festivals
+    $description: Adds your country's public holidays and festivals to the calendar page, from Google's public holiday calendar. Needs no sign-in.
+    $options:
+      - none: None
+      - indian: India
+      - usa: United States
+      - uk: United Kingdom
+      - australian: Australia
+      - canadian: Canada
+      - german: Germany
+      - french: France
+      - japanese: Japan
+      - singapore: Singapore
+      - new_zealand: New Zealand
   - MeetingAlertMinutes: 10
     $name: Meeting alert (minutes before)
     $description: How long before a meeting the island shows it with a countdown and Join button. 0 turns the alert off (the calendar tab still shows what's next).
@@ -564,6 +579,25 @@
   - LocalAiModel: ""
     $name: Local AI model file
     $description: Full path to a .gguf model. Leave empty to use the first .gguf in %LOCALAPPDATA%\Bunbun\models.
+  - AiBackend: local
+    $name: AI engine
+    $description: "Which engine answers Ask Bun's questions. Built-in: the small model above, fully offline. Ollama: a model you already run with Ollama on this PC. Gemini: Google's Gemini with your own API key; it can search Google for current facts, but your questions are sent to Google."
+    $options:
+      - local: Built-in (offline)
+      - ollama: Ollama (on this PC)
+      - gemini: Google Gemini (your API key)
+  - OllamaUrl: http://localhost:11434
+    $name: Ollama address
+    $description: Where Ollama listens. The default fits a normal install.
+  - OllamaModel: llama3.2
+    $name: Ollama model
+    $description: The model to use, as shown by "ollama list" (for example llama3.2, qwen2.5 or gemma3).
+  - GeminiKey: ""
+    $name: Gemini API key
+    $description: Create a free key at aistudio.google.com/apikey and paste it here. It is stored in plain text in settings.ini on this PC. Only your question is sent, never your calendar, to-dos or other personal context.
+  - GeminiModel: gemini-2.5-flash
+    $name: Gemini model
+    $description: The Gemini model to use. gemini-2.5-flash is fast and has a free tier.
   - LocalAiIdleMinutes: 5
     $name: Free the model's memory after (minutes)
     $description: The model (about 1-2 GB of memory) is unloaded after this long without a question, and loads again in a second or two when needed.
@@ -898,6 +932,9 @@
   - GoalHours: 0
     $name: Daily goal (hours)
     $description: The work you aim for each day, shown as a ring. 0 uses your hours less lunch.
+  - DaysOff: ""
+    $name: Days off
+    $description: "Holidays and leave: work mode doesn't start by itself on these dates. Dates as 2026-12-25, a range as 2026-12-28..2026-12-31, separated by commas. All-day events in your calendar link titled leave, vacation, PTO, OOO, out of office or day off count too."
   - AutoStart: true
     $name: Start with my hours
     $description: Work mode starts and stops with your working hours. Off, it only runs when you press Start.

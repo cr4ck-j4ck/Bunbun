@@ -37,9 +37,13 @@ struct Pending {
     std::wstring prefix;      // shown above the reply: what the plan already did
     bool finished = false;
     std::wstring error;
+    bool remote = false;      // Ollama / Gemini is answering; if it fails the built-in model takes over
+    bool search = false;      // ... a web question (Gemini searched Google itself)
+    std::wstring results;     // the grounding evidence, kept for that fallback
 };
 Pending g_pending;
 std::atomic<uint64_t> g_busyLookup{0};  // the Ask Bun card a reply is being written for (0: none)
+std::atomic<int> g_backendKind{0};  // 0 built-in, 1 Ollama, 2 Gemini: the card subtitle
 
 std::wstring ExeDir() {
     wchar_t path[MAX_PATH];
@@ -184,7 +188,8 @@ std::string Request(int id, uint64_t lookupId, const std::wstring& question, boo
     if (!results.empty()) {
         // Lean, lightning-fast grounded prompt (evaluates in ~30ms instead of 1000ms)
         add("system", "You are Bun, the little assistant inside the user's desktop dynamic island.\n"
-                      "Answer the question concisely in 1-2 sentences using only the search results provided.\n"
+                      "Answer the question in 1-3 short sentences using ONLY the search results provided; do not add facts from memory.\n"
+                      "If the results do not answer the question, reply: SAY: I couldn't find a clear answer for that.\n"
                       "Always answer directly with SAY: <answer>.");
         add("user", "[Results for: when is diwali in 2026?]\n- Web Search: Diwali 2026 is celebrated on Sunday, November 8, 2026.\nAnswer with SAY.");
         add("assistant", "SAY: Diwali in 2026 is celebrated on Sunday, November 8.");
@@ -192,7 +197,8 @@ std::string Request(int id, uint64_t lookupId, const std::wstring& question, boo
         Value req = Value::Object();
         req["id"] = Value::Number(id);
         req["messages"] = std::move(msgs);
-        req["max_tokens"] = Value::Number(90);
+        req["max_tokens"] = Value::Number(150);
+        req["temperature"] = Value::Number(0.1);
         req["mode"] = Value::String("say");
         return bb::json::Serialize(req) + "\n";
     }
@@ -236,7 +242,7 @@ void ShowInCard(uint64_t lookupId, const std::wstring& body, bool final, bool ta
         lk.talking = talking && !final;
         lk.confused = confused;
         lk.source = L"Bun";
-        lk.subtitle = L"Bun · local AI";
+        lk.subtitle = g_backendKind == 2 ? L"Bun · Gemini" : g_backendKind == 1 ? L"Bun · Ollama" : L"Bun · local AI";
         // Keep the card up while it's being written, and long enough to read after.
         lk.expiresAt = std::max(lk.expiresAt, NowSeconds() + (final ? QuickLookup::kResultSeconds : 30.0));
     }
@@ -268,6 +274,150 @@ std::wstring Visible(const std::string& text) {
         pos = end + 1;
     }
     return out;
+}
+
+// ── Other backends: Ollama on this PC, or Google Gemini with the user's own key ───────────
+// Same replies as the built-in model ("SAY: ..." / "RUN: ..."), so everything after a reply is shared.
+// Ollama stays on this PC (or wherever its URL points). Gemini sends the question to Google, and only when
+// the user pastes a key; the personal "[Now: ...]" context (meetings, to-dos) is never sent to it.
+std::wstring BackendName(const Settings& s) { return s.aiBackend == L"gemini" ? L"gemini" : s.aiBackend == L"ollama" ? L"ollama" : L"local"; }
+bool IsRemote(const Settings& s) { return BackendName(s) != L"local"; }
+
+std::string PostJson(const std::wstring& url, const std::wstring& extraHeaders, const std::string& body, DWORD* status) {
+    *status = 0;
+    URL_COMPONENTS uc{};
+    uc.dwStructSize = sizeof(uc);
+    wchar_t host[256] = L"", path[2048] = L"", extra[2048] = L"";
+    uc.lpszHostName = host; uc.dwHostNameLength = 256;
+    uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
+    uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 2048;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) return {};
+    const std::wstring target = std::wstring(path) + extra;
+    std::string out;
+    HINTERNET s = WinHttpOpen(L"Bunbun", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) return {};
+    WinHttpSetTimeouts(s, 4000, 4000, 20000, 120000);  // a local model can take a while to answer
+    if (HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0)) {
+        const DWORD flags = uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
+        if (HINTERNET r = WinHttpOpenRequest(c, L"POST", target.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags)) {
+            const std::wstring hdr = L"Content-Type: application/json\r\n" + extraHeaders;
+            if (WinHttpSendRequest(r, hdr.c_str(), static_cast<DWORD>(hdr.size()), const_cast<char*>(body.data()),
+                                   static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0) &&
+                WinHttpReceiveResponse(r, nullptr)) {
+                DWORD st = 0, sz = sizeof(st);
+                WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &st, &sz, WINHTTP_NO_HEADER_INDEX);
+                *status = st;
+                for (DWORD n = 0; WinHttpQueryDataAvailable(r, &n) && n > 0 && out.size() < (4u << 20);) {
+                    std::string buf(n, '\0');
+                    DWORD got = 0;
+                    if (!WinHttpReadData(r, buf.data(), n, &got)) break;
+                    out.append(buf, 0, got);
+                }
+            }
+            WinHttpCloseHandle(r);
+        }
+        WinHttpCloseHandle(c);
+    }
+    WinHttpCloseHandle(s);
+    return out;
+}
+
+// One reply from Ollama or Gemini for the messages in `req` (built by Request). `search`: let Gemini use
+// Google Search for current facts. Empty text with `error` set on failure.
+std::string RemoteReply(const Settings& st, const std::string& req, bool search, std::wstring* error) {
+    using bb::json::Value;
+    Value in;
+    if (!bb::json::Parse(req, &in) || !in.find("messages")) { *error = L"bad request"; return {}; }
+    const bool gemini = BackendName(st) == L"gemini";
+    std::string system, reply;
+    Value turns = Value::Array();
+    const Value& msgs = *in.find("messages");
+    for (size_t i = 0; i < msgs.arr.size(); ++i) {
+        const std::string role = msgs.arr[i].getString("role");
+        std::string text = msgs.arr[i].getString("content");
+        if (role == "system") { system += text + "\n"; continue; }
+        if (gemini && role == "user" && i + 1 == msgs.arr.size() && text.rfind("[Now: ", 0) == 0) {
+            const size_t e = text.find("] ");
+            if (e != std::string::npos) text.erase(0, e + 2);  // never send meetings or to-dos to Google
+        }
+        Value m = Value::Object();
+        if (gemini) {
+            m["role"] = Value::String(role == "assistant" ? "model" : "user");
+            Value part = Value::Object(); part["text"] = Value::String(text);
+            Value parts = Value::Array(); parts.push(std::move(part));
+            m["parts"] = std::move(parts);
+        } else {
+            m["role"] = Value::String(role);
+            m["content"] = Value::String(text);
+        }
+        turns.push(std::move(m));
+    }
+    if (search) system += "Use Google Search for current facts and answer with SAY: <1-3 short sentences>.\n";
+    Value body = Value::Object();
+    std::wstring url, hdr;
+    if (gemini) {
+        if (st.geminiKey.empty()) { *error = L"add your Gemini API key in Settings"; return {}; }
+        Value sp = Value::Object(); sp["text"] = Value::String(system);
+        Value sparts = Value::Array(); sparts.push(std::move(sp));
+        Value si = Value::Object(); si["parts"] = std::move(sparts);
+        body["systemInstruction"] = std::move(si);
+        body["contents"] = std::move(turns);
+        if (search) {
+            Value tool = Value::Object(); tool["google_search"] = Value::Object();
+            Value tools = Value::Array(); tools.push(std::move(tool));
+            body["tools"] = std::move(tools);
+        }
+        url = L"https://generativelanguage.googleapis.com/v1beta/models/" + (st.geminiModel.empty() ? std::wstring(L"gemini-2.5-flash") : st.geminiModel) + L":generateContent";
+        hdr = L"x-goog-api-key: " + st.geminiKey + L"\r\n";
+    } else {
+        Value sm = Value::Object(); sm["role"] = Value::String("system"); sm["content"] = Value::String(system);
+        Value all = Value::Array(); all.push(std::move(sm));
+        for (auto& t : turns.arr) all.push(std::move(t));
+        body["model"] = Value::String(Utf8(st.ollamaModel.empty() ? std::wstring(L"llama3.2") : st.ollamaModel));
+        body["messages"] = std::move(all);
+        body["stream"] = Value::Bool(false);
+        url = (st.ollamaUrl.empty() ? std::wstring(L"http://localhost:11434") : st.ollamaUrl) + L"/api/chat";
+    }
+    DWORD status = 0;
+    const std::string raw = PostJson(url, hdr, bb::json::Serialize(body), &status);
+    Value out;
+    if (status == 0) { *error = gemini ? L"couldn't reach Google" : L"couldn't reach Ollama (is it running?)"; return {}; }
+    if (!bb::json::Parse(raw, &out) || !out.isObject()) { *error = L"unreadable reply"; return {}; }
+    if (status != 200) {
+        const Value* e = out.find("error");
+        const std::string msg = e ? (e->isObject() ? e->getString("message") : e->str) : "";
+        *error = L"HTTP " + std::to_wstring(status) + (msg.empty() ? L"" : L": " + Wide(msg.substr(0, 160)));
+        return {};
+    }
+    if (gemini) {
+        const Value* c = out.find("candidates");
+        const Value* content = c && c->isArray() && !c->arr.empty() ? c->arr[0].find("content") : nullptr;
+        const Value* parts = content ? content->find("parts") : nullptr;
+        if (parts && parts->isArray()) for (const Value& p : parts->arr) reply += p.getString("text");
+    } else if (const Value* m = out.find("message")) {
+        reply = m->getString("content");
+    }
+    while (!reply.empty() && isspace(static_cast<unsigned char>(reply.back()))) reply.pop_back();
+    while (!reply.empty() && isspace(static_cast<unsigned char>(reply.front()))) reply.erase(0, 1);
+    if (reply.empty()) { *error = L"empty reply"; return {}; }
+    if (reply.rfind("SAY: ", 0) != 0 && reply.rfind("RUN: ", 0) != 0) reply = "SAY: " + reply;
+    return reply;
+}
+
+// Runs a remote request on a worker and hands the finished reply over like the helper's reader does.
+void AskRemote(const Settings& st, int id, const std::string& req, bool search) {
+    std::thread([st, id, req, search]() {
+        std::wstring err;
+        const std::string text = RemoteReply(st, req, search, &err);
+        {
+            std::lock_guard lock(g_mutex);
+            if (g_pending.id != id) return;  // replaced by a newer question
+            g_pending.text = text;
+            g_pending.error = err;
+            g_pending.finished = true;
+        }
+        if (g_hwnd) PostMessageW(g_hwnd, WM_APP_BRAIN, 0, 0);
+    }).detach();
 }
 
 // ── The helper process ──────────────────────────────────────────────────────
@@ -397,7 +547,7 @@ bool Send(const std::string& line) {
 // Pre-warms the local AI helper in the background so the model is loaded when the user enters text
 void Warmup() {
     const Settings settings = GetSettingsCopy();
-    if (!settings.localAi) return;
+    if (!settings.localAi || IsRemote(settings)) return;
     const std::wstring model = ModelPath(settings);
     if (model.empty() || GetFileAttributesW(HelperPath().c_str()) == INVALID_FILE_ATTRIBUTES) return;
     if (!Running()) {
@@ -407,11 +557,13 @@ void Warmup() {
 
 // Starts a question (or its "say only" retry). Window thread.
 bool Ask(const std::wstring& question, uint64_t lookupId, bool sayOnly, const std::wstring& results = {},
-         const std::wstring& prefix = {}) {
+         const std::wstring& prefix = {}, bool search = false, bool forceLocal = false) {
     const Settings settings = GetSettingsCopy();
-    const std::wstring model = ModelPath(settings);
-    if (model.empty() || GetFileAttributesW(HelperPath().c_str()) == INVALID_FILE_ATTRIBUTES) return false;
-    if (!Running()) {
+    const bool remote = !forceLocal && IsRemote(settings);
+    g_backendKind = remote ? (BackendName(settings) == L"gemini" ? 2 : 1) : 0;
+    const std::wstring model = remote ? std::wstring() : ModelPath(settings);
+    if (!remote && (model.empty() || GetFileAttributesW(HelperPath().c_str()) == INVALID_FILE_ATTRIBUTES)) return false;
+    if (!remote && !Running()) {
         Stop();
         if (!Start(model)) return false;
     }
@@ -427,7 +579,14 @@ bool Ask(const std::wstring& question, uint64_t lookupId, bool sayOnly, const st
         g_pending.sayOnly = sayOnly;
         g_pending.answering = !results.empty();
         g_pending.prefix = prefix;
+        g_pending.remote = remote;
+        g_pending.search = search;
+        g_pending.results = results;
         g_lastUse = NowSeconds();
+    }
+    if (remote) {
+        AskRemote(settings, id, Request(id, lookupId, question, sayOnly, results), search);
+        return true;
     }
     if (!Send(Request(id, lookupId, question, sayOnly, results))) {
         Stop();
@@ -442,13 +601,34 @@ void BrainWarmup() {
     Brain::Warmup();
 }
 
+// Bunbun: a question that needs facts from the web, as opposed to a command, a chat, or advice.
+bool LooksFactual(const std::wstring& lower) {
+    static const wchar_t* const kOpinion[] = {L"should i", L"recommend", L"suggest", L"name my", L"idea", L"opinion", L"do you think",
+                                              L"your favorite", L"remind me"};
+    for (const wchar_t* w : kOpinion) {
+        if (lower.find(w) != std::wstring::npos) return false;
+    }
+    static const wchar_t* const kStarts[] = {L"how ", L"what", L"why ", L"when ", L"where ", L"who", L"which ", L"is ", L"are ",
+                                             L"can ", L"does ", L"do ", L"did ", L"explain", L"define", L"difference", L"tell me",
+                                             L"compare", L"meaning of", L"steps to", L"guide"};
+    for (const wchar_t* w : kStarts) {
+        if (lower.rfind(w, 0) == 0) return true;
+    }
+    // "i want to setup wake on lan on my laptop": a how-to said as a statement.
+    for (const wchar_t* w : {L"how to", L"setup", L"set up", L"install", L"fix ", L"enable", L"configure", L"troubleshoot", L"want to know"}) {
+        if (lower.find(w) != std::wstring::npos) return true;
+    }
+    return !lower.empty() && lower.back() == L'?';
+}
+
 // Ask Bun: a question the parser didn't understand. Returns false when Local AI
 // is off or not set up (no helper, no model), so the usual reply is shown.
 bool BrainTryAnswer(const std::wstring& question, uint64_t lookupId) {
     const Settings settings = GetSettingsCopy();
-    if (!settings.localAi) return false;
-    const std::wstring model = Brain::ModelPath(settings);
-    if (model.empty() || GetFileAttributesW(Brain::HelperPath().c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    if (!settings.localAi && !Brain::IsRemote(settings)) return false;
+    // Ollama / Gemini are optional: with one chosen, Ask uses it and falls back to the built-in model on any failure.
+    const bool builtInReady = !Brain::ModelPath(settings).empty() && GetFileAttributesW(Brain::HelperPath().c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!Brain::IsRemote(settings) && !builtInReady) return false;
 
     Brain::ShowInCard(lookupId, Loc(L"Thinking…"), false, true);
     Brain::g_busyLookup = lookupId;
@@ -471,12 +651,25 @@ bool BrainTryAnswer(const std::wstring& question, uint64_t lookupId) {
         return true;
     }
 
+    // Bunbun: only a factual question goes to the web. A command ("open teams", "get me ready for a
+    // meeting") goes to the planner; before, any question with search results was answered from them,
+    // so tasks got web answers. With no relevant results, say so instead of answering from memory.
+    if (!LooksFactual(lower)) {
+        return Brain::Ask(question, lookupId, false);
+    }
+    // Gemini searches Google itself, so there is no scraping step.
+    if (Brain::BackendName(settings) == L"gemini") {
+        return Brain::Ask(question, lookupId, true, {}, {}, true);
+    }
     std::thread([question, lookupId]() {
         std::wstring evidence = QuickLookup::FetchLiveSearchEvidence(question);
         if (!evidence.empty()) {
             Brain::Ask(question, lookupId, true, evidence);
         } else {
-            Brain::Ask(question, lookupId, false);
+            // Nothing relevant online: answer from the model's own knowledge, and say so.
+            if (!Brain::Ask(question, lookupId, true, {}, Loc(L"Couldn't check online, so from memory:\n"))) {
+                Brain::ShowInCard(lookupId, Loc(L"I couldn't find a reliable answer online for that. Check your connection or try rephrasing."), true);
+            }
         }
     }).detach();
 
@@ -535,6 +728,18 @@ void BrainOnReply(WPARAM what) {
         Brain::g_pending.finished = false;
         Brain::g_busyLookup = 0;
         Brain::g_lastUse = NowSeconds();
+    }
+    if (!p.error.empty() && p.remote) {
+        // Bunbun: Ollama or Gemini failed (not running, no key, offline, quota): the built-in model answers instead.
+        Wh_Log(L"AI engine failed, using the built-in model: %ls", p.error.c_str());
+        std::thread([p]() {
+            std::wstring evidence = p.results;
+            if (p.search) evidence = QuickLookup::FetchLiveSearchEvidence(p.question);  // Gemini had searched; do it ourselves
+            if (!Brain::Ask(p.question, p.lookupId, p.sayOnly, evidence, p.prefix, false, true)) {
+                Brain::ShowInCard(p.lookupId, L"AI: " + p.error, true, false, true);
+            }
+        }).detach();
+        return;
     }
     if (!p.error.empty()) {
         const uint64_t lookupId = p.lookupId;

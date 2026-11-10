@@ -6,6 +6,12 @@
 
 **A native Dynamic Island for Windows and Linux, with a small bunny named Bun who keeps an eye on your coding agents.**
 
+[![Release](https://img.shields.io/github/v/release/iaryasharma/Bunbun?style=flat-square&color=4cc9f0)](../../releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/iaryasharma/Bunbun/ci.yml?branch=main&style=flat-square&label=CI)](../../actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/iaryasharma/Bunbun?style=flat-square)](LICENSE)
+[![Contributors](https://img.shields.io/github/contributors/iaryasharma/Bunbun?style=flat-square&color=brightgreen)](https://github.com/iaryasharma/Bunbun/graphs/contributors)
+![Windows and Linux](https://img.shields.io/badge/Windows%20%C2%B7%20Linux-8b7cf6?style=flat-square)
+
 [Get started](#get-started) · [Studio](#the-studio-island) · [Features](#features) · [Settings](#the-settings-app) · [Docs](#documentation)
 
 </div>
@@ -15,8 +21,8 @@
 Bunbun is **one island** at the top of your screen (or the bottom, or on every display). It shows
 what's playing, your calendar, weather, system stats, Wi-Fi and Bluetooth, notifications, timers and
 a file shelf. When your coding agent is working, Bun shows what it's doing; when the agent needs
-permission, you answer with one click. When two things happen at once, they share the island side by
-side.
+permission, you answer with one click. It shows one thing at a time: an alert takes the island,
+then steps aside.
 
 It's C++20, Win32 and Direct2D: no Electron, about **30 MB of memory** and **1–3 % of one core**
 while idle.
@@ -42,7 +48,7 @@ highlights follow the colour of the album you're playing; each coding agent keep
     <td width="50%"><img src="docs/images/studio-calendar.png" alt="Studio Calendar page"><br><sub><b>Calendar.</b> The month, and your next meeting and to-dos beside it.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/studio-focus.png" alt="Studio Focus page"><br><sub><b>Focus.</b> Pick hours and minutes, or a preset, and start.</sub></td>
+    <td width="50%"><img src="docs/images/studio-focus.png" alt="Studio Timers page"><br><sub><b>Timers.</b> A focus timer, a countdown you set on a ring, a stopwatch, and water.</sub></td>
     <td width="50%"><img src="docs/images/studio-apps.png" alt="Studio All apps page"><br><sub><b>All apps.</b> Every page, the colour picker and Settings in one grid.</sub></td>
   </tr>
 </table>
@@ -68,13 +74,11 @@ Six characters, all drawn in code: **Bun** the bunny, **Miso** the cat, **Biscui
 what's happening:
 
 <p align="center">
-  <img src="docs/images/moods.png" alt="Bun's moods: idle, working, thinking, needs you, celebrate, music, do not disturb, error, sleepy" width="900">
-  <br>
-  <sub>Idle · Working · Thinking · Needs you · Celebrate · Music · Do not disturb · Error · Sleepy</sub>
+  <img src="docs/images/moods.png" alt="Bun's moods: idle, working, thinking, needs you, celebrate, music, do not disturb, error, sleepy, away, streaming, live, water, game mode, listening, talking and confused" width="900">
 </p>
 
-Bun sits beside the clock, puts on headphones when music plays, hops when a task finishes, and
-settles in with a snack when you turn on mascot do-not-disturb. You can also load your own art as a
+Bun sits beside the clock, puts on headphones when music plays, hops when a task finishes, nibbles a
+carrot when you step away, and puts on headphones and a moon when Do Not Disturb is on. You can also load your own art as a
 [skin pack](docs/mascots.md#custom-skin-packs).
 
 ### Everything else on the island
@@ -213,7 +217,7 @@ for quick options. Settings live in `%APPDATA%\Bunbun\settings.ini`.
 
 ## Privacy
 
-No telemetry and no AI service. The optional local AI runs entirely on your PC. The network is used only by the weather, lyrics and dictionary
+No telemetry and no Bunbun AI service. The optional local AI runs entirely on your PC. You can instead point Ask Bun at Ollama on your PC, or paste your own Google Gemini key (off by default; then your questions go to Google, never your calendar or to-dos). The network is used only by the weather, lyrics and dictionary
 modules (and weather for a city you ask about), by the calendar link you add (fetched every 5 minutes), by web searches you ask Bun for, and by a once-a-day update check that asks GitHub for the
 latest release (turn it off in **Settings → General → Updates**). Weather comes from Open-Meteo; with
 no city set, the location comes from Windows' own location service (never from your IP address),
@@ -228,6 +232,18 @@ updates itself: it closes, a small window with Bun downloads the new version, ch
 release's published checksums, installs it and opens the new Bunbun. Nothing is installed until you
 choose Update. Your settings, skin packs and connected agents carry over. A copy you unzipped or
 built yourself opens the release page instead.
+
+## Contributors
+
+Thanks to everyone who has helped build Bunbun. This wall updates itself from GitHub.
+
+<p align="center">
+  <a href="https://github.com/iaryasharma/Bunbun/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=iaryasharma/Bunbun" alt="Bunbun contributors">
+  </a>
+</p>
+
+Want to be on it? [Contributing](CONTRIBUTING.md) says how to start.
 
 ## Credits & license
 

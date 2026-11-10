@@ -24,6 +24,32 @@ std::wstring FilePath() {
     return dir + L"\\work.txt";
 }
 
+// Bunbun: all-day calendar events titled leave / vacation / PTO / OOO / out of office / day off
+// are days off, so work mode doesn't start by itself that day. (Public-holiday feeds carry festival
+// names, which don't match, so a festival doesn't cancel the day unless the user lists it in Work.DaysOff.)
+std::vector<int> CalendarLeaveDates(const std::vector<CalendarItem>& items) {
+    std::vector<int> out;
+    for (const CalendarItem& it : items) {
+        if (it.endsAt - it.startsAt < 20 * 3600.0) continue;  // not an all-day event
+        const std::wstring t = ToLowerCopy(it.title);
+        bool leave = false;
+        for (const wchar_t* w : {L"leave", L"vacation", L"pto", L"ooo", L"out of office", L"day off", L"holiday"}) {
+            if (t.find(w) != std::wstring::npos) { leave = true; break; }
+        }
+        if (!leave) continue;
+        for (double e = it.startsAt + 3600; e < it.endsAt && out.size() < 400; e += 86400.0) {
+            ULARGE_INTEGER u;
+            u.QuadPart = static_cast<ULONGLONG>((e + 11644473600.0) * 1e7);
+            FILETIME utc{u.LowPart, u.HighPart}, local;
+            SYSTEMTIME st;
+            FileTimeToLocalFileTime(&utc, &local);
+            FileTimeToSystemTime(&local, &st);
+            out.push_back(st.wYear * 10000 + st.wMonth * 100 + st.wDay);
+        }
+    }
+    return out;
+}
+
 // Now, as the tracker sees it.
 bb::work::Input Now(const Settings& s) {
     SYSTEMTIME st;
@@ -249,9 +275,19 @@ DWORD WINAPI WorkThreadProc(void*) {
             bb::work::Summary sum;
             bb::work::Schedule sch;
             bool save = false;
+            std::vector<int> leave;
+            if (s.workSchedule.autoStart) {
+                std::shared_ptr<const std::vector<CalendarItem>> cal;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    cal = g_state.calendar;
+                }
+                if (cal) leave = Work::CalendarLeaveDates(*cal);
+            }
             {
                 std::lock_guard lock(Work::g_mutex);
                 Work::g_tracker.schedule = s.workSchedule;
+                Work::g_tracker.schedule.daysOff.insert(Work::g_tracker.schedule.daysOff.end(), leave.begin(), leave.end());
                 const bb::work::Day before = Work::g_tracker.day;
                 const bb::work::Phase was = Work::g_tracker.phase;
                 events = Work::g_tracker.Tick(in, dt);

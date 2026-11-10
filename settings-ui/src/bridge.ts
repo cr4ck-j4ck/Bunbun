@@ -99,16 +99,21 @@ async function mock(cmd: string, args: Record<string, unknown>): Promise<unknown
     case "agentStatus":
       return { claudeConnected: false, claudeSettingsPath: "~/.claude/settings.json" };
     case "getAccent":
-      return "#ff7a59";
+      return (window as unknown as { __mockAccent?: string }).__mockAccent ?? "#ff7a59";
     case "getSystem":
       // ?platform=linux shows what the settings app marks as not on Linux yet.
-      return { autostart: false, islandRunning: true, version: "0.1.0", packsFolder: "%APPDATA%\\Bunbun\\mascots",
+      return { autostart: false, islandRunning: true, version: __APP_VERSION__, packsFolder: "%APPDATA%\\Bunbun\\mascots",
                platform: new URLSearchParams(location.search).get("platform") ?? "windows" };
-    case "renderMascot":
-      return "";
+    // Dev only: a tool taking screenshots can hand the mock real mascot renders and island pictures.
+    case "renderMascot": {
+      const hook = (window as unknown as { __mockMascot?: (a: Record<string, unknown>) => string }).__mockMascot;
+      return hook ? hook(args) : "";
+    }
+    case "getPagePreviews":
+      return (window as unknown as { __mockPagePreviews?: unknown }).__mockPagePreviews ?? false;
     case "checkUpdate":
       await new Promise((r) => setTimeout(r, 600));
-      return { current: "0.1.0", checked: true, latest: "0.2.0", newer: true,
+      return { current: __APP_VERSION__, checked: true, latest: __APP_VERSION__, newer: false,
                url: "https://github.com/iaryasharma/Bunbun/releases/latest" };
     case "workDays": {  // a made-up week for the design preview
       const out = [];

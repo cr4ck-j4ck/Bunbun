@@ -84,6 +84,15 @@ name your model. Then press **Ctrl+Alt+B** and ask something Bun doesn't know as
 
 The first question takes a few seconds while the model loads; later ones start almost at once.
 
+## Optional: Ollama or Google Gemini
+
+The built-in model is the default and the fallback. In **Settings → Assistant → AI engine** you can pick another engine instead:
+
+- **Ollama (on this PC):** uses a model you already run with [Ollama](https://ollama.com) (address `http://localhost:11434`, model name as in `ollama list`). Nothing leaves your PC.
+- **Google Gemini:** paste a free API key from aistudio.google.com/apikey. Factual questions use Gemini with Google Search, so answers are current. Your question is sent to Google; your calendar, to-dos and other personal context never are. The key is stored in plain text in `settings.ini`.
+
+If the chosen engine isn't running, has no key, is offline or hits a quota, Bun answers with the built-in model instead.
+
 ## Bun as an agent
 
 Bun can do several things for one request, and look things up before it answers:
