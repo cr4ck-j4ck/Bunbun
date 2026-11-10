@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.11]
+
 ### Fixed
 - **Linux: right-clicking the island no longer quits Bunbun.** The AppImage bundled gtk-layer-shell
   0.7.0, which crashes when the island's right-click menu opens on newer GTK (seen on Fedora 42 with
