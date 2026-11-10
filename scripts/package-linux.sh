@@ -58,9 +58,15 @@ cp THIRD_PARTY_NOTICES.md "$ROOT/usr/share/doc/bunbun/" 2>/dev/null || true
 pkg-config --atleast-version=0.10 gtk-layer-shell-0 ||
     { echo "gtk-layer-shell is $(pkg-config --modversion gtk-layer-shell-0): need 0.10 or newer. Run scripts/build-gtk-layer-shell.sh and export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig." >&2; exit 1; }
 mkdir -p "$ROOT/usr/lib/bunbun/lib"
-gls="$(ldd "$BUILD/bunbun" | awk '$1 ~ /^libgtk-layer-shell/ {print $3}')"
-[ -n "$gls" ] || { echo "libgtk-layer-shell not found; is it linked into $BUILD/bunbun?" >&2; exit 1; }
+# Copied from the directory pkg-config linked against, which the check above just vetted.
+# ldd would pick whichever copy the loader finds first, and a stale 0.7 from the distro's
+# own libgtk-layer-shell0 can win that, even though the check passed.
+gls="$(pkg-config --variable=libdir gtk-layer-shell-0)/libgtk-layer-shell.so.0"
+[ -e "$gls" ] || { echo "$gls not found: is gtk-layer-shell installed with its runtime library?" >&2; exit 1; }
 cp -L "$gls" "$ROOT/usr/lib/bunbun/lib/"
+# It is LGPL-3.0-or-later: the licence texts travel with the library (THIRD_PARTY_NOTICES.md says where from).
+mkdir -p "$ROOT/usr/share/doc/bunbun/licenses"
+cp -r packaging/linux/licenses/gtk-layer-shell "$ROOT/usr/share/doc/bunbun/licenses/"
 
 # ── .deb ────────────────────────────────────────────────────────────────────
 DEB="$DIST/Bunbun-$VERSION-amd64.deb"

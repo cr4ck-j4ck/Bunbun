@@ -13,6 +13,9 @@ and versions follow [Semantic Versioning](https://semver.org/).
 - **Linux: the settings window closes right after it opens on some Wayland compositors** (Hyprland).
   WebKitGTK's DMABUF renderer failed with "Protocol error"; Bunbun now turns it off on Wayland. Set
   `WEBKIT_DISABLE_DMABUF_RENDERER` yourself to override.
+- **Linux packages: the licence texts of the bundled gtk-layer-shell** (LGPL-3.0-or-later) now
+  ship in `/usr/share/doc/bunbun/licenses/`, and the library packaged is the exact copy the build
+  linked against, not whichever one the loader finds first (a stale 0.7 could win that).
 
 ## [0.3.10]
 
