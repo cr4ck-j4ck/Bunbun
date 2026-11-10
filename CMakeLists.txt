@@ -30,6 +30,11 @@ option(BUNBUN_BUILD_SETTINGS "Build bunbun-settings (needs WebKitGTK 4.1)" ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 pkg_check_modules(LAYERSHELL REQUIRED IMPORTED_TARGET gtk-layer-shell-0>=0.6)
+if(LAYERSHELL_VERSION VERSION_LESS 0.10)
+    # 0.7 crashes the island's right-click menu (Ubuntu 22.04 ships it). The packages need 0.10.
+    message(WARNING "gtk-layer-shell ${LAYERSHELL_VERSION} crashes the island's right-click menu. "
+                    "Build 0.10 or newer with scripts/build-gtk-layer-shell.sh (see docs/building.md).")
+endif()
 # Lyrics (LRCLIB, NetEase) are fetched with libsoup 3.
 pkg_check_modules(SOUP REQUIRED IMPORTED_TARGET libsoup-3.0)
 # Full-screen detection and the hide / tuck hotkeys on X11.
@@ -129,6 +134,10 @@ set(PKGLIB ${CMAKE_INSTALL_LIBDIR}/bunbun)
 if(CMAKE_INSTALL_LIBDIR MATCHES "^lib/")  # Debian's lib/x86_64-linux-gnu: keep it plain lib/bunbun
     set(PKGLIB lib/bunbun)
 endif()
+# The island looks for libraries it ships itself (gtk-layer-shell 0.10, see package-linux.sh) in
+# lib/ next to it. Set for the install only, so the build tree keeps using the system's copies.
+# (On the target itself: CMAKE_INSTALL_RPATH is read when a target is created, too early here.)
+set_target_properties(bunbun PROPERTIES INSTALL_RPATH "\$ORIGIN/lib")
 install(TARGETS bunbun bunbun-hook RUNTIME DESTINATION ${PKGLIB})
 if(BUNBUN_BUILD_SETTINGS)
     install(TARGETS bunbun-settings RUNTIME DESTINATION ${PKGLIB})
@@ -145,5 +154,5 @@ install(FILES packaging/linux/io.github.bunbun.Bunbun.metainfo.xml DESTINATION $
 install(CODE "foreach(size 64 128 256 512)
                   set(dir \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/icons/hicolor/\${size}x\${size}/apps)
                   file(MAKE_DIRECTORY \${dir})
-                  execute_process(COMMAND $<TARGET_FILE:bunbun> --render-icon \${dir}/bunbun.png \${size})
+                  execute_process(COMMAND \"$<TARGET_FILE:bunbun>\" --render-icon \"\${dir}/bunbun.png\" \${size})
               endforeach()")
