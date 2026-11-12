@@ -40,6 +40,29 @@ double ToEpoch(const bb::ics::WallTime& w, const std::wstring& tzid) {
 
 double EpochNow() { return static_cast<double>(time(nullptr)); }
 
+// The local yyyymmdd of a Unix time.
+int YmdOf(double epoch) {
+    const time_t t = static_cast<time_t>(epoch);
+    tm lt{};
+    localtime_r(&t, &lt);
+    return (lt.tm_year + 1900) * 10000 + (lt.tm_mon + 1) * 100 + lt.tm_mday;
+}
+
+std::vector<int> g_leave;  // all-day leave days from the links (work mode skips them)
+
+// The all-day events of the weeks around now: the settings app's days-off calendar reads
+// calendar-days.txt (as on Windows), and work mode takes the leave days.
+void PublishDays() {
+    const double now = EpochNow();
+    const std::vector<bb::ics::Meeting> items = bb::ics::MeetingsBetween(g_events, now - 42 * 86400.0, now + 70 * 86400.0, ToEpoch, true);
+    g_leave = bb::ics::LeaveDates(items, YmdOf);
+    static std::string last = "\x01";
+    const std::string text = bb::plat::Utf8(bb::ics::AllDayText(items, YmdOf));
+    if (text == last) return;
+    last = text;
+    bb::plat::WriteFileAtomic(bb::plat::StateDir() + "/calendar-days.txt", text);
+}
+
 void Recompute() {
     const bb::ics::Meeting next = bb::ics::NextMeeting(g_events, EpochNow(), ToEpoch);
     const bool changed = next.valid != g_next.valid || next.startsAt != g_next.startsAt || next.title != g_next.title;
@@ -71,6 +94,7 @@ void Refresh() {
     if (links.empty()) {
         g_events.clear();
         g_failed = false;
+        PublishDays();
         Recompute();
         return;
     }
@@ -89,6 +113,7 @@ void Refresh() {
             }
             if (--g_pending == 0) {
                 if (g_anyOk) g_events = std::move(g_fresh);
+                PublishDays();
                 Recompute();
                 if (g_changed) g_changed();
             }
@@ -114,7 +139,11 @@ void Start(std::function<void()> changed) {
 
 void LoadSettings() {
     namespace s = bb::settings;
-    const std::wstring urls = s::Get(L"Modules.CalendarIcsUrl");
+    std::wstring urls = s::Get(L"Modules.CalendarIcsUrl");
+    // A country's public holidays and festivals ride along as one more link (Modules.CalendarHolidays, as on Windows).
+    const std::wstring region = s::Get(L"Modules.CalendarHolidays");
+    if (!region.empty() && region != L"none" && region.find_first_not_of(L"abcdefghijklmnopqrstuvwxyz_") == std::wstring::npos)
+        urls += L" https://calendar.google.com/calendar/ical/en." + region + L"%23holiday%40group.v.calendar.google.com/public/basic.ics";
     g_alertMinutes = std::max(0, s::GetInt(L"Modules.MeetingAlertMinutes"));
     if (urls != g_urls) {
         g_urls = urls;
@@ -136,6 +165,7 @@ std::vector<bb::ics::Meeting> Today() {
 
 int AlertMinutes() { return g_alertMinutes; }
 bool FetchFailed() { return g_failed; }
+const std::vector<int>& LeaveDays() { return g_leave; }
 
 bool PillWanted(double now) {
     const bb::ics::Meeting& m = g_next;

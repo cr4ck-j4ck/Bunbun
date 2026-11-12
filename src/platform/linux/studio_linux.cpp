@@ -2869,6 +2869,7 @@ bool StudioDo(const Hit& h) {
         case Action::ClipFilter: g_clipFilter = h.index; g_clipSelected = 0; return true;
         case Action::ClipSelect: g_clipSelected = h.index; return true;
         case Action::ClipDelete: lsrc::RemoveClip(h.index); return true;
+        case Action::ScreenTimeDay: bb::lscreen::ShowDay(h.index); return true;
         case Action::ScreenTimeLimit: {  // none, 2 h, 4 h ... 12 h, none; none is the default, written as unset
             static const int kSteps[] = {0, 2, 4, 6, 8, 10, 12};
             int next = 0;

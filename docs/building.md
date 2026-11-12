@@ -201,7 +201,9 @@ cmake --build build-linux
 ```
 
 Outputs, in `build-linux/`: `bunbun` (the island), `bunbun-hook`, `bunbun-settings` and
-`settings-ui/`. Run `build-linux/bunbun`. Options: `-DBUNBUN_BUILD_UI=OFF` skips the npm build (copy
+`settings-ui/` (a checkout shared with Windows, such as WSL on the same folder, works too:
+`scripts/ui-linux-deps.sh` adds the Linux builds of Vite's native parts beside the Windows ones).
+Run `build-linux/bunbun`. Options: `-DBUNBUN_BUILD_UI=OFF` skips the npm build (copy
 a built `settings-ui/` there yourself); `-DBUNBUN_BUILD_SETTINGS=OFF` skips the settings window, so
 WebKitGTK isn't needed.
 

@@ -25,8 +25,13 @@ void Tick();
 struct View {
     bb::screentime::Summary summary;
     std::vector<GdkPixbuf*> icons;  // one per summary.apps entry
+    int shownDay = 0;               // 0 = today, else the yyyymmdd the page shows
 };
 View Get();
+
+// A click on one of the week's bars: that day's time and apps (the same bar again, or two
+// minutes later, goes back to today), as on Windows.
+void ShowDay(int day);
 
 void Save();  // on the way out
 

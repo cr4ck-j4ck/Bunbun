@@ -54,7 +54,7 @@ export const LINUX_SETTINGS = new Set([
   "Modules.DoNotDisturbIndicator", "Modules.Clipboard", "Modules.StatusCountdownProgress", "Modules.TimerModule",
   "Modules.ReminderSound", "Modules.QuietReminders", "Bunbun.FocusGuard", "Bunbun.FocusGuardApps",
   "Modules.DateFormat", "Modules.FirstDayOfWeek",
-  "Bunbun.IdleFace", "Bunbun.EyeColor", "Bunbun.EyeStatusColors", "Bunbun.IdleStripItems", "Bunbun.IdleName", "Bunbun.UseCase", "Work.Days", "Work.Start", "Work.End", "Work.LunchStart", "Work.LunchMinutes", "Work.BreakEvery", "Work.BreakMinutes", "Work.GoalHours", "Work.AutoStart", "Work.Reminders", "Study.Timetable", "Study.GoalHours", "Study.Pomodoro", "Bunbun.StatusRing", "Bunbun.MascotDnd",
+  "Bunbun.IdleFace", "Bunbun.EyeColor", "Bunbun.EyeStatusColors", "Bunbun.IdleStripItems", "Bunbun.IdleName", "Bunbun.UseCase", "Work.Days", "Work.Start", "Work.End", "Work.LunchStart", "Work.LunchMinutes", "Work.BreakEvery", "Work.BreakMinutes", "Work.GoalHours", "Work.AutoStart", "Work.Reminders", "Work.DaysOff", "Modules.CalendarHolidays", "Study.Timetable", "Study.GoalHours", "Study.Pomodoro", "Bunbun.StatusRing", "Bunbun.MascotDnd",
   "Modules.KaraokeLyrics", "Modules.LyricsVisualizer", "Modules.KaraokeLetterGlow", "Modules.LyricsNeighborLinesVisible", "Modules.LyricsOffsetBluetoothMs",
   "Modules.ClockFormat", "Modules.ShowSeconds", "Modules.Media", "Behavior.ExpandOnHover",
   "Modules.Weather", "Modules.WeatherCity", "Modules.WeatherFahrenheit", "Modules.HardwareMonitorModule",

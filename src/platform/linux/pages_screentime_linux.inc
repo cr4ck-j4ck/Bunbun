@@ -23,20 +23,27 @@ void PaintScreenTime(cairo_t* cr, const Rect& r) {
     const Rect r1{r.x, r.y, leftW, 76};
     Fill(cr, r1.x, r1.y, r1.w, r1.h, 12, F(cardBg));
     BarsGlyph(cr, r1.x + 16, r1.y + 14, F(grey));
-    SText(cr, "Today", r1.x + 24, r1.y + 8, 56, 14, FSmall, F(grey));
+    std::string dayTitle = "Today";  // a clicked bar shows that day ("Mon 9 Nov")
+    if (view.shownDay) {
+        static const char* kWd[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        static const char* kMo[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        dayTitle = std::string(kWd[bst::Weekday(view.shownDay) % 7]) + " " + std::to_string(view.shownDay % 100) + " " +
+                   kMo[std::clamp(view.shownDay / 100 % 100 - 1, 0, 11)];
+    }
+    SText(cr, dayTitle, r1.x + 24, r1.y + 8, 116, 14, FSmall, F(view.shownDay ? accent : grey));
     const double cw = (leftW - 24) / 3;
     const bool tight = cw < 84;  // a narrower page: shorter labels
     // A figure too wide for its column ("12h 45m" in a wide font) steps down a size.
     auto fig = [&](const std::string& s, double w) { return Measure(cr, s, FBig) <= w ? FBig : FSong; };
     const std::string todayText = U(bst::Duration(sum.todaySeconds));
     SText(cr, todayText, r1.x + 16, r1.y + 24, cw, 30, fig(todayText, cw), F(white));
-    SText(cr, tight ? "Today" : "Screen time", r1.x + 16, r1.y + 54, cw, 14, FSmall, F(grey));
+    SText(cr, tight ? (view.shownDay ? "That day" : "Today") : "Screen time", r1.x + 16, r1.y + 54, cw, 14, FSmall, F(grey));
     // The middle: what's left of your daily limit, with a ring; else the daily average.
     const double mx = r1.x + 16 + cw, c3 = r1.x + 16 + cw * 2;
     const long long limit = static_cast<long long>(bb::lscreen::LimitHours()) * 3600;
     std::string big, small;
     double tx = mx;
-    if (limit > 0) {
+    if (limit > 0 && !view.shownDay) {  // the limit is today's; another day shows the average
         const bool over = sum.todaySeconds >= limit;
         cairo_new_sub_path(cr);
         cairo_arc(cr, mx + 6, r1.y + 40, 11, 0, 2 * kPi);
@@ -81,13 +88,15 @@ void PaintScreenTime(cairo_t* cr, const Rect& r) {
     for (size_t i = 0; i < sum.week.size() && i < 7; ++i) {
         const bst::DayTotal& d = sum.week[i];
         const double dx = r2.x + 10 + i * dw, cx = dx + dw / 2;
-        SText(cr, kDays[d.weekday % 7], dx, r2.y + r2.h - 18, dw, 14, FSmall, F(d.today ? white : grey), 1);
+        const bool shown = view.shownDay ? d.day == view.shownDay : d.today;  // the day the cards show
+        g_hits.push_back({{dx, r2.y + 28, dw, r2.h - 28}, Action::ScreenTimeDay, d.day});
+        SText(cr, kDays[d.weekday % 7], dx, r2.y + r2.h - 18, dw, 14, FSmall, F(shown ? white : grey), 1);
         if (d.seconds >= 60) {
             const double h = std::max(6.0, tallest * d.seconds / most);
-            Fill(cr, cx - 9, baseline - h, 18, h, 4.5, F(d.today ? white : WithA(grey, 0.55)));
+            Fill(cr, cx - 9, baseline - h, 18, h, 4.5, F(shown ? white : WithA(grey, 0.55)));
             const long long m = d.seconds / 60;
             SText(cr, m >= 60 ? std::to_string(m / 60) + "h" : std::to_string(m) + "m", dx - 2, baseline - h - 16, dw + 4, 14, FSmall,
-                  F(d.today ? white : grey), 1);
+                  F(shown ? white : grey), 1);
         } else {
             Fill(cr, cx - 8, baseline - 1.5, 16, 3, 1, F(C(0x38383a)));
         }
@@ -100,7 +109,7 @@ void PaintScreenTime(cairo_t* cr, const Rect& r) {
     SText(cr, "By app", r3.x + 24, r3.y + 8, 66, 14, FSmall, F(grey));
     if (sum.apps.empty()) {
         const bool can = bb::lscreen::Supported();
-        SText(cr, !bb::lscreen::On() ? "Screen Time is off" : can ? "Counting from now" : "Not on this desktop", r3.x + 14, r3.y + 60,
+        SText(cr, view.shownDay ? "Nothing that day" : !bb::lscreen::On() ? "Screen Time is off" : can ? "Counting from now" : "Not on this desktop", r3.x + 14, r3.y + 60,
               r3.w - 28, 20, FBody, F(white), 1);
         SText(cr, can ? "Apps show here as you use them" : "Wayland doesn't show which app is in front", r3.x + 10, r3.y + 82, r3.w - 20,
               16, FSmall, F(grey), 1);

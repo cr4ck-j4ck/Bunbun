@@ -24123,7 +24123,8 @@ DWORD WINAPI RenderThreadProc(void*) {
         // Bunbun: keep the connectivity sampler running while its tab is on screen,
         // and wake it the moment the tab appears so the status is current.
         if ((primary.kind == IslandKind::Idle || primary.kind == IslandKind::Media) && !isFullscreen &&
-            !gameMetricsPresent && (pinned || isHoverExpanded) && metricTabIdx == ConnectivityTabIndex(g_settings)) {
+            !gameMetricsPresent && (pinned || isHoverExpanded) &&
+            (g_settings.studioLayout || metricTabIdx == ConnectivityTabIndex(g_settings))) {  // Bunbun: Studio shows battery and radios on every page (header, System)
             const double wallNow = NowSeconds();
             if (wallNow - g_connectivityWantedAt.load(std::memory_order_relaxed) > 2.5 && g_connectivityWake) {
                 SetEvent(g_connectivityWake);

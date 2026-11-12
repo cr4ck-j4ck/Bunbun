@@ -934,7 +934,7 @@
     $description: The work you aim for each day, shown as a ring. 0 uses your hours less lunch.
   - DaysOff: ""
     $name: Days off
-    $description: "Holidays and leave: work mode doesn't start by itself on these dates. Dates as 2026-12-25, a range as 2026-12-28..2026-12-31, separated by commas. All-day events in your calendar link titled leave, vacation, PTO, OOO, out of office or day off count too."
+    $description: "Holidays and leave: work mode doesn't start by itself on these dates. Pick them on the calendar in Settings → Work day. Stored as dates (2026-12-25) and ranges (2026-12-28..2026-12-31), separated by commas; an h after one marks a holiday (2026-12-25h). All-day events in your calendar link titled leave, vacation, PTO, OOO, out of office or day off count too."
   - AutoStart: true
     $name: Start with my hours
     $description: Work mode starts and stops with your working hours. Off, it only runs when you press Start.

@@ -31,6 +31,9 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#ifndef _WIN32
+#include <poll.h>
+#endif
 
 #include "../common/json.h"
 #ifdef _WIN32
@@ -548,6 +551,30 @@ const wchar_t* ShowSettingFor(const std::string& id) {
     return L"Bunbun.ShowOtherAgents";
 }
 
+// The connection being served on this thread: is the hook on the other end still
+// there? When you answer a question or an approval in the agent's own window, the
+// agent ends its hook; the island must drop the card then, not two minutes later.
+thread_local std::function<bool()> t_peerAlive;
+
+// Waits like g_decided.wait_for(lock, limit, done), in half-second steps, and gives
+// up early (returns false) when the hook hangs up.
+template <class Rep, class Period, class Pred>
+bool WaitWhilePeerAlive(std::unique_lock<std::mutex>& lock, std::chrono::duration<Rep, Period> limit, Pred done) {
+    const auto until = std::chrono::steady_clock::now() + limit;
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= until) return false;
+        g_decided.wait_for(lock, std::chrono::milliseconds(500), done);
+        if (done()) break;
+        if (t_peerAlive) {
+            lock.unlock();
+            const bool alive = t_peerAlive();
+            lock.lock();
+            if (!alive) return false;
+        }
+    }
+    return true;
+}
+
 // Returns the reply line for blocking requests ("" = no reply).
 std::string HandleEvent(const Value& msg) {
     // An agent the user switched off is ignored completely: no session, no card,
@@ -608,7 +635,7 @@ std::string HandleEvent(const Value& msg) {
         }
         Publish();
         std::unique_lock lock(g_mutex);
-        g_decided.wait_for(lock, kReplyWait, [&] { return waiter->done || !g_running; });
+        WaitWhilePeerAlive(lock, kReplyWait, [&] { return waiter->done || !g_running; });  // or the hook went away
         g_replyWaiters.erase(std::remove(g_replyWaiters.begin(), g_replyWaiters.end(), waiter), g_replyWaiters.end());
         const std::wstring text = waiter->text;
         lock.unlock();
@@ -654,6 +681,16 @@ std::string HandleEvent(const Value& msg) {
             s.diffOld.clear();
             s.diffNew.clear();
         } else if (event == "PreToolUse" || event == "beforeShellExecution") {
+            // A question still open while the agent starts another tool was answered in its
+            // own window (agents whose hook doesn't hang up, or no PostToolUse for it).
+            bool answered = false;
+            for (auto& p : g_pending)
+                if (p->sessionKey == sessionKey && p->question) { ResolveLocked(*p, AgentDecision::Terminal, -1); answered = true; }
+            if (answered) {
+                g_pending.erase(std::remove_if(g_pending.begin(), g_pending.end(), [](const auto& p) { return p->resolved; }),
+                                g_pending.end());
+                g_decided.notify_all();
+            }
             setPhase(AgentPhase::Working);
             s.step = event == "beforeShellExecution" ? L"Runs command" : StepFor(tool, input);
             if (s.turnStart <= 0) s.turnStart = now;
@@ -814,8 +851,10 @@ std::string HandleEvent(const Value& msg) {
     if (!pending) return {};
 
     std::unique_lock lock(g_mutex);
-    g_decided.wait_for(lock, kDecisionWait, [&] { return pending->resolved || !g_running; });
-    ResolveLocked(*pending, AgentDecision::Terminal, -1);  // no-op unless timed out
+    // Until you answer on the island, time runs out, or you answered in the agent's own
+    // window (its hook hangs up).
+    WaitWhilePeerAlive(lock, kDecisionWait, [&] { return pending->resolved || !g_running; });
+    ResolveLocked(*pending, AgentDecision::Terminal, -1);  // no-op unless timed out or hung up
     g_pending.erase(std::remove(g_pending.begin(), g_pending.end(), pending), g_pending.end());
     const AgentDecision d = pending->decision;
     const int answer = pending->answerIndex;
@@ -927,6 +966,10 @@ std::string HandleCommand(const std::string& command) {
 #ifdef _WIN32
 void ServeConnection(HANDLE pipe) {
     std::string line;
+    t_peerAlive = [pipe] {
+        DWORD avail = 0;
+        return PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr) != FALSE || GetLastError() != ERROR_BROKEN_PIPE;
+    };
     if (bb::pipe::ReadLine(pipe, &line)) {
         Value msg;
         if (json::Parse(line, &msg) && msg.isObject()) {
@@ -971,6 +1014,13 @@ void ServerLoop() {
 #else
 void ServeConnection(int fd) {
     std::string line;
+    t_peerAlive = [fd] {
+        pollfd p{fd, POLLIN | POLLRDHUP, 0};
+        if (poll(&p, 1, 0) <= 0) return true;
+        if (p.revents & (POLLHUP | POLLRDHUP | POLLERR)) return false;
+        char c;
+        return recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT) != 0;
+    };
     if (usock::PeerIsSameUser(fd) && usock::ReadLine(fd, &line)) {
         Value msg;
         if (json::Parse(line, &msg) && msg.isObject()) {

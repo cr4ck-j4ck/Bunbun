@@ -111,6 +111,8 @@ if(BUNBUN_BUILD_UI AND NPM)
     add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/settings-ui/index.html
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}/settings-ui sh -c "[ -d node_modules ] || npm ci --silent"
+        # A checkout shared with Windows has only the Windows builds of Vite's native parts.
+        COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/scripts/ui-linux-deps.sh
         COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_CURRENT_SOURCE_DIR}/settings-ui
                 npm run build --silent -- --outDir ${CMAKE_BINARY_DIR}/settings-ui --emptyOutDir
         DEPENDS ${UI_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/settings-ui/index.html

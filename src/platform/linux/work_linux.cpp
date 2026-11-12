@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <ctime>
 
+#include "calendar_linux.h"
 #include "features_linux.h"
 #include "platform.h"
 #include "settings.h"
@@ -82,6 +83,8 @@ int WorkDate() {
 
 std::string U(const std::wstring& w) { return bb::plat::Utf8(w); }
 
+std::vector<int> g_daysOff;  // Work.DaysOff (holidays and leave you picked), as on Windows
+
 }  // namespace
 
 void LoadSettings() {
@@ -98,6 +101,7 @@ void LoadSettings() {
     w.breakMinutes = std::clamp(s::GetInt(L"Work.BreakMinutes"), 1, 120);
     w.goalMinutes = std::clamp(s::GetInt(L"Work.GoalHours"), 0, 24) * 60;
     w.autoStart = s::GetBool(L"Work.AutoStart");
+    g_daysOff = wk::ParseDatesOff(s::Get(L"Work.DaysOff"));
     g_reminders = s::GetBool(L"Work.Reminders");
     w.blocks.clear();
     if (wk::StudyOn(g_use)) {  // Study: the timetable replaces the office hours and lunch
@@ -156,6 +160,12 @@ std::vector<std::pair<std::string, std::string>> Tick() {
     }
     if (dt > 60) in.idle = std::max(in.idle, static_cast<double>(dt));  // the PC slept: away, not work
     dt = std::clamp(dt, 0, 12 * 3600);
+    // Days off: the ones you picked, and all-day leave events from your calendar link.
+    g_tracker.schedule.daysOff = g_daysOff;
+    if (g_tracker.schedule.autoStart) {
+        const std::vector<int>& leave = bb::lcal::LeaveDays();
+        g_tracker.schedule.daysOff.insert(g_tracker.schedule.daysOff.end(), leave.begin(), leave.end());
+    }
     const wk::Day before = g_tracker.day;
     const wk::Phase was = g_tracker.phase;
     const unsigned events = g_tracker.Tick(in, dt);

@@ -20,6 +20,7 @@
 #include "../src/common/water.h"
 #include "../src/common/backup.h"
 #include "../src/common/work.h"
+#include "../src/common/ics.h"
 
 #include <algorithm>
 #include <cwchar>
@@ -103,6 +104,9 @@ static void TestWork() {
     {
         const std::vector<int> off = wk::ParseDatesOff(L"2026-12-25, 2026-12-30..2027-01-02");
         Check(off.size() == 5 && off[1] == 20261230 && off[3] == 20270101, "days off parsing");
+        // The settings app's calendar tags holidays with "h" ("2026-12-25h"): still a day off.
+        const std::vector<int> tagged = wk::ParseDatesOff(L"2026-11-14h, 2026-12-30..2027-01-01h, 2026-12-01");
+        Check(tagged.size() == 5 && tagged[0] == 20261114 && tagged[3] == 20270101 && tagged[4] == 20261201, "holiday-tagged days off");
         wk::Tracker h;
         h.schedule.daysOff = off;
         wk::Input xmas;
@@ -336,8 +340,42 @@ static void TestScreenTime() {
     CHECK(s.week.size() == 7 && s.week.back().today && s.week.back().day == 20261106 && s.week.front().day == 20261031);
     CHECK(s.week[4].day == 20261104 && s.week[4].seconds == 3600 && s.week[4].weekday == 3);
     CHECK(s.averageSeconds == (2450 + 3600 + 5) / 3);
+    // A clicked bar: that day's apps and total; the week still ends today.
+    const st::Summary wed = st::Summarize(log, 20261106, 20261104);
+    CHECK(wed.todaySeconds == 3600 && wed.apps.size() == 1 && wed.apps[0].percent == 100);
+    CHECK(wed.week.back().day == 20261106 && wed.week.back().today && wed.averageSeconds == s.averageSeconds);
     CHECK(st::Duration(0) == L"0m" && st::Duration(30) == L"<1m" && st::Duration(45 * 60) == L"45m");
     CHECK(st::Duration(2 * 3600 + 5 * 60) == L"2h 5m" && st::Duration(3600) == L"1h");
+}
+
+// All-day events (holidays, leave) are kept for the calendar and days off, but are never meetings.
+static void TestIcsAllDay() {
+    namespace ics = bb::ics;
+    const ics::ToEpochFn utc = [](const ics::WallTime& w, const std::wstring&) { return ics::UtcEpoch(w); };
+    const std::wstring cal =
+        L"BEGIN:VCALENDAR\r\n"
+        L"BEGIN:VEVENT\r\nUID:a\r\nDTSTART;VALUE=DATE:20261114\r\nDTEND;VALUE=DATE:20261115\r\nSUMMARY:Diwali\r\nEND:VEVENT\r\n"
+        L"BEGIN:VEVENT\r\nUID:b\r\nDTSTART;VALUE=DATE:20261116\r\nDTEND;VALUE=DATE:20261118\r\nSUMMARY:Annual leave\r\nEND:VEVENT\r\n"
+        L"BEGIN:VEVENT\r\nUID:c\r\nDTSTART:20261116T100000Z\r\nDTEND:20261116T103000Z\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n"
+        L"END:VCALENDAR\r\n";
+    const std::vector<ics::Event> events = ics::Parse(cal, utc);
+    CHECK(events.size() == 3);
+    const double from = ics::UtcEpoch({2026, 11, 10, 0, 0, 0}), to = ics::UtcEpoch({2026, 11, 30, 0, 0, 0});
+    const auto meetings = ics::MeetingsBetween(events, from, to, utc);
+    CHECK(meetings.size() == 1 && meetings[0].title == L"Standup");
+    CHECK(ics::NextMeeting(events, from, utc).title == L"Standup" || !ics::NextMeeting(events, from, utc).valid);
+    const auto all = ics::MeetingsBetween(events, from, to, utc, true);
+    CHECK(all.size() == 3);
+    auto ymd = [](double e) {
+        const long long d = static_cast<long long>(e) / 86400;
+        int y, m, dd;
+        ics::CivilFromDays(d, &y, &m, &dd);
+        return y * 10000 + m * 100 + dd;
+    };
+    const std::vector<int> leave = ics::LeaveDates(all, ymd);
+    CHECK(leave.size() == 2 && leave[0] == 20261116 && leave[1] == 20261117);
+    const std::wstring text = ics::AllDayText(all, ymd);
+    CHECK(text == L"20261114\tE\tDiwali\n20261116\tL\tAnnual leave\n20261117\tL\tAnnual leave\n");
 }
 
 static void TestChimes() {
@@ -824,6 +862,7 @@ int wmain(int argc, wchar_t** argv) {
     TestStudioChat();
     TestAppList();
     TestWater();
+    TestIcsAllDay();
     TestChimes();
     TestScreenTime();
     TestEdgeLightOn();

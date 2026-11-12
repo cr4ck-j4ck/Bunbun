@@ -81,10 +81,15 @@ void QuitIsland() {
     if (!tray) return;
     DWORD pid = 0;
     GetWindowThreadProcessId(tray, &pid);
-    HANDLE proc = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
+    HANDLE proc = pid ? OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid) : nullptr;
     PostMessageW(tray, WM_APP + 0x501, 0, 0);
     if (proc) {
-        WaitForSingleObject(proc, 15000);
+        // One that hangs on the way out is ended: left running, it keeps bunbun.exe locked (the
+        // installer fails) and the new Bunbun only says "already running", so the update stalls.
+        if (WaitForSingleObject(proc, 15000) == WAIT_TIMEOUT) {
+            TerminateProcess(proc, 1);
+            WaitForSingleObject(proc, 5000);
+        }
         CloseHandle(proc);
     }
 }
@@ -96,10 +101,13 @@ void CloseSettings() {
         if (!w) return;
         DWORD pid = 0;
         GetWindowThreadProcessId(w, &pid);
-        HANDLE proc = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
+        HANDLE proc = pid ? OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid) : nullptr;
         PostMessageW(w, WM_CLOSE, 0, 0);
         if (proc) {
-            WaitForSingleObject(proc, 3000);
+            if (WaitForSingleObject(proc, 3000) == WAIT_TIMEOUT && tries >= 2) {  // a third ignored close: end it
+                TerminateProcess(proc, 1);
+                WaitForSingleObject(proc, 3000);
+            }
             CloseHandle(proc);
         } else {
             Sleep(150);
@@ -277,11 +285,13 @@ void UpdateWorker(std::wstring appDir) {
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi))
         return Fail(L"Couldn't start the installer.");
-    WaitForSingleObject(pi.hProcess, 10 * 60 * 1000);
+    const bool finished = WaitForSingleObject(pi.hProcess, 10 * 60 * 1000) == WAIT_OBJECT_0;
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    if (!finished)  // still running (STILL_ACTIVE is 259): say so instead of a bare code
+        return Fail(L"The installer is taking too long. Wait a few minutes, then start Bunbun from the Start menu.");
     DeleteFileW(setup.c_str());
     if (code != 0) return Fail(L"The installer didn't finish (code " + std::to_wstring(code) + L").");
 

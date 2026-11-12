@@ -1138,7 +1138,7 @@ enum class StudioAction {
     WeatherUnitToggle, WeatherCitySearch,  // Bunbun: Studio Weather page
     RadioToggle, RadioSettings,            // Bunbun: Wi-Fi / Bluetooth on the System page
     ClipFilter, ClipSelect, ClipSearch, ClipPin, ClipDelete, ClipSave,  // Bunbun: Clipboard page
-    ScreenTimeRefresh, ScreenTimeLimitEdit,  // Bunbun: Screen Time page
+    ScreenTimeRefresh, ScreenTimeLimitEdit, ScreenTimeDay,  // Bunbun: Screen Time page
     WorkStart, WorkPause, WorkResume, WorkBreak, WorkDone, WorkReport, WorkPage,  // Bunbun: Work mode
 };
 
@@ -1694,6 +1694,9 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             break;
         case StudioAction::ScreenTimeRefresh:
             break;  // redraws below
+        case StudioAction::ScreenTimeDay:  // a bar of the week: that day's time and apps
+            screentime::ShowDay(hit.arg);
+            break;
         case StudioAction::ScreenTimeLimitEdit: {
             // Bunbun: a click on the limit steps it: none, 2 h, 4 h ... 12 h, none.
             static const int kSteps[] = {0, 2, 4, 6, 8, 10, 12};

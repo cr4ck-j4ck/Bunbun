@@ -454,6 +454,11 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         SetAutostart(args.getBool("on"));
         return Value::Bool(AutostartEnabled());
     }
+    if (cmd == "calendarDays") {  // all-day events from the calendar links (calendar-days.txt, written by the island)
+        std::string text;
+        bb::plat::ReadFile(bb::plat::StateDir() + "/calendar-days.txt", &text);
+        return Value::String(text);
+    }
     if (cmd == "workDays") {  // Work mode's report (work.txt in the state folder)
         std::string text;
         bb::plat::ReadFile(backups::PathFor("work.txt"), &text);

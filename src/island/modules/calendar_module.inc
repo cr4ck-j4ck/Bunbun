@@ -122,7 +122,7 @@ MeetingSnapshot NextMeeting(const std::vector<Event>& events, double now) {
 // times, for the Calendar page.
 std::vector<CalendarItem> Between(const std::vector<Event>& events, double from, double to) {
     std::vector<CalendarItem> out;
-    for (const bb::ics::Meeting& m : bb::ics::MeetingsBetween(events, from, to, ToEpoch))
+    for (const bb::ics::Meeting& m : bb::ics::MeetingsBetween(events, from, to, ToEpoch, true))  // Bunbun: all-day too
         out.push_back({m.startsAt, m.endsAt, m.title});
     std::sort(out.begin(), out.end(), [](const CalendarItem& a, const CalendarItem& b) { return a.startsAt < b.startsAt; });
     return out;
@@ -184,6 +184,37 @@ bool Fetch(std::wstring url, std::wstring* out) {
 
 }  // namespace Ics
 
+// Bunbun: the all-day events (holidays, festivals, leave) for the settings app's days-off
+// calendar, in calendar-days.txt next to settings.ini: "yyyymmdd<TAB>L|E<TAB>title" per
+// day, L when the title says leave / vacation / PTO / OOO / day off (work mode skips those
+// days by itself). Written only when it changes.
+void PublishCalendarDays(const std::vector<CalendarItem>& items) {
+    std::vector<bb::ics::Meeting> allDay;
+    for (const CalendarItem& it : items)
+        if (it.endsAt - it.startsAt >= 20 * 3600.0) allDay.push_back({true, it.title, L"", it.startsAt, it.endsAt, true});
+    const std::wstring out = bb::ics::AllDayText(allDay, [](double e) {
+        ULARGE_INTEGER u;
+        u.QuadPart = static_cast<ULONGLONG>((e + 11644473600.0) * 1e7);
+        FILETIME utc{u.LowPart, u.HighPart}, local;
+        SYSTEMTIME st;
+        FileTimeToLocalFileTime(&utc, &local);
+        FileTimeToSystemTime(&local, &st);
+        return st.wYear * 10000 + st.wMonth * 100 + st.wDay;
+    });
+    static std::wstring last = L"\x01";
+    if (out == last) return;
+    last = out;
+    std::wstring path = bb::SettingsPath();
+    path.erase(path.find_last_of(L"\\/"));
+    path += L"\\calendar-days.txt";
+    const std::string utf8 = winrt::to_string(out);
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(f, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(f);
+}
+
 // Fetches every few minutes, re-picks the next meeting every 20 s (so it moves
 // on when one ends) and publishes it to g_state.meeting.
 DWORD WINAPI CalendarThreadProc(void*) {
@@ -225,6 +256,7 @@ DWORD WINAPI CalendarThreadProc(void*) {
         // Bunbun: the weeks around now, for the Calendar page's month and week views.
         std::vector<CalendarItem> range = Ics::Between(events, EpochNow() - 42 * 86400.0, EpochNow() + 70 * 86400.0);
         next.fetchFailed = failed;
+        PublishCalendarDays(range);  // Bunbun: the settings app's days-off calendar
         {
             std::lock_guard lock(g_stateMutex);
             const bool changed = next.valid != g_state.meeting.valid || next.startsAt != g_state.meeting.startsAt ||

@@ -147,6 +147,11 @@ function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
   if CurPageID <> wpReady then exit;
+  // Silent installs are Bunbun's one-click updates. Inno calls this function for them too,
+  // and with the Local AI task remembered from the first install, a missing model meant a
+  // silent 1.1 GB download behind "Installing...": the update looked stuck. Updates keep
+  // what's there; the settings app sets up Local AI and WebView2 ships with Windows 11.
+  if WizardSilent then exit;
   if not WebView2Installed then
     GotWebView2 := Fetch(WebView2Url, WebView2File, '', 'The WebView2 Runtime (needed by the settings window)');
   if WizardIsTaskSelected('localai') and not FileExists(ModelPath) then

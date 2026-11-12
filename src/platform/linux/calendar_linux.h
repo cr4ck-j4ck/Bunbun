@@ -18,6 +18,8 @@ const bb::ics::Meeting& Next();                // the next meeting within two da
 std::vector<bb::ics::Meeting> Today();         // today's meetings, in start order
 int AlertMinutes();                            // 0 = no meeting pill
 bool FetchFailed();
+// The days of all-day leave events (leave, vacation, PTO, OOO, day off) in the links, around now.
+const std::vector<int>& LeaveDays();
 
 // The meeting pill: from AlertMinutes before a meeting until 5 min after it started,
 // unless you put it away.

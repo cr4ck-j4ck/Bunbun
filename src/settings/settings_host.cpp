@@ -1092,6 +1092,11 @@ Value Dispatch(const std::string& cmd, const Value& args, std::string* err) {
         backups::ReadBytes(backups::PathFor("accent.txt"), &text);
         return Value::String(text.size() >= 7 && text[0] == '#' ? text.substr(0, 7) : std::string());
     }
+    if (cmd == "calendarDays") {  // Bunbun: all-day events from the calendar link (calendar-days.txt, written by the island)
+        std::string text;
+        backups::ReadBytes(backups::PathFor("calendar-days.txt"), &text);
+        return Value::String(text);
+    }
     if (cmd == "workDays") {  // Bunbun: Work mode's report (work.txt next to settings.ini)
         std::string text;
         backups::ReadBytes(backups::PathFor("work.txt"), &text);

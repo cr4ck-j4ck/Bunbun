@@ -283,13 +283,33 @@ struct View {
     st::Summary summary;
     std::vector<PixelsRef> icons;  // one per summary.apps entry (may be empty)
     uint64_t iconGeneration = 0;
+    int shownDay = 0;  // 0 = today, else the yyyymmdd the page shows
 };
+
+// The day the page shows (a click on one of the week's bars); 0 = today. Render thread.
+// It goes back to today two minutes after the last click, so the page doesn't open on an old day.
+int g_shownDay = 0;
+double g_shownAt = 0.0;
+
+void ShowDay(int day) {
+    g_shownDay = day == Today() || day == g_shownDay ? 0 : day;  // the same bar again: back to today
+    g_shownAt = NowSeconds();
+    g_layoutDirty = true;
+}
 
 View GetView() {
     std::lock_guard lock(g_mutex);
     LoadLocked();
     View v;
-    v.summary = st::Summarize(g_log, Today());
+    if (g_shownDay && NowSeconds() - g_shownAt > 120.0) g_shownDay = 0;
+    v.summary = st::Summarize(g_log, Today(), g_shownDay);
+    bool inWeek = false;  // a day that has left the week (midnight passed) shows today again
+    for (const st::DayTotal& d : v.summary.week) inWeek |= d.day == g_shownDay;
+    if (g_shownDay && !inWeek) {
+        g_shownDay = 0;
+        v.summary = st::Summarize(g_log, Today());
+    }
+    v.shownDay = g_shownDay;
     for (const st::AppTime& a : v.summary.apps) {
         WantLocked(a.key, a.path);
         auto it = g_resolved.find(a.key);

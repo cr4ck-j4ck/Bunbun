@@ -520,7 +520,8 @@ DWORD WINAPI ConnectivityThreadProc(void*) {
         }
         g_layoutDirty = true;
         const bool wanted = NowSeconds() - g_connectivityWantedAt.load(std::memory_order_relaxed) < 3.0;
-        timeout = wanted ? 2000 : INFINITE;
+        // Closed: once a minute, so the island opens on a current battery and radio state.
+        timeout = wanted ? 2000 : 60000;
     }
     if (wlan) WlanCloseHandle(wlan, nullptr);
     winrt::uninit_apartment();

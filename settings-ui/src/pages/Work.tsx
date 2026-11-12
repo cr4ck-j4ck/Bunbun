@@ -1,4 +1,4 @@
-import { Bot, Briefcase, Check, Coffee, FileImage, FileText, Flame, GraduationCap, Layers, Plus, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { Bot, Briefcase, Check, ChevronLeft, ChevronRight, Coffee, FileImage, FileText, Flame, GraduationCap, Layers, Plus, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../bridge";
 import { useStore } from "../store";
@@ -96,6 +96,111 @@ function Days() {
       {DAYS.map((d, i) => (
         <button key={d} className={`chip ${on.has(d) ? "on" : ""}`} onClick={() => toggle(d)}>{DAY_NAMES[i]}</button>
       ))}
+    </div>
+  );
+}
+
+// Days off as a calendar: click days to mark leave or a holiday. Saved in Work.DaysOff as
+// dates and ranges ("2026-12-25h" = holiday, plain = leave; the island reads both as days off).
+// All-day events from the calendar link (public holidays, leave) come from calendar-days.txt.
+type Off = Map<number, "L" | "H">;
+const dayNum = (y: number, m: number, d: number) => y * 10000 + (m + 1) * 100 + d;
+const nextDay = (n: number) => {
+  const d = new Date(Math.floor(n / 10000), Math.floor(n / 100) % 100 - 1, n % 100 + 1);
+  return dayNum(d.getFullYear(), d.getMonth(), d.getDate());
+};
+const iso = (n: number) => `${Math.floor(n / 10000)}-${String(Math.floor(n / 100) % 100).padStart(2, "0")}-${String(n % 100).padStart(2, "0")}`;
+
+export function parseDaysOff(text: string): Off {
+  const out: Off = new Map();
+  const date = (t: string) => { const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t.trim()); return m ? dayNum(+m[1], +m[2] - 1, +m[3]) : 0; };
+  for (const part of text.split(/[,;\n ]+/)) {
+    if (!part) continue;
+    const kind = /h$/i.test(part) ? "H" : "L";
+    const [a, b] = part.split("..");
+    const from = date(a), to = b ? date(b) : from;
+    for (let d = from, n = 0; d && to && d <= to && n < 366; d = nextDay(d), n++) out.set(d, kind);
+  }
+  return out;
+}
+
+export function serializeDaysOff(off: Off): string {
+  const days = [...off.keys()].sort((x, y) => x - y);
+  const parts: string[] = [];
+  for (let i = 0; i < days.length; ) {
+    let j = i;
+    while (j + 1 < days.length && days[j + 1] === nextDay(days[j]) && off.get(days[j + 1]) === off.get(days[i])) j++;
+    const tag = off.get(days[i]) === "H" ? "h" : "";
+    parts.push(i === j ? iso(days[i]) + tag : `${iso(days[i])}..${iso(days[j])}${tag}`);
+    i = j + 1;
+  }
+  return parts.join(", ");
+}
+
+function DaysOffCalendar() {
+  const s = useStore();
+  const now = new Date();
+  const today = dayNum(now.getFullYear(), now.getMonth(), now.getDate());
+  const [view, setView] = useState({ y: now.getFullYear(), m: now.getMonth() });
+  const [mode, setMode] = useState<"L" | "H">("L");
+  const [google, setGoogle] = useState<Map<number, { leave: boolean; titles: string[] }>>(new Map());
+  useEffect(() => {
+    call<string>("calendarDays").then((text) => {
+      const g = new Map<number, { leave: boolean; titles: string[] }>();
+      for (const line of String(text || "").split("\n")) {
+        const [d, k, title] = line.split("\t");
+        if (!d || !title) continue;
+        const e = g.get(+d) ?? { leave: false, titles: [] };
+        e.leave ||= k === "L";
+        if (!e.titles.includes(title)) e.titles.push(title);
+        g.set(+d, e);
+      }
+      setGoogle(g);
+    }).catch(() => {});
+  }, []);
+  const off = parseDaysOff(s.get("Work.DaysOff") || "");
+  const click = (d: number) => {
+    const next = new Map(off);
+    if (next.get(d) === mode) next.delete(d); else next.set(d, mode);
+    s.set("Work.DaysOff", serializeDaysOff(next));
+  };
+  const first = new Date(view.y, view.m, 1);
+  const lead = (first.getDay() + 6) % 7;  // Monday first
+  const len = new Date(view.y, view.m + 1, 0).getDate();
+  const cells: (number | null)[] = [...Array(lead).fill(null), ...Array.from({ length: len }, (_, i) => dayNum(view.y, view.m, i + 1))];
+  const step = (k: number) => setView((v) => { const d = new Date(v.y, v.m + k, 1); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const ahead = [...off.keys()].filter((d) => d >= today).length;
+  return (
+    <div className="daysoff">
+      <div className="daysoff-head">
+        <button className="daysoff-nav" aria-label="Previous month" onClick={() => step(-1)}><ChevronLeft size={16} /></button>
+        <strong>{first.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</strong>
+        <button className="daysoff-nav" aria-label="Next month" onClick={() => step(1)}><ChevronRight size={16} /></button>
+        <span style={{ flex: 1 }} />
+        <Segmented value={mode} options={[{ value: "L", label: "Leave" }, { value: "H", label: "Holiday" }]} onChange={(v) => setMode(v as "L" | "H")} />
+      </div>
+      <div className="daysoff-grid">
+        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => <span key={d} className="daysoff-dow">{d}</span>)}
+        {cells.map((d, i) => {
+          if (!d) return <span key={`e${i}`} />;
+          const kind = off.get(d);
+          const g = google.get(d);
+          const tip = [kind === "H" ? "Holiday" : kind === "L" ? "Leave" : "", ...(g?.titles ?? [])].filter(Boolean).join(" · ");
+          return (
+            <button key={d} title={tip || undefined} aria-pressed={!!kind} onClick={() => click(d)}
+              className={`daysoff-day${kind === "L" ? " leave" : kind === "H" ? " holiday" : ""}${g ? (g.leave ? " g-leave" : " g-event") : ""}${d === today ? " today" : ""}`}>
+              {d % 100}
+              {g && <i />}
+            </button>
+          );
+        })}
+      </div>
+      <div className="daysoff-legend">
+        <span><b className="leave" />Leave</span>
+        <span><b className="holiday" />Holiday</span>
+        <span><b className="g" />From your calendar link</span>
+        <span>{ahead ? `${ahead} day${ahead === 1 ? "" : "s"} off ahead` : "No days off ahead"}</span>
+      </div>
     </div>
   );
 }
@@ -752,7 +857,8 @@ export function Work({ openReport = false }: { openReport?: boolean }) {
             <Row label="Start with my hours" description="Work mode starts and stops with your hours. Off, it only runs when you press Start on the island." settingKeys={["Work.AutoStart"]}>
               <Toggle on={s.bool("Work.AutoStart")} onChange={(v) => s.set("Work.AutoStart", v)} />
             </Row>
-            <Setting k="Work.DaysOff" />
+            <Row label="Days off" description="Work mode doesn't start by itself on these days. Pick Leave or Holiday, then click days. All-day events from your calendar link (your country's holidays, and leave, vacation, PTO or OOO) show with a dot; the leave ones count by themselves." settingKeys={["Work.DaysOff"]}><span /></Row>
+            <DaysOffCalendar />
           </Section>
           <Section title="Goal & breaks">
             <Row label="Daily goal" description="Fills the ring on the island. 0 uses your hours less lunch." settingKeys={["Work.GoalHours"]}>

@@ -115,6 +115,11 @@ async function mock(cmd: string, args: Record<string, unknown>): Promise<unknown
       await new Promise((r) => setTimeout(r, 600));
       return { current: __APP_VERSION__, checked: true, latest: __APP_VERSION__, newer: false,
                url: "https://github.com/iaryasharma/Bunbun/releases/latest" };
+    case "calendarDays": {  // a made-up holiday and leave for the design preview
+      const d = new Date(Date.now() + 9 * 864e5), e = new Date(Date.now() + 16 * 864e5);
+      const n = (x: Date) => x.getFullYear() * 10000 + (x.getMonth() + 1) * 100 + x.getDate();
+      return `${n(d)}\tE\tGuru Nanak Jayanti\n${n(e)}\tL\tLeave\n`;
+    }
     case "workDays": {  // a made-up week for the design preview
       const out = [];
       const from = Number(args.from), to = Number(args.to);

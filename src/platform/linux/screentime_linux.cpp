@@ -176,10 +176,26 @@ void Tick() {
     if (now - g_savedAt > 60) Save();
 }
 
+int g_shownDay = 0;
+double g_shownAt = 0;
+
+void ShowDay(int day) {
+    g_shownDay = day == Today() || day == g_shownDay ? 0 : day;
+    g_shownAt = Mono();
+}
+
 View Get() {
     Load();
     View v;
-    v.summary = st::Summarize(g_log, Today());
+    if (g_shownDay && Mono() - g_shownAt > 120) g_shownDay = 0;
+    v.summary = st::Summarize(g_log, Today(), g_shownDay);
+    bool inWeek = false;  // a day that has left the week (midnight passed) shows today again
+    for (const st::DayTotal& d : v.summary.week) inWeek |= d.day == g_shownDay;
+    if (g_shownDay && !inWeek) {
+        g_shownDay = 0;
+        v.summary = st::Summarize(g_log, Today());
+    }
+    v.shownDay = g_shownDay;
     for (const st::AppTime& a : v.summary.apps) {
         // Apps from earlier sessions: look them up from the program path saved with them.
         if (!g_apps.count(a.key) && !a.path.empty()) Resolve(a.key, bb::plat::Utf8(a.path), "");

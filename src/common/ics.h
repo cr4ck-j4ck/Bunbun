@@ -46,6 +46,7 @@ struct Meeting {
     bool valid = false;
     std::wstring title, joinUrl;
     double startsAt = 0.0, endsAt = 0.0;  // Unix seconds
+    bool allDay = false;  // a holiday, leave or birthday: never a meeting pill
 };
 
 // Days since 1970-01-01 for a civil date, and back (Howard Hinnant's algorithms).
@@ -188,8 +189,9 @@ inline std::vector<Event> Parse(const std::wstring& ics, const ToEpochFn& toEpoc
         if (!in) continue;
         if (line == L"END:VEVENT") {
             in = false;
-            if (ev.startEpoch <= 0.0 || ev.allDay || ev.cancelled) continue;
-            ev.duration = endEpoch > ev.startEpoch ? endEpoch - ev.startEpoch : 30.0 * 60.0;
+            // All-day events are kept (holidays and leave count as days off); meetings skip them.
+            if (ev.startEpoch <= 0.0 || ev.cancelled) continue;
+            ev.duration = endEpoch > ev.startEpoch ? endEpoch - ev.startEpoch : (ev.allDay ? 86400.0 : 30.0 * 60.0);
             ev.join = FindJoinLink(text);
             events.push_back(std::move(ev));
             continue;
@@ -249,7 +251,9 @@ inline std::vector<Event> Parse(const std::wstring& ics, const ToEpochFn& toEpoc
 }
 
 // Every meeting instance overlapping [from, to), repeating ones expanded, in start order.
-inline std::vector<Meeting> MeetingsBetween(const std::vector<Event>& events, double from, double to, const ToEpochFn& toEpoch) {
+// withAllDay adds the all-day events (the Calendar page's month, days off); meetings never have them.
+inline std::vector<Meeting> MeetingsBetween(const std::vector<Event>& events, double from, double to, const ToEpochFn& toEpoch,
+                                            bool withAllDay = false) {
     std::vector<Meeting> out;
     // Instances moved or cancelled one by one carry a RECURRENCE-ID; the series
     // must skip their original times.
@@ -260,9 +264,10 @@ inline std::vector<Meeting> MeetingsBetween(const std::vector<Event>& events, do
     auto consider = [&](const Event& e, double start) {
         const double end = start + e.duration;
         if (end <= from || start >= to) return;
-        out.push_back({true, e.summary.empty() ? std::wstring(L"Meeting") : e.summary, e.join, start, end});
+        out.push_back({true, e.summary.empty() ? std::wstring(L"Meeting") : e.summary, e.join, start, end, e.allDay});
     };
     for (const Event& e : events) {
+        if (e.allDay && !withAllDay) continue;
         if (e.isOverride || e.freq.empty() || (e.freq != L"DAILY" && e.freq != L"WEEKLY")) {
             consider(e, e.startEpoch);  // single meetings; other rules: just the first instance
             continue;
@@ -304,6 +309,41 @@ inline std::vector<Meeting> MeetingsBetween(const std::vector<Event>& events, do
 inline Meeting NextMeeting(const std::vector<Event>& events, double now, const ToEpochFn& toEpoch) {
     const std::vector<Meeting> all = MeetingsBetween(events, now, now + 2.0 * 86400.0, toEpoch);
     return all.empty() ? Meeting{} : all.front();
+}
+
+// A title that means a day off work: leave, vacation, PTO, OOO, out of office, day off.
+inline bool LooksLikeLeave(const std::wstring& title) {
+    std::wstring t = title;
+    for (wchar_t& c : t) c = static_cast<wchar_t>(towlower(c));
+    for (const wchar_t* w : {L"leave", L"vacation", L"pto", L"ooo", L"out of office", L"day off"})
+        if (t.find(w) != std::wstring::npos) return true;
+    return false;
+}
+
+// The all-day events as the settings app's days-off calendar reads them (calendar-days.txt):
+// "yyyymmdd<TAB>L|E<TAB>title" per day, L for leave. `ymdOf` turns Unix seconds into the local
+// yyyymmdd. Each day is taken an hour in, so a daylight-saving change can't slip it a day.
+inline std::wstring AllDayText(const std::vector<Meeting>& items, const std::function<int(double)>& ymdOf) {
+    std::wstring out;
+    for (const Meeting& m : items) {
+        if (!m.allDay) continue;
+        std::wstring title = m.title;
+        for (wchar_t& c : title)
+            if (c == L'\t' || c == L'\r' || c == L'\n') c = L' ';
+        const bool leave = LooksLikeLeave(title);
+        for (double e = m.startsAt + 3600.0; e < m.endsAt && out.size() < 200000; e += 86400.0)
+            out += std::to_wstring(ymdOf(e)) + (leave ? L"\tL\t" : L"\tE\t") + title + L"\n";
+    }
+    return out;
+}
+
+// The days of the all-day leave events (work mode doesn't start on them).
+inline std::vector<int> LeaveDates(const std::vector<Meeting>& items, const std::function<int(double)>& ymdOf) {
+    std::vector<int> out;
+    for (const Meeting& m : items)
+        if (m.allDay && LooksLikeLeave(m.title))
+            for (double e = m.startsAt + 3600.0; e < m.endsAt && out.size() < 400; e += 86400.0) out.push_back(ymdOf(e));
+    return out;
 }
 
 }  // namespace bb::ics

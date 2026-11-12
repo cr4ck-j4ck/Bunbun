@@ -863,7 +863,7 @@
             // The card's line is short: "Until 18:00" while working, else the state.
             std::wstring line = phase == bb::work::Phase::Working && !w.study ? L"Until " + bb::work::FormatClock(w.end) : WorkStatusLine(w, now);
             if (w.study && phase == bb::work::Phase::Working && !w.subject.empty() && w.blockEnd >= 0)
-                line = w.subject + L"  B7 " + bb::work::FormatClock(w.blockEnd);  // short on the card
+                line = w.subject + L" \x00B7 " + bb::work::FormatClock(w.blockEnd);  // short on the card
             SText(line, D2D1::RectF(r.left + 14, r.bottom - 26, r.right - 46, r.bottom - 10), SFBody, D2D1::ColorF(1, 1, 1, 0.8f));
             const D2D1_POINT_2F bc = D2D1::Point2F(r.right - 27, r.bottom - 27);
             const bool going = phase == bb::work::Phase::Working || phase == bb::work::Phase::Overtime ||
@@ -1598,7 +1598,15 @@
         SFillRound(r1, 12.0f, cardBg);
         {
             barsGlyph(D2D1::Point2F(r1.left + 16.0f, r1.top + 14.0f));
-            SText(L"Today", D2D1::RectF(r1.left + 24.0f, r1.top + 8.0f, r1.left + 80.0f, r1.top + 22.0f), SFSmall, grey);
+            // Bunbun: a clicked bar shows that day ("Mon 9 Nov"); a click on it again goes back to today.
+            std::wstring dayTitle = L"Today";
+            if (view.shownDay) {
+                static const wchar_t* kWd[] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
+                static const wchar_t* kMo[] = {L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun", L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"};
+                dayTitle = std::wstring(kWd[bst::Weekday(view.shownDay) % 7]) + L" " + std::to_wstring(view.shownDay % 100) + L" " +
+                           kMo[std::clamp(view.shownDay / 100 % 100 - 1, 0, 11)];
+            }
+            SText(dayTitle, D2D1::RectF(r1.left + 24.0f, r1.top + 8.0f, r1.left + 140.0f, r1.top + 22.0f), SFSmall, view.shownDay ? accent : grey);
             const float cw = (leftW - 24.0f) / 3.0f;  // Bunbun: three even columns from x + 16
             const bool tight = cw < 84.0f;             // Classic's narrower page: shorter labels
             // Bunbun: a figure that doesn't fit its column steps down a size ("2h 12m" ran into the next one).
@@ -1607,14 +1615,14 @@
                 SText(s, D2D1::RectF(l, r1.top + (f == SFBig ? 24.0f : 30.0f), rgt, r1.top + 54.0f), f, white);
             };
             figure(bst::Duration(sum.todaySeconds), r1.left + 16.0f, r1.left + 16.0f + cw);
-            SText(tight ? L"Today" : L"Screen time", D2D1::RectF(r1.left + 16.0f, r1.top + 54.0f, r1.left + 16.0f + cw, r1.top + 68.0f), SFSmall, grey);
+            SText(tight ? (view.shownDay ? L"That day" : L"Today") : L"Screen time", D2D1::RectF(r1.left + 16.0f, r1.top + 54.0f, r1.left + 16.0f + cw, r1.top + 68.0f), SFSmall, grey);
 
             // The middle: what's left of your daily limit (Bunbun.ScreenTimeLimit), with a
             // ring; without a limit, your daily average this week. A click changes the limit.
             const float mx = r1.left + 16.0f + cw;
             const long long limit = static_cast<long long>(settings.screenTimeLimit) * 3600;
             std::wstring big, small;
-            if (limit > 0) {
+            if (limit > 0 && !view.shownDay) {
                 const D2D1_POINT_2F rc = D2D1::Point2F(mx + 6.0f, r1.top + 40.0f);
                 const float frac = Clamp(static_cast<float>(sum.todaySeconds) / static_cast<float>(limit), 0.0f, 1.0f);
                 if (ID2D1SolidColorBrush* b = AcquireBrush(D2D1::ColorF(1, 1, 1, 0.18f))) target_->DrawEllipse(D2D1::Ellipse(rc, 11.0f, 11.0f), b, 2.2f);
@@ -1629,7 +1637,7 @@
                 big = bst::Duration(sum.averageSeconds);
                 small = tight ? L"Average" : L"Daily average";
             }
-            const float tx = limit > 0 ? mx + 24.0f : mx;
+            const float tx = limit > 0 && !view.shownDay ? mx + 24.0f : mx;
             const float c3 = r1.left + 16.0f + cw * 2.0f;
             figure(big, tx, c3);
             SText(small, D2D1::RectF(tx, r1.top + 54.0f, c3, r1.top + 68.0f), SFSmall, grey);
@@ -1659,14 +1667,18 @@
             for (size_t i = 0; i < sum.week.size() && i < 7; ++i) {
                 const bst::DayTotal& d = sum.week[i];
                 const float dx = r2.left + 10.0f + i * dw, cx = dx + dw * 0.5f;
-                SText(kDays[d.weekday % 7], D2D1::RectF(dx, r2.bottom - 18.0f, dx + dw, r2.bottom - 4.0f), SFSmall, d.today ? white : grey, 1);
+                const bool shown = view.shownDay ? d.day == view.shownDay : d.today;  // Bunbun: the day the cards show
+                const float hov = SHover(StudioAction::ScreenTimeDay, d.day);
+                if (hov > 0.01f) SFillRound(D2D1::RectF(dx + 2.0f, r2.top + 28.0f, dx + dw - 2.0f, r2.bottom - 2.0f), 8.0f, D2D1::ColorF(1, 1, 1, 0.05f * hov));
+                SHit(D2D1::RectF(dx, r2.top + 28.0f, dx + dw, r2.bottom), StudioAction::ScreenTimeDay, d.day);
+                SText(kDays[d.weekday % 7], D2D1::RectF(dx, r2.bottom - 18.0f, dx + dw, r2.bottom - 4.0f), SFSmall, shown ? white : grey, 1);
                 if (d.seconds >= 60) {
                     // Bars scale to the busiest day; today's is white, the others grey.
                     const float h = std::max(6.0f, tallest * static_cast<float>(d.seconds) / static_cast<float>(most));
-                    SFillRound(D2D1::RectF(cx - 9.0f, baseline - h, cx + 9.0f, baseline), 4.5f, d.today ? white : SCol(0x8e8e93, 0.55f));
+                    SFillRound(D2D1::RectF(cx - 9.0f, baseline - h, cx + 9.0f, baseline), 4.5f, shown ? white : SCol(0x8e8e93, 0.55f));
                     const long long m = d.seconds / 60;
                     SText(m >= 60 ? std::to_wstring(m / 60) + L"h" : std::to_wstring(m) + L"m",
-                          D2D1::RectF(dx - 2.0f, baseline - h - 16.0f, dx + dw + 2.0f, baseline - h - 2.0f), SFSmall, d.today ? white : grey, 1);
+                          D2D1::RectF(dx - 2.0f, baseline - h - 16.0f, dx + dw + 2.0f, baseline - h - 2.0f), SFSmall, shown ? white : grey, 1);
                 } else {
                     SFillRound(D2D1::RectF(cx - 8.0f, baseline - 1.5f, cx + 8.0f, baseline + 1.5f), 1.0f, SCol(0x38383a));
                 }
@@ -1679,7 +1691,7 @@
         barsGlyph(D2D1::Point2F(r3.left + 16.0f, r3.top + 14.0f));
         SText(L"By app", D2D1::RectF(r3.left + 24.0f, r3.top + 8.0f, r3.left + 90.0f, r3.top + 22.0f), SFSmall, grey);
         if (sum.apps.empty()) {
-            SText(settings.screenTime ? L"Counting from now" : L"Screen Time is off",
+            SText(view.shownDay ? L"Nothing that day" : settings.screenTime ? L"Counting from now" : L"Screen Time is off",
                   D2D1::RectF(r3.left + 14.0f, r3.top + 60.0f, r3.right - 14.0f, r3.top + 80.0f), SFBody, white, 1);
             SText(L"Apps show here as you use them", D2D1::RectF(r3.left + 14.0f, r3.top + 82.0f, r3.right - 14.0f, r3.top + 98.0f),
                   SFSmall, grey, 1);

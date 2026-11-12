@@ -46,6 +46,7 @@ enum class Action {
     VolumeMute, VolumeSet,  // the System page's volume card
     WorkStart, WorkPause, WorkResume, WorkBreak, WorkDone, WorkReport, WorkPage,  // Work mode (work_linux.cpp)
     ScreenTimeLimit,        // the Screen Time page's limit: steps through 2 to 12 hours
+    ScreenTimeDay,          // a bar of the week: that day's time and apps (index = yyyymmdd)
     ClipFilter, ClipSelect, ClipDelete,  // the Clipboard page's two panels
 };
 struct Hit {

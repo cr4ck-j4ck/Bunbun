@@ -129,14 +129,16 @@ struct DayTotal {
 struct Summary {
     long long todaySeconds = 0;
     int appsUsed = 0;              // apps used a minute or more today
-    std::vector<AppTime> apps;     // today, most used first
+    std::vector<AppTime> apps;     // today (or the day shown), most used first
     std::vector<DayTotal> week;    // the seven days ending today, oldest first
     long long averageSeconds = 0;  // over the days of the week with any use
 };
 
-inline Summary Summarize(const Log& log, int today) {
+// `shown`: the day whose apps and total to give (a click on the week's bars); 0 = today.
+// The week always ends today.
+inline Summary Summarize(const Log& log, int today, int shown = 0) {
     Summary s;
-    if (auto it = log.days.find(today); it != log.days.end()) {
+    if (auto it = log.days.find(shown ? shown : today); it != log.days.end()) {
         for (const auto& [key, e] : it->second) {
             s.todaySeconds += e.seconds;
             if (e.seconds >= 60) ++s.appsUsed;
