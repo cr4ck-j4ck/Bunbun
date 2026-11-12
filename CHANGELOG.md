@@ -5,6 +5,39 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1]
+
+### Added
+- **Pick days off on a calendar.** Settings → Work day has a month calendar instead of a text box:
+  choose Leave or Holiday and click the days. All-day events from your calendar link (your
+  country's public holidays, and leave, vacation, PTO or OOO) show as dots with their names, so you
+  can see what's already off; the leave ones count by themselves. Windows and Linux (Linux now
+  honours days off and the holidays setting too).
+- **Screen Time: click a day.** A click on one of the last 7 days' bars shows that day's screen
+  time and apps; click it again (or wait two minutes) to go back to today. Windows and Linux.
+
+### Fixed
+- **Holidays and all-day leave from your calendar never showed up.** The calendar reader skipped
+  every all-day event, so the public holidays added in 0.4.0 never reached the Calendar page and
+  all-day leave never kept work mode from starting. They now show as "All day" on the Calendar
+  page and count as days off; they still never pop up as a meeting. Windows and Linux.
+- **A question or approval answered in Claude's or Antigravity's own window stayed on the
+  island.** The island now notices within half a second that the agent stopped waiting and takes
+  the card away; a question also goes as soon as the agent moves on to its next step. Windows and
+  Linux.
+- **The one-click update could seem stuck on "Installing…".** The silent installer re-ran the
+  first install's downloads, so with Local AI picked back then and its model gone it quietly
+  downloaded 1.1 GB, and after 10 minutes the window gave up with "code 259". Updates now skip
+  those downloads. A Bunbun or settings window that doesn't close when asked is now ended, so it
+  can't keep files locked or leave the new version saying "already running". Windows.
+- **Battery, Wi-Fi and Bluetooth on the Studio island went stale.** The header's battery and the
+  System page's Wi-Fi and Bluetooth only updated on the old Wi-Fi & Bluetooth page, which Studio
+  no longer has, so they showed the values from when Bunbun started (93% after charging to 100%,
+  a radio as off after turning it on). They now update every 2 seconds while the island is open,
+  and once a minute while it's closed. Windows.
+- A middle dot in the Work card's "subject · until" line was a stray character that cut the text
+  short.
+
 ## [0.4.0]
 ### Added
 - **Choose Ask Bun's AI engine.** Besides the built-in offline model, use Ollama on your PC or Google
