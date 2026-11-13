@@ -5,6 +5,8 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2]
+
 ### Added
 - **Brightness slider on the System page (Windows).** On a laptop (or any PC with a built-in panel) the Volume
   card becomes Volume & Brightness with a slider for each; drag or tap to set the panel's brightness (never
