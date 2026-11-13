@@ -719,7 +719,7 @@ bool QueryWordsHit(const std::wstring& query, const WebHit& h) {
         if (iswalnum(c)) w += c; else flush();
     }
     flush();
-    return words == 0 || hits * 5 >= words * 3 && (words < 3 || hits >= 2);   // most of the question's words must appear
+    return words == 0 || (hits * 5 >= words * 3 && (words < 3 || hits >= 2));   // most of the question's words must appear
 }
 
 std::vector<WebHit> ParseDuckDuckGoHtml(const std::string& html, size_t limit) {

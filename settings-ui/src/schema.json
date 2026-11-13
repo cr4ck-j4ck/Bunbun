@@ -2014,7 +2014,7 @@
  "Bunbun.MirrorPage": {
   "default": "false",
   "name": "Mirror page",
-  "description": "A camera preview page for a quick look before a call. The camera only turns on when you press Turn on camera, and off when you leave the page. Nothing is saved.",
+  "description": "A camera and sound check page for a quick look before a call. The camera and the microphone only turn on when you press Turn on camera or Test mic, and off when you leave the page; you can pick which microphone and speaker to test and play a test tone. Nothing is saved.",
   "options": []
  },
  "Bunbun.ScreenTime": {

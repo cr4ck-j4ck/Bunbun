@@ -5,6 +5,34 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Brightness slider on the System page (Windows).** On a laptop (or any PC with a built-in panel) the Volume
+  card becomes Volume & Brightness with a slider for each; drag or tap to set the panel's brightness (never
+  below 5 %). External monitors have no such control, so there the card keeps its big volume number.
+- **Sound check on the Mirror page (Windows).** Besides the camera preview, the page now has a microphone
+  test with a live level and a speaker test tone. Pick which microphone and speaker to test with the arrows
+  (the name is tinted when it isn't Windows' default); **Settings** opens Windows' Sound settings to change
+  the default. The microphone only opens while you test and stops when you leave the page. Nothing is recorded.
+
+### Fixed
+- **Fewer repeated privacy alerts.** Joining a call raised a separate "is using your camera / microphone / screen"
+  alert for each device, and an app whose detection flickered re-alerted over and over. Now one alert per app
+  (nothing more within 30 seconds, and the same device not again within 5 minutes); the dots still show every device.
+- **No Do Not Disturb pill for Windows' own full-screen switching.** Windows turns Do Not Disturb on and off around
+  full-screen apps by itself, and each flip showed the pill. It now only shows for a change you made.
+- **The game overlay shows the screen-share dot** along with the microphone and camera ones.
+- **Discord shares left over from an older Discord run** (for example after a crash) no longer light the blue dot.
+- **No more pointless lyrics lookups for chat apps.** WhatsApp and similar apps publish a media session titled
+  just with their name; Bunbun asked the lyrics services about it and logged a failure each time. They are skipped now.
+- **Discord screen shares now light the blue privacy dot.** Windows no longer records Discord's
+  screen capture on recent builds, and Discord shows no sharing bar, so Bunbun missed it (with mic
+  and camera on you saw two dots). Bunbun now reads the start and stop of a share from Discord's own
+  log (Stable, PTB and Canary). Windows only.
+
+### Changed
+- `island_core.cpp` is split into topic files under `src/island/modules/` (no behaviour change);
+  see `docs/architecture.md`.
+
 ## [0.4.1]
 
 ### Added

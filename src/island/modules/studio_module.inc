@@ -1129,6 +1129,8 @@ enum class StudioAction {
     ClipCopy, ClipClear, NoteToggle, NoteEdit, Settings, Close,
     ChatChip, ChatNew, ChatPanel, ColorPicker, ModelCycle, AgentReply,
     FocusWheel, FocusPreset, FocusAdd5, FocusPause, FocusPage, OpenTab, OpenLink, MirrorStart, MirrorStop, HomeEdit, HomeTileCycle,
+    Brightness,  // Bunbun: the System page's brightness slider
+    SoundMic, SoundTest, SoundOpen, SoundDevice, SoundToggle,  // Bunbun: the Mirror page's sound check (sound_check_module.inc)
     WaterAdd, WaterUndo, WaterRefill,  // Bunbun: the Water page
     ReminderDone, ReminderSnooze, ReminderExpand,  // Bunbun: the reminder pill (todos_draw.inc)
     CalPrev, CalNext, CalToday, CalView, CalOpenWeek,  // Bunbun: the Calendar page's month / week views
@@ -1336,6 +1338,23 @@ int StudioHitAt(const MediaContentPoint& pt) {
 
 // Left button down: a press on the volume slider starts a drag (the window
 // captures the mouse until the button comes up).
+// Bunbun: the System page's brightness slider. The built-in panel only (SetPanelBrightness);
+// never below 5 %, so a stray drag can't leave the screen black.
+bool g_studioBrightDrag = false;
+float g_studioBrightPending = -1.0f;  // last level sent while dragging, to skip repeats
+D2D1_RECT_F g_studioBrightRect{};
+
+void SetStudioBrightness(const MediaContentPoint& pt) {
+    const float w = g_studioBrightRect.right - g_studioBrightRect.left;
+    if (!pt.valid || w <= 1.0f) return;
+    const float level = Clamp((pt.x - g_studioBrightRect.left) / w, 0.05f, 1.0f);
+    if (std::fabs(level - g_studioBrightPending) < 0.01f) return;
+    g_studioBrightPending = level;
+    g_suppressBrightnessUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
+    SetPanelBrightness(static_cast<int>(std::round(level * 100.0f)));
+    g_layoutDirty = true;
+}
+
 bool HandleStudioButtonDown(HWND hwnd, int x, int y) {
     if (g_studioHits.empty()) return false;
     const MediaContentPoint pt = StudioPointFromClient(x, y);
@@ -1355,6 +1374,14 @@ bool HandleStudioButtonDown(HWND hwnd, int x, int y) {
         Timers::g_ringCenter = D2D1::Point2F((hit.rect.left + hit.rect.right) * 0.5f, (hit.rect.top + hit.rect.bottom) * 0.5f);
         SetCapture(hwnd);
         Timers::SetCountdownFromPoint(pt);
+        return true;
+    }
+    if (hit.action == StudioAction::Brightness) {  // Bunbun: start dragging the brightness slider
+        g_studioBrightDrag = true;
+        g_studioBrightRect = hit.rect;
+        g_studioBrightPending = -1.0f;
+        SetCapture(hwnd);
+        SetStudioBrightness(pt);
         return true;
     }
     if (hit.action != StudioAction::Volume || hit.arg != 0) return false;
@@ -1389,6 +1416,13 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
         }
         return true;
     }
+    if (g_studioBrightDrag) {  // Bunbun: the end of a brightness drag
+        g_studioBrightDrag = false;
+        ReleaseCapture();
+        SetStudioBrightness(StudioPointFromClient(x, y));
+        g_studioBrightPending = -1.0f;
+        return true;
+    }
     if (g_studioVolumeDrag) {
         g_suppressVolumeNotificationUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
         g_studioVolumeDrag = false;
@@ -1415,6 +1449,11 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
                 g_studioVolumeLevelPending = -1.0f;
                 SetStudioVolume(pt);
             }
+            break;
+        case StudioAction::Brightness:  // Bunbun: a tap on the brightness slider (drags start in HandleStudioButtonDown)
+            g_studioBrightRect = hit.rect;
+            g_studioBrightPending = -1.0f;
+            SetStudioBrightness(pt);
             break;
         case StudioAction::PlayPause:
             SendMediaTransportCommand(1);
@@ -1502,6 +1541,22 @@ bool HandleStudioClick(HWND hwnd, int x, int y) {
             break;
         case StudioAction::MirrorStop:
             Mirror::Stop();
+            break;
+        case StudioAction::SoundMic:
+            if (SoundCheck::g_running.load()) SoundCheck::StopMic();
+            else SoundCheck::StartMic();
+            break;
+        case StudioAction::SoundTest:
+            SoundCheck::TestSpeaker();
+            break;
+        case StudioAction::SoundOpen:
+            SoundCheck::OpenSoundSettings();
+            break;
+        case StudioAction::SoundDevice:  // arg: 0 / 1 = microphone previous / next, 2 / 3 = speaker
+            SoundCheck::CycleDevice(hit.arg < 2, (hit.arg & 1) ? 1 : -1);
+            break;
+        case StudioAction::SoundToggle:
+            SoundCheck::g_open = !SoundCheck::g_open.load();
             break;
         case StudioAction::TimerMode:  // Bunbun: the Timers page
             Timers::SetMode(static_cast<bb::timers::Mode>(std::clamp(hit.arg, 0, bb::timers::kModeCount - 1)));
@@ -1744,6 +1799,10 @@ struct StudioHoverSpot { bool on = false; StudioAction action{}; int arg = 0; };
 StudioHoverSpot g_studioHover;
 void HandleStudioMouseMove(int x, int y) {
     const MediaContentPoint pt = StudioPointFromClient(x, y);
+    if (g_studioBrightDrag) {  // Bunbun: dragging the brightness slider
+        SetStudioBrightness(pt);
+        return;
+    }
     if (g_studioVolumeDrag) {
         g_suppressVolumeNotificationUntil.store(NowSeconds() + 1.5, std::memory_order_relaxed);
         SetStudioVolume(pt);

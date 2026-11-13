@@ -10,7 +10,7 @@
 // a fallback: on recent Windows builds it stops recording desktop apps.
 // Screen: Windows has no live API for "who is capturing the screen", so this
 // combines what can be read live: OBS's own log (recording / streaming /
-// replay buffer), the "… is sharing your screen" bar Chromium browsers open
+// replay buffer), Discord's renderer log (Go Live), the "… is sharing your screen" bar Chromium browsers open
 // while sharing, and ConsentStore as a fallback (stale on recent builds).
 //
 // Runs on its own thread every 1.5 s, so it keeps working while the render loop
@@ -245,6 +245,105 @@ void ObsOutputs(std::vector<std::wstring>* out) {
     }
 }
 
+// ── Screen: Discord ─────────────────────────────────────────────────────────
+// Discord's screen share (Go Live) leaves no capture record, sharing bar or GPU
+// encoder load on some PCs, but its renderer log says when it starts one:
+// "[startStreamWithSource] Starting stream for source ...". The share then rides
+// a second RTC connection ("..., stream)]") that talks every ~14 s and logs
+// "Destroy RTCConnection" when it ends. So a start with no destroy after it and
+// a fresh stream line means this PC is sharing right now. Stable, PTB and Canary.
+// shortcut: this reads Discord's log wording (build 1.0.9267); replace it if Discord
+// ever offers a real API for "is sharing".
+// When the oldest running Discord process started (FILETIME ticks); 0 when none runs.
+// Its log is appended across runs, so a share line from before this run is a leftover.
+ULONG64 DiscordRunningSince() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    ULONG64 oldest = 0;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        if (_wcsicmp(pe.szExeFile, L"Discord.exe") != 0 && _wcsicmp(pe.szExeFile, L"DiscordPTB.exe") != 0 &&
+            _wcsicmp(pe.szExeFile, L"DiscordCanary.exe") != 0)
+            continue;
+        HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!p) continue;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (GetProcessTimes(p, &created, &exited, &kernel, &user)) {
+            const ULONG64 t = (static_cast<ULONG64>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+            if (oldest == 0 || t < oldest) oldest = t;
+        }
+        CloseHandle(p);
+    }
+    CloseHandle(snap);
+    return oldest;
+}
+
+void DiscordShares(std::vector<std::wstring>* out) {
+    const ULONG64 runningSince = DiscordRunningSince();
+    if (runningSince == 0) return;  // Discord isn't running: nothing to share from
+    PWSTR roaming = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roaming))) return;
+    const std::wstring base = roaming;
+    CoTaskMemFree(roaming);
+    FILETIME nowFt;
+    GetSystemTimeAsFileTime(&nowFt);
+    const ULONG64 now = (static_cast<ULONG64>(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime;
+    constexpr ULONG64 kSecond = 10000000ull;
+    for (const wchar_t* folder : {L"discord", L"discordptb", L"discordcanary"}) {
+        const std::wstring path = base + L"\\" + folder + L"\\logs\\renderer_js.log";
+        WIN32_FILE_ATTRIBUTE_DATA info;
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) continue;
+        const ULONG64 written = (static_cast<ULONG64>(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime;
+        if (now > written && now - written > 90 * kSecond) continue;  // quiet log: no live connection
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        LARGE_INTEGER size{};
+        GetFileSizeEx(f, &size);
+        constexpr LONGLONG kTail = 256 * 1024;  // the latest share's markers are near the end
+        LARGE_INTEGER from{};
+        from.QuadPart = std::max<LONGLONG>(0, size.QuadPart - kTail);
+        SetFilePointerEx(f, from, nullptr, FILE_BEGIN);
+        std::string text(static_cast<size_t>(size.QuadPart - from.QuadPart), '\0');
+        DWORD read = 0;
+        ReadFile(f, text.data(), static_cast<DWORD>(text.size()), &read, nullptr);
+        CloseHandle(f);
+        text.resize(read);
+        const size_t start = text.rfind("[startStreamWithSource] Starting stream for source");
+        if (start == std::string::npos) continue;
+        const size_t destroy = text.rfind(", stream)] Destroy RTCConnection");
+        if (destroy != std::string::npos && destroy > start) continue;  // the share ended
+        const size_t beat = text.rfind("[RTCControlSocket(stream)]");
+        if (beat == std::string::npos || beat < start) continue;
+        // A line starts with its local time, "[2026-11-13 20:23:36.588]".
+        auto lineTime = [&](size_t pos, ULONG64* ticks) {
+            const size_t ls = text.rfind('\n', pos);
+            const char* stamp = text.c_str() + (ls == std::string::npos ? 0 : ls + 1);
+            int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+            if (sscanf(stamp, "[%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6) return false;
+            SYSTEMTIME local{};
+            local.wYear = static_cast<WORD>(y);
+            local.wMonth = static_cast<WORD>(mo);
+            local.wDay = static_cast<WORD>(d);
+            local.wHour = static_cast<WORD>(h);
+            local.wMinute = static_cast<WORD>(mi);
+            local.wSecond = static_cast<WORD>(s);
+            SYSTEMTIME utc{};
+            FILETIME ft{};
+            if (!TzSpecificLocalTimeToSystemTime(nullptr, &local, &utc) || !SystemTimeToFileTime(&utc, &ft)) return false;
+            *ticks = (static_cast<ULONG64>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+            return true;
+        };
+        ULONG64 beatTime = 0, startTime = 0;
+        if (!lineTime(beat, &beatTime) || !lineTime(start, &startTime)) continue;
+        if (now > beatTime && now - beatTime > 60 * kSecond) continue;  // the stream connection has gone quiet
+        // A share logged before this Discord run began is a leftover (a crash logs no "Destroy").
+        if (startTime + 2 * kSecond < runningSince) continue;
+        AddUnique(out, L"Discord");
+        return;
+    }
+}
+
 // ── Screen: browsers sharing a screen, window or tab ────────────────────────
 // Chromium browsers (Google Meet in Chrome or Edge, and the like) open a small
 // "<site> is sharing your screen." bar for as long as they share; its window title
@@ -408,6 +507,7 @@ void UpdatePrivacyIndicators() {
     const bool screenDot = settings.privacyDots && settings.privacyDotsScreen;
     if (screenDot || settings.liveMood) {  // Bunbun: Live needs it even with the dots off
         ObsOutputs(&screen);
+        DiscordShares(&screen);  // Bunbun: Discord's own log, the only signal its Go Live gives on some PCs
         BrowserSharingBars(&screen);
         ScreenRecorders(&screen);
         ConsentStoreApps(L"graphicsCaptureProgrammatic", &screen);
@@ -431,10 +531,23 @@ void UpdatePrivacyIndicators() {
     int alertKind = 0;
     // Bunbun: no alert for Bunbun's own use (the Mirror page's camera); the dot still lights.
     static const std::wstring s_self = ProcessName(GetCurrentProcessId());
+    // Bunbun: one alert per app is enough. Joining a call lights the camera, mic and screen a few
+    // seconds apart, and a detector that flickers made the same app "start" again and again; the dots
+    // still show every device. So: nothing more for an app within 30 s of its last alert, and the same
+    // app + device not again within 5 minutes.
+    static std::map<std::wstring, double> s_alertedAt;
+    const double alertNow = NowSeconds();
+    auto recentlyAlerted = [&](const std::wstring& key, double window) {
+        const auto it = s_alertedAt.find(key);
+        return it != s_alertedAt.end() && alertNow - it->second < window;
+    };
     auto started = [&](const std::vector<std::wstring>& now, const std::vector<std::wstring>& before, int kind, const wchar_t* what) {
         for (const std::wstring& app : now) {
             if (std::find(before.begin(), before.end(), app) != before.end() || !alert.empty()) continue;
             if (_wcsicmp(app.c_str(), s_self.c_str()) == 0 || _wcsnicmp(app.c_str(), L"bunbun", 6) == 0) continue;
+            const std::wstring byKind = std::to_wstring(kind) + L"|" + app;
+            if (recentlyAlerted(app, 30.0) || recentlyAlerted(byKind, 300.0)) continue;
+            s_alertedAt[app] = s_alertedAt[byKind] = alertNow;
             alert = app + L" " + Loc(L"is using your") + L" " + Loc(what);
             if (kind == 2) {
                 // Bunbun: the screen says how: streaming (OBS live), recording, or sharing.

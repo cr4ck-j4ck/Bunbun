@@ -1439,6 +1439,23 @@ float LyricsGapNoteMix(const LyricsLines& lines, int idx, int64_t posMs) {
     return std::min(1.0f, past / kLyricsGapFadeMs);
 }
 
+// Bunbun: chat apps publish a media session titled just with their name ("(3) WhatsApp", no
+// artist). There are no lyrics for that, and each lookup was a pointless network round trip
+// that ended in "request FAILED". An exact name match only, so a song called "Discord" with
+// an artist is still looked up.
+bool IsChatAppSession(const std::wstring& title, const std::wstring& artist) {
+    if (!artist.empty()) return false;
+    std::wstring t = ToLowerCopy(title);
+    if (!t.empty() && t[0] == L'(') {  // an unread count: "(3) WhatsApp"
+        const size_t close = t.find(L')');
+        if (close != std::wstring::npos) t.erase(0, close + 1);
+    }
+    while (!t.empty() && t[0] == L' ') t.erase(0, 1);
+    for (const wchar_t* app : {L"whatsapp", L"telegram", L"messenger", L"discord", L"slack"})
+        if (t == app) return true;
+    return false;
+}
+
 DWORD WINAPI LyricsThreadProc(void*) {
     WaitForSingleObject(g_stopEvent, 4000);
 
@@ -1483,7 +1500,7 @@ DWORD WINAPI LyricsThreadProc(void*) {
         };
         readMedia();
 
-        if (!available || title.empty()) {
+        if (!available || title.empty() || IsChatAppSession(title, artist)) {
             if (!lastTitle.empty()) {
                 lastTitle.clear();
                 lastArtist.clear();
@@ -1511,7 +1528,7 @@ DWORD WINAPI LyricsThreadProc(void*) {
             // Title / artist / duration don't always update together. Let them settle.
             if (WaitForSingleObject(g_stopEvent, 1500) != WAIT_TIMEOUT) break;
             readMedia();
-            if (!available || title.empty()) continue;
+            if (!available || title.empty() || IsChatAppSession(title, artist)) continue;
         }
         retryAtSec = 0.0;
         lastTitle = title;

@@ -843,7 +843,7 @@
     $description: How loud Bunbun's chimes are, on top of your Windows volume.
   - MirrorPage: false
     $name: Mirror page
-    $description: A camera preview page for a quick look before a call. The camera only turns on when you press Turn on camera, and off when you leave the page. Nothing is saved.
+    $description: A camera and sound check page for a quick look before a call. The camera and the microphone only turn on when you press Turn on camera or Test mic, and off when you leave the page; you can pick which microphone and speaker to test and play a test tone. Nothing is saved.
   - ScreenTime: true
     $name: Screen Time page
     $description: How long each app has been in front today and over the last week, with each app's own name and icon. Counts while you're at the PC (not when it's locked or you've been away two minutes, unless the app is full screen). Kept on this PC only, in screentime.tsv next to settings.ini.

@@ -1789,14 +1789,15 @@
                 std::lock_guard lock(Mirror::g_mutex);
                 err = Mirror::g_error;
             }
-            const float cx = (r.left + r.right) * 0.5f, cy = (r.top + r.bottom) * 0.5f;
-            SIcon(StudioPage::Mirror, D2D1::Point2F(cx, cy - 42), 34.0f, sky);
+            const float cx = (r.left + r.right) * 0.5f, cy = r.top + 60.0f;  // the sound panel takes the bottom 78 px
+            SIcon(StudioPage::Mirror, D2D1::Point2F(cx, cy - 42), 30.0f, sky);
             const D2D1_RECT_F b = D2D1::RectF(cx - 74, cy - 10, cx + 74, cy + 22);
             SFillRound(b, 16, D2D1::ColorF(1, 1, 1, SLerp(0.92f, 1.0f, SHover(StudioAction::MirrorStart))));
             SText(L"Turn on camera", b, SFLabel, SCol(0x141416), 1);
             SHit(b, StudioAction::MirrorStart);
             SText(err.empty() ? std::wstring(L"Only while this page is open. Nothing is saved.") : err,
-                  D2D1::RectF(r.left, cy + 32, r.right, cy + 50), SFSmall, err.empty() ? SCol(0x8e8e93) : SCol(0xff6961), 1);
+                  D2D1::RectF(r.left, cy + 28, r.right, cy + 44), SFSmall, err.empty() ? SCol(0x8e8e93) : SCol(0xff6961), 1);
+            DrawSoundPanel(r, false);
             return;
         }
         Mirror::KeepAlive();
@@ -1843,6 +1844,7 @@
         SFillRound(off, 13, D2D1::ColorF(0, 0, 0, SLerp(0.55f, 0.75f, SHover(StudioAction::MirrorStop))));
         SText(L"Turn off", off, SFLabel, SCol(0xffffff), 1);
         SHit(off, StudioAction::MirrorStop);
+        DrawSoundPanel(r, true);
     }
 
     // ── All apps page ──
@@ -2504,6 +2506,8 @@
     }
 
     // ── Bunbun: Studio System Page Redo (Vayli 2x2 layout) ──
+    int brightValue_ = -1;     // built-in panel brightness 0..100, -1 = none (a desktop monitor)
+    double brightAt_ = -10.0;  // when it was last read
     void DrawStudioSystemPage(const SharedState& state, D2D1_RECT_F rect, const Settings& settings, double now) {
         EnsureRoundStroke();
         studioOrigin_ = publishedOrigin_;
@@ -2710,8 +2714,20 @@
                 ? static_cast<int>(std::round(g_studioVolumeLevelPending * 100.0f))
                 : state.system.volumePercent;
 
+            // Bunbun: a built-in panel adds a brightness slider; the reading is refreshed once a second
+            // (an external monitor has none, and the card keeps its big volume number).
+            if (!g_studioBrightDrag && now - brightAt_ > 1.0) {
+                brightValue_ = CurrentPanelBrightness();
+                brightAt_ = now;
+            }
+            const bool hasBright = brightValue_ >= 0;
+            const int bright = (g_studioBrightDrag && g_studioBrightPending >= 0.0f)
+                ? static_cast<int>(std::round(g_studioBrightPending * 100.0f))
+                : brightValue_;
+
             SSpeaker(D2D1::Point2F(r4.left + 22.0f, r4.top + 14.0f), 13.0f, vol, state.system.volumeMuted, accent);
-            SText(L"Volume", D2D1::RectF(r4.left + 34.0f, r4.top + 8.0f, r4.left + 90.0f, r4.top + 22.0f), SFLabel, labelCol);
+            SText(hasBright ? L"Volume & Brightness" : L"Volume",
+                  D2D1::RectF(r4.left + 34.0f, r4.top + 8.0f, r4.left + (hasBright ? 150.0f : 90.0f), r4.top + 22.0f), SFLabel, labelCol);
 
             // Right header: Connected Bluetooth device name & its battery!
             if (!state.connectivity.connectedBtName.empty()) {
@@ -2719,13 +2735,41 @@
                 if (state.connectivity.connectedBtBattery >= 0) {
                     btStr += L" \x00B7 \U0001F50B " + std::to_wstring(state.connectivity.connectedBtBattery) + L"%"; // 🔋 %
                 }
-                SText(btStr, D2D1::RectF(r4.left + 50.0f, r4.top + 8.0f, r4.right - 14.0f, r4.top + 22.0f), SFSmall, green, 2);
+                SText(btStr, D2D1::RectF(r4.left + (hasBright ? 150.0f : 50.0f), r4.top + 8.0f, r4.right - 14.0f, r4.top + 22.0f), SFSmall, green, 2);
                 const float bw = std::min(r4.right - r4.left - 64.0f, SMeasure(btStr, SFSmall) + 8.0f);
                 SHit(D2D1::RectF(r4.right - 14.0f - bw, r4.top + 6.0f, r4.right - 10.0f, r4.top + 24.0f), StudioAction::RadioSettings, 1);
             } else if (!state.system.audioDeviceName.empty()) {  // Bunbun: only the real device name, never a made-up one
-                SText(state.system.audioDeviceName, D2D1::RectF(r4.left + 50.0f, r4.top + 8.0f, r4.right - 14.0f, r4.top + 22.0f), SFSmall, grey, 2);
+                SText(state.system.audioDeviceName, D2D1::RectF(r4.left + (hasBright ? 150.0f : 50.0f), r4.top + 8.0f, r4.right - 14.0f, r4.top + 22.0f), SFSmall, grey, 2);
             }
 
+            if (hasBright) {
+                // Two slim rows: [speaker / mute] ---o--- 80%   and   [sun] ---o--- 60%.
+                const float trackL = r4.left + 46.0f, trackR = r4.right - 52.0f;
+                auto sliderRow = [&](float y, int percent) {
+                    const float cy = y + 11.0f;
+                    SFillRound(D2D1::RectF(trackL, cy - 2.0f, trackR, cy + 2.0f), 2.0f, SCol(0x28282a));
+                    const float kx = trackL + (trackR - trackL) * std::clamp(percent / 100.0f, 0.0f, 1.0f);
+                    SFillRound(D2D1::RectF(trackL, cy - 2.0f, kx, cy + 2.0f), 2.0f, accent);
+                    if (ID2D1SolidColorBrush* kb = AcquireBrush(white)) target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(kx, cy), 5.5f, 5.5f), kb);
+                    SText(std::to_wstring(percent) + L"%", D2D1::RectF(trackR + 8.0f, y, r4.right - 12.0f, y + 22.0f), SFLabel, white, 2);
+                    return D2D1::RectF(trackL, y - 2.0f, trackR, y + 24.0f);
+                };
+                const float yVol = r4.top + 30.0f, yBri = r4.top + 58.0f;
+                const D2D1_RECT_F muteBtn = D2D1::RectF(r4.left + 14.0f, yVol, r4.left + 38.0f, yVol + 22.0f);
+                SFillRound(muteBtn, 11.0f, SCol(state.system.volumeMuted ? 0x501b1b : 0x242426));
+                SSpeaker(D2D1::Point2F(r4.left + 26.0f, yVol + 11.0f), 11.0f, vol, state.system.volumeMuted, white);
+                SHit(muteBtn, StudioAction::Volume, -1);
+                SHit(sliderRow(yVol, vol), StudioAction::Volume, 0);
+                // Sun: a disc with eight rays.
+                const D2D1_POINT_2F sun = D2D1::Point2F(r4.left + 26.0f, yBri + 11.0f);
+                if (ID2D1SolidColorBrush* sb = AcquireBrush(accent)) target_->FillEllipse(D2D1::Ellipse(sun, 3.4f, 3.4f), sb);
+                for (int k = 0; k < 8; ++k) {
+                    const float a = static_cast<float>(k) * 0.7853982f;
+                    SLine(D2D1::Point2F(sun.x + std::cos(a) * 5.8f, sun.y + std::sin(a) * 5.8f),
+                          D2D1::Point2F(sun.x + std::cos(a) * 8.0f, sun.y + std::sin(a) * 8.0f), accent, 1.2f);
+                }
+                SHit(sliderRow(yBri, bright), StudioAction::Brightness, 0);
+            } else {
             // Big Volume %
             SText(std::to_wstring(vol) + L"%", D2D1::RectF(r4.left + 16.0f, r4.top + 26.0f, r4.left + 100.0f, r4.top + 56.0f), SFBig, white);
 
@@ -2744,6 +2788,7 @@
                 target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(kx, r4.top + 68.0f), 5.5f, 5.5f), kb);
             }
             SHit(D2D1::RectF(slL, r4.top + 58.0f, slR, r4.top + 78.0f), StudioAction::Volume, 0);
+            }
         }
     }
 
