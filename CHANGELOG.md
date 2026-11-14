@@ -5,6 +5,9 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Linux: Settings → General → Check now asks GitHub for the latest release.** It used to say it couldn't check, without asking. It now shows "up to date" or the new version, with a Download button for the release page.
+
 ## [0.4.2]
 
 ### Added
